@@ -40,7 +40,7 @@ final class MuseClient: NSObject {
             muse.setPreset(.preset53)   // Muse S Athena — try .preset50/.preset55 if no packets
             muse.register(self as IXNMuseConnectionListener?)
             muse.register(self as IXNMuseDataListener?, type: .eeg)
-            muse.register(self as IXNMuseDataListener?, type: .horseshoe)
+            muse.register(self as IXNMuseDataListener?, type: .hsi)
             muse.register(self as IXNMuseDataListener?, type: .battery)
             muse.runAsynchronously()
         }
@@ -74,26 +74,25 @@ extension MuseClient: IXNMuseListener {
 // MARK: - IXNMuseConnectionListener
 
 extension MuseClient: IXNMuseConnectionListener {
-    func receive(_ packet: IXNMuseConnectionPacket?, muse: IXNMuse?) {
-        guard let p = packet else { return }
-        DispatchQueue.main.async { self.connectionState.send(p.currentConnectionState) }
+    func receiveMuseConnectionPacket(_ packet: IXNMuseConnectionPacket, muse: IXNMuse?) {
+        DispatchQueue.main.async { self.connectionState.send(packet.currentConnectionState) }
     }
 }
 
 // MARK: - IXNMuseDataListener
 
 extension MuseClient: IXNMuseDataListener {
-    func receive(_ packet: IXNMuseDataPacket?, muse: IXNMuse?) {
+    func receiveMuseDataPacket(_ packet: IXNMuseDataPacket?, muse: IXNMuse?) {
         guard let p = packet else { return }
         switch p.packetType() {
-        case .eeg:         handleEEG(p)
-        case .horseshoe:   handleHorseshoe(p)
-        case .battery:     handleBattery(p)
-        default:           break
+        case .eeg:      handleEEG(p)
+        case .hsi:      handleHorseshoe(p)
+        case .battery:  handleBattery(p)
+        default:        break
         }
     }
 
-    func receive(_ packet: IXNMuseArtifactPacket, muse: IXNMuse?) {
+    func receiveMuseArtifactPacket(_ packet: IXNMuseArtifactPacket, muse: IXNMuse?) {
         // artifact handling added in Gate 2
     }
 

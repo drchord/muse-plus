@@ -57,8 +57,7 @@ final class Probe: ObservableObject {
     }
 
     func connectFirst() {
-        let manager = IXNMuseManagerIos.sharedManager()
-        if let m = (manager.getMuses() as? [IXNMuse])?.first {
+        if let m = IXNMuseManagerIos.sharedManager().getMuses()?.first as? IXNMuse {
             client.connect(to: m)
         }
     }
