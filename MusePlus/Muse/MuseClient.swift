@@ -74,7 +74,7 @@ extension MuseClient: IXNMuseListener {
 // MARK: - IXNMuseConnectionListener
 
 extension MuseClient: IXNMuseConnectionListener {
-    func receiveMuseConnectionPacket(_ packet: IXNMuseConnectionPacket, muse: IXNMuse?) {
+    func receive(_ packet: IXNMuseConnectionPacket, muse: IXNMuse?) {
         DispatchQueue.main.async { self.connectionState.send(packet.currentConnectionState) }
     }
 }
@@ -82,7 +82,7 @@ extension MuseClient: IXNMuseConnectionListener {
 // MARK: - IXNMuseDataListener
 
 extension MuseClient: IXNMuseDataListener {
-    func receiveMuseDataPacket(_ packet: IXNMuseDataPacket?, muse: IXNMuse?) {
+    func receive(_ packet: IXNMuseDataPacket?, muse: IXNMuse?) {
         guard let p = packet else { return }
         switch p.packetType() {
         case .eeg:      handleEEG(p)
@@ -92,7 +92,7 @@ extension MuseClient: IXNMuseDataListener {
         }
     }
 
-    func receiveMuseArtifactPacket(_ packet: IXNMuseArtifactPacket, muse: IXNMuse?) {
+    func receive(_ packet: IXNMuseArtifactPacket, muse: IXNMuse?) {
         // artifact handling added in Gate 2
     }
 
