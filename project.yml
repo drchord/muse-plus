@@ -50,6 +50,7 @@ targets:
         FRAMEWORK_SEARCH_PATHS:
           - $(PROJECT_DIR)/Frameworks
         ENABLE_BITCODE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: MusePlus/MusePlus-Bridging-Header.h
 
   MusePlusTests:
     type: bundle.unit-test
