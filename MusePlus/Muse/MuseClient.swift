@@ -120,7 +120,7 @@ extension MuseClient: IXNMuseDataListener {
     }
 
     private func handleBattery(_ p: IXNMuseDataPacket) {
-        let pct = p.getBatteryValue(.ChargePercentageRemaining)
+        let pct = p.getBatteryValue(.chargePercentageRemaining)
         DispatchQueue.main.async { self.battery.send(pct) }
     }
 }
