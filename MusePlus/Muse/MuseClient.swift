@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import Muse
 
 final class MuseClient: NSObject {
 

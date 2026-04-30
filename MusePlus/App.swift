@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import Muse
 
 @main
 struct MusePlusApp: App {
