@@ -45,8 +45,6 @@ targets:
     dependencies:
       - framework: Frameworks/Muse.xcframework
         embed: true
-      - framework: Frameworks/SpotifyiOS.xcframework
-        embed: true
     settings:
       base:
         FRAMEWORK_SEARCH_PATHS:
