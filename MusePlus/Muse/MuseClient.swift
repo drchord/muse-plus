@@ -98,10 +98,10 @@ extension MuseClient: IXNMuseDataListener {
 
     private func handleEEG(_ p: IXNMuseDataPacket) {
         let channels: [Float] = [
-            Float(p.getEegChannelValue(.eeg1)),
-            Float(p.getEegChannelValue(.eeg2)),
-            Float(p.getEegChannelValue(.eeg3)),
-            Float(p.getEegChannelValue(.eeg4)),
+            Float(p.getEegChannelValue(.EEG1)),
+            Float(p.getEegChannelValue(.EEG2)),
+            Float(p.getEegChannelValue(.EEG3)),
+            Float(p.getEegChannelValue(.EEG4)),
         ]
         let pkt = EEGPacket(timestamp: Date().timeIntervalSinceReferenceDate, channels: channels)
         DispatchQueue.main.async { self.eegPacket.send(pkt) }
@@ -111,16 +111,16 @@ extension MuseClient: IXNMuseDataListener {
         // Horseshoe values: 1.0 = good contact, 2.0+ = poor
         let good: (IXNEeg) -> Bool = { p.getEegChannelValue($0) < 2.0 }
         let snap = FitCheckSnapshot(
-            tp9:  good(.eeg1),
-            af7:  good(.eeg2),
-            af8:  good(.eeg3),
-            tp10: good(.eeg4)
+            tp9:  good(.EEG1),
+            af7:  good(.EEG2),
+            af8:  good(.EEG3),
+            tp10: good(.EEG4)
         )
         DispatchQueue.main.async { self.fitCheck.send(snap) }
     }
 
     private func handleBattery(_ p: IXNMuseDataPacket) {
-        let pct = p.getBatteryValue(.batteryChargePercentage)
+        let pct = p.getBatteryValue(.ChargePercentageRemaining)
         DispatchQueue.main.async { self.battery.send(pct) }
     }
 }
