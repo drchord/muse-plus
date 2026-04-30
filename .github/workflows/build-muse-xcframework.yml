@@ -1,0 +1,58 @@
+name: Build Muse.xcframework (one-shot)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Select Xcode
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode_15*.app 2>/dev/null | sort -V | tail -1 \
+            || ls -d /Applications/Xcode.app)
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+      - name: Inspect fat binary
+        run: |
+          file Frameworks/Muse.framework/Muse
+          lipo -info Frameworks/Muse.framework/Muse
+
+      - name: Thin device (arm64) and simulator (x86_64) frameworks
+        run: |
+          set -e
+          mkdir -p build/device/Muse.framework build/sim/Muse.framework
+
+          # Copy framework shell (headers + Info.plist)
+          cp -R Frameworks/Muse.framework/Headers build/device/Muse.framework/
+          cp -R Frameworks/Muse.framework/Headers build/sim/Muse.framework/
+
+          # Thin binaries
+          lipo Frameworks/Muse.framework/Muse -thin arm64  -output build/device/Muse.framework/Muse
+          lipo Frameworks/Muse.framework/Muse -thin x86_64 -output build/sim/Muse.framework/Muse
+
+          echo "Device slice:"; file build/device/Muse.framework/Muse
+          echo "Sim slice:";    file build/sim/Muse.framework/Muse
+
+      - name: Create Muse.xcframework
+        run: |
+          set -e
+          xcodebuild -create-xcframework \
+            -framework build/device/Muse.framework \
+            -framework build/sim/Muse.framework \
+            -output Frameworks/Muse.xcframework
+
+          echo "Created:"
+          find Frameworks/Muse.xcframework -maxdepth 2 | head -20
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Muse.xcframework
+          path: Frameworks/Muse.xcframework
+          if-no-files-found: error

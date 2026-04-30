@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+*.swp
+
+# Xcode (generated from project.yml — never check in)
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+
+# CocoaPods (not used)
+Pods/
+Podfile.lock
+
+# Build artifacts
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Secrets
+*.p12
+*.p8
+*.mobileprovision
+
+# Tooling caches
+.swiftpm/
