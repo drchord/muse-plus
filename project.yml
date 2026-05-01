@@ -27,7 +27,7 @@ targets:
     info:
       path: MusePlus/Info.plist
       properties:
-        CFBundleDisplayName: Muse Plus
+        CFBundleDisplayName: "Muse++"
         UIBackgroundModes:
           - bluetooth-central
           - audio
