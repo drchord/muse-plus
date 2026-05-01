@@ -28,6 +28,8 @@ targets:
       path: MusePlus/Info.plist
       properties:
         CFBundleDisplayName: "Muse++"
+        CFBundleIconName: AppIcon
+        UIRequiresFullScreen: YES
         UIBackgroundModes:
           - bluetooth-central
           - audio

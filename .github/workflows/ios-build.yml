@@ -12,7 +12,7 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
 
     steps:
@@ -34,6 +34,25 @@ jobs:
 
       - name: Generate Xcode project
         run: xcodegen generate
+
+      - name: Generate app icons
+        run: |
+          python3 - <<'EOF'
+          import struct, zlib, os
+          def make_png(size, r=74, g=144, b=226):
+              def chunk(tag, data):
+                  crc = zlib.crc32(tag + data) & 0xffffffff
+                  return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', crc)
+              raw = b''.join(b'\x00' + bytes([r, g, b] * size) for _ in range(size))
+              ihdr = struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)
+              return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+          dest = 'MusePlus/Resources/Assets.xcassets/AppIcon.appiconset'
+          os.makedirs(dest, exist_ok=True)
+          for s in [40, 58, 60, 80, 87, 120, 180, 1024]:
+              with open(f'{dest}/AppIcon-{s}.png', 'wb') as f:
+                  f.write(make_png(s))
+          print('Icons generated')
+          EOF
 
       - name: Set build number
         run: |
