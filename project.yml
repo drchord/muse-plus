@@ -45,6 +45,8 @@ targets:
     dependencies:
       - framework: Frameworks/Muse.framework
         embed: false
+      - sdk: CoreBluetooth.framework
+      - sdk: libc++.tbd
     settings:
       base:
         FRAMEWORK_SEARCH_PATHS:
