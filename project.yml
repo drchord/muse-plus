@@ -43,7 +43,7 @@ targets:
           - CFBundleURLSchemes:
               - muse-monitor
     dependencies:
-      - framework: Frameworks/Muse.xcframework
+      - framework: Frameworks/Muse.framework
         embed: false
     settings:
       base:
