@@ -55,6 +55,7 @@ targets:
           - $(PROJECT_DIR)/Frameworks
         ENABLE_BITCODE: NO
         SWIFT_OBJC_BRIDGING_HEADER: MusePlus/MusePlus-Bridging-Header.h
+        TARGETED_DEVICE_FAMILY: "1"
 
   MusePlusTests:
     type: bundle.unit-test
