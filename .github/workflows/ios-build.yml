@@ -94,7 +94,7 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER="a33ca022-44cc-4431-92a2-cc5b5100db3a" \
             CURRENT_PROJECT_VERSION=${{ github.run_number }} \
-            | xcpretty
+            2>&1 | tee build/xcodebuild.log | xcpretty; STATUS=${PIPESTATUS[0]}; [ $STATUS -eq 0 ] || { tail -200 build/xcodebuild.log; exit $STATUS; }
 
       - name: Export and upload to TestFlight
         run: |

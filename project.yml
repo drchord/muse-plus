@@ -44,7 +44,7 @@ targets:
               - muse-monitor
     dependencies:
       - framework: Frameworks/Muse.xcframework
-        embed: true
+        embed: false
     settings:
       base:
         FRAMEWORK_SEARCH_PATHS:
