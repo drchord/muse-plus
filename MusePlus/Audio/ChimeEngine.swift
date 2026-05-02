@@ -3,70 +3,102 @@ import AVFoundation
 final class ChimeEngine {
     static let shared = ChimeEngine()
 
+    private let engine     = AVAudioEngine()
     private let player     = AVAudioPlayerNode()
     private let sampleRate: Double = 44100
 
     init() {
-        SharedAudioEngine.shared.addNode(player)
+        // Attach and connect BEFORE starting — no stop/restart needed
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        configureSession()
+        try? engine.start()
+        observeAudio()
     }
 
-    func playEnterDeep()    { play(fundamental: 432, decayRate: 0.9, duration: 3.5, amplitude: 0.35) }
-    func playExitDeep()     { play(fundamental: 528, decayRate: 1.8, duration: 2.0, amplitude: 0.25) }
-    func playContactLost()  { playGong(fundamental: 120, decayRate: 0.5, duration: 5.0, amplitude: 0.55) }
+    func playEnterDeep()   { play(fundamental: 432, decayRate: 0.9, duration: 3.5, amplitude: 0.35) }
+    func playExitDeep()    { play(fundamental: 528, decayRate: 1.8, duration: 2.0, amplitude: 0.25) }
+    func playContactLost() { playGong(fundamental: 120, decayRate: 0.5, duration: 5.0, amplitude: 0.55) }
 
     // MARK: - Bowl bell
 
     private func play(fundamental: Double, decayRate: Double, duration: Double, amplitude: Double) {
-        guard let buffer = makeBuffer(duration: duration) else { return }
-        let data = buffer.floatChannelData![0]
-        let n    = Int(buffer.frameLength)
-
-        let partials: [(ratio: Double, amp: Double)] = [
-            (1.000, 1.00), (2.756, 0.45), (5.404, 0.20), (8.900, 0.08)
-        ]
+        guard let buf = monoBuffer(duration: duration) else { return }
+        let data = buf.floatChannelData![0]
+        let n    = Int(buf.frameLength)
+        let partials: [(Double, Double)] = [(1.0, 1.0), (2.756, 0.45), (5.404, 0.2), (8.9, 0.08)]
         for i in 0..<n {
-            let t   = Double(i) / sampleRate
-            let env = exp(-decayRate * t) * min(t / 0.025, 1.0)
-            var s   = 0.0
-            for p in partials { s += p.amp * sin(2 * .pi * fundamental * p.ratio * t) }
-            data[i] = Float(s * env * amplitude)
+            let t = Double(i) / sampleRate
+            let e = exp(-decayRate * t) * min(t / 0.025, 1.0)
+            var s = 0.0
+            for (r, a) in partials { s += a * sin(2 * .pi * fundamental * r * t) }
+            data[i] = Float(s * e * amplitude)
         }
-        schedule(buffer)
+        schedule(buf)
     }
 
     // MARK: - Gong
 
     private func playGong(fundamental: Double, decayRate: Double, duration: Double, amplitude: Double) {
-        guard let buffer = makeBuffer(duration: duration) else { return }
-        let data = buffer.floatChannelData![0]
-        let n    = Int(buffer.frameLength)
-
-        let partials: [(ratio: Double, amp: Double, decay: Double)] = [
-            (1.000, 1.00, 0.40), (1.516, 0.70, 0.55),
-            (2.871, 0.35, 0.80), (4.465, 0.18, 1.10), (6.122, 0.10, 1.50)
+        guard let buf = monoBuffer(duration: duration) else { return }
+        let data = buf.floatChannelData![0]
+        let n    = Int(buf.frameLength)
+        let partials: [(Double, Double, Double)] = [
+            (1.0, 1.0, 0.4), (1.516, 0.7, 0.55), (2.871, 0.35, 0.8), (4.465, 0.18, 1.1), (6.122, 0.1, 1.5)
         ]
         for i in 0..<n {
-            let t      = Double(i) / sampleRate
-            let attack = min(t / 0.08, 1.0)
-            var s      = 0.0
-            for p in partials { s += p.amp * exp(-p.decay * decayRate * t) * sin(2 * .pi * fundamental * p.ratio * t) }
-            data[i] = Float(s * attack * amplitude)
+            let t = Double(i) / sampleRate
+            let a = min(t / 0.08, 1.0)
+            var s = 0.0
+            for (r, amp, d) in partials { s += amp * exp(-d * decayRate * t) * sin(2 * .pi * fundamental * r * t) }
+            data[i] = Float(s * a * amplitude)
         }
-        schedule(buffer)
+        schedule(buf)
     }
 
     // MARK: - Helpers
 
-    private func makeBuffer(duration: Double) -> AVAudioPCMBuffer? {
+    private func monoBuffer(duration: Double) -> AVAudioPCMBuffer? {
         let n   = AVAudioFrameCount(sampleRate * duration)
         let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: n) else { return nil }
-        buf.frameLength = n
+        let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: n)
+        buf?.frameLength = n
         return buf
     }
 
-    private func schedule(_ buffer: AVAudioPCMBuffer) {
+    private func schedule(_ buf: AVAudioPCMBuffer) {
+        ensureRunning()
         if !player.isPlaying { player.play() }
-        player.scheduleBuffer(buffer, completionHandler: nil)
+        player.scheduleBuffer(buf, completionHandler: nil)
+    }
+
+    private func ensureRunning() {
+        guard !engine.isRunning else { return }
+        try? engine.start()
+    }
+
+    private func configureSession() {
+        try? AVAudioSession.sharedInstance().setCategory(
+            .playback, mode: .default, options: [.mixWithOthers])
+        try? AVAudioSession.sharedInstance().setActive(true)
+    }
+
+    private func observeAudio() {
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine, queue: .main
+        ) { [weak self] _ in self?.ensureRunning() }
+
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let info = note.userInfo,
+                  let raw  = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw),
+                  type == .ended else { return }
+            self?.configureSession()
+            self?.ensureRunning()
+        }
     }
 }
