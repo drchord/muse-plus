@@ -37,6 +37,7 @@ final class Probe: ObservableObject {
     let client   = MuseClient()
     let pipeline = EEGPipeline()
     let scorer   = DepthScore()
+    let gate     = DepthGate()
     private var bag = Set<AnyCancellable>()
     private var sampleIndex = 0
     private let sessionStart = Date()
@@ -114,7 +115,9 @@ final class Probe: ObservableObject {
         }
 
         scorer.onResult = { [weak self] result in
-            self?.depth = result
+            guard let self else { return }
+            self.depth = result
+            self.gate.update(result)
         }
 
         client.startScan()
@@ -124,6 +127,7 @@ final class Probe: ObservableObject {
         if let m = IXNMuseManagerIos.sharedManager().getMuses().first {
             client.connect(to: m)
             scorer.startCalibration()
+            gate.reset()
         }
     }
 }
@@ -189,6 +193,14 @@ struct ProbeView: View {
                         LabeledContent("Score", value: String(format: "%.2f", probe.depth.score))
                         ProgressView(value: Double(probe.depth.score))
                             .tint(scoreColor(probe.depth.score))
+                        LabeledContent("State") {
+                            Label(
+                                probe.gate.inDeepState ? "Deep 🔔" : "Shallow",
+                                systemImage: probe.gate.inDeepState
+                                    ? "bell.fill" : "bell.slash"
+                            )
+                            .foregroundStyle(probe.gate.inDeepState ? .green : .secondary)
+                        }
                     } else {
                         LabeledContent("Calibrating…",
                                        value: "\(Int(probe.depth.calibrationProgress * 60))s / 60s")
