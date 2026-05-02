@@ -111,11 +111,19 @@ extension MuseClient: IXNMuseDataListener {
 
     private func handleHorseshoe(_ p: IXNMuseDataPacket) {
         let raw = p.values()
-        let typeRaw = p.packetType().rawValue
-        let allVals = (0..<raw.count).map { raw[$0].doubleValue }
-        // debug: send all values + [typeRaw, size] appended so UI can inspect
-        let debug = allVals + [Double(typeRaw), Double(raw.count)]
-        DispatchQueue.main.async { self.hsiRaw.send(debug) }
+        guard raw.count >= 4 else { return }
+        let vals = (0..<4).map { raw[$0].doubleValue }
+        // 1=good, 2=mediocre, 4=no contact
+        let snap = FitCheckSnapshot(
+            tp9:  vals[0] < 2.0,
+            af7:  vals[1] < 2.0,
+            af8:  vals[2] < 2.0,
+            tp10: vals[3] < 2.0
+        )
+        DispatchQueue.main.async {
+            self.hsiRaw.send(vals)
+            self.fitCheck.send(snap)
+        }
     }
 
     private func handleBattery(_ p: IXNMuseDataPacket) {
