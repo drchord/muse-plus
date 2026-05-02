@@ -41,11 +41,11 @@ struct BandChart: View {
             // ── Current values header ─────────────────────────────────
             if let s = history.last {
                 VStack(alignment: .leading, spacing: 3) {
-                    valueRow("Delta", v: s.delta)
-                    valueRow("Theta", v: s.theta)
-                    valueRow("Alpha", v: s.alpha)
-                    valueRow("Beta",  v: s.beta)
-                    valueRow("Gamma", v: s.gamma)
+                    valueRow("Delta", greek: "δ", range: "1–4",   hz: s.deltaPeak)
+                    valueRow("Theta", greek: "θ", range: "4–8",   hz: s.thetaPeak)
+                    valueRow("Alpha", greek: "α", range: "8–13",  hz: s.alphaPeak)
+                    valueRow("Beta",  greek: "β", range: "13–30", hz: s.betaPeak)
+                    valueRow("Gamma", greek: "γ", range: "30–50", hz: s.gammaPeak)
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 14)
@@ -86,15 +86,25 @@ struct BandChart: View {
     }
 
     @ViewBuilder
-    private func valueRow(_ band: String, v: Float) -> some View {
+    private func valueRow(_ band: String, greek: String, range: String, hz: Float) -> some View {
         let c = Self.colors[band] ?? .white
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(band)
-                .font(.system(size: 20, weight: .bold))
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            Text(greek)
+                .font(.system(size: 22, weight: .bold))
                 .foregroundStyle(c)
-            Text(String(format: "%.2f", v))
-                .font(.system(size: 20, weight: .semibold).monospacedDigit())
-                .foregroundStyle(c.opacity(0.80))
+                .frame(width: 22, alignment: .leading)
+            Text(band)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(c.opacity(0.65))
+                .frame(width: 52, alignment: .leading)
+            Text("\(range) Hz")
+                .font(.system(size: 12, weight: .regular).monospacedDigit())
+                .foregroundStyle(c.opacity(0.38))
+                .frame(width: 54, alignment: .leading)
+            Spacer()
+            Text("\(Int(hz.rounded())) Hz")
+                .font(.system(size: 22, weight: .bold).monospacedDigit())
+                .foregroundStyle(c)
         }
     }
 }

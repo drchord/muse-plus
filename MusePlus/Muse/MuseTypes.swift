@@ -24,6 +24,12 @@ struct BandPowers {
     let alpha: Float        // 8–13 Hz
     let beta:  Float        // 13–30 Hz
     let gamma: Float        // 30–50 Hz
+    // Spectral peak: dominant frequency within each band (Hz)
+    let deltaPeak: Float
+    let thetaPeak: Float
+    let alphaPeak: Float
+    let betaPeak:  Float
+    let gammaPeak: Float
     let channel: Int        // 0=TP9, 1=AF7, 2=AF8, 3=TP10
     let timestamp: TimeInterval
 
@@ -44,6 +50,11 @@ struct BandSample: Identifiable {
     let beta:  Float
     let delta: Float
     let gamma: Float
+    let alphaPeak: Float    // Hz — dominant frequency within band
+    let thetaPeak: Float
+    let betaPeak:  Float
+    let deltaPeak: Float
+    let gammaPeak: Float
 }
 
 enum MuseClientError: Error {

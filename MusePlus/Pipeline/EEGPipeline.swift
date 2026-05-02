@@ -91,12 +91,26 @@ final class EEGPipeline {
             return meanPow > 0 ? log10(meanPow) : -4.0
         }
 
+        // Dominant (peak-power) frequency within a band, in Hz
+        func peakFreq(_ lo: Float, _ hi: Float) -> Float {
+            let i0 = max(1, Int((lo / res).rounded()))
+            let i1 = min(Int((hi / res).rounded()), n / 2 - 1)
+            guard i0 <= i1 else { return (lo + hi) / 2 }
+            var maxVal: Float = 0
+            var peakOff: vDSP_Length = 0
+            mag2.withUnsafeBufferPointer { ptr in
+                vDSP_maxvi(ptr.baseAddress! + i0, 1, &maxVal, &peakOff,
+                           vDSP_Length(i1 - i0 + 1))
+            }
+            return Float(i0 + Int(peakOff)) * res
+        }
+
         return BandPowers(
-            delta: logPow(1, 4),
-            theta: logPow(4, 8),
-            alpha: logPow(8, 13),
-            beta:  logPow(13, 30),
-            gamma: logPow(30, 50),
+            delta: logPow(1, 4),    deltaPeak: peakFreq(1, 4),
+            theta: logPow(4, 8),    thetaPeak: peakFreq(4, 8),
+            alpha: logPow(8, 13),   alphaPeak: peakFreq(8, 13),
+            beta:  logPow(13, 30),  betaPeak:  peakFreq(13, 30),
+            gamma: logPow(30, 50),  gammaPeak: peakFreq(30, 50),
             channel: channel,
             timestamp: timestamp
         )

@@ -131,6 +131,11 @@ final class Probe: ObservableObject {
                 let beta  = frontal.map(\.beta).reduce(0, +)  / n
                 let delta = frontal.map(\.delta).reduce(0, +) / n
                 let gamma = frontal.map(\.gamma).reduce(0, +) / n
+                let alphaPeak = frontal.map(\.alphaPeak).reduce(0, +) / n
+                let thetaPeak = frontal.map(\.thetaPeak).reduce(0, +) / n
+                let betaPeak  = frontal.map(\.betaPeak).reduce(0, +)  / n
+                let deltaPeak = frontal.map(\.deltaPeak).reduce(0, +) / n
+                let gammaPeak = frontal.map(\.gammaPeak).reduce(0, +) / n
                 self.frontAlpha = alpha
                 self.frontTheta = theta
                 self.frontBeta  = beta
@@ -140,7 +145,9 @@ final class Probe: ObservableObject {
                 let sample = BandSample(
                     id: self.sampleIndex,
                     time: Date().timeIntervalSince(self.sessionStart),
-                    alpha: alpha, theta: theta, beta: beta, delta: delta, gamma: gamma
+                    alpha: alpha, theta: theta, beta: beta, delta: delta, gamma: gamma,
+                    alphaPeak: alphaPeak, thetaPeak: thetaPeak, betaPeak: betaPeak,
+                    deltaPeak: deltaPeak, gammaPeak: gammaPeak
                 )
                 self.sampleIndex += 1
                 self.bandHistory.append(sample)
