@@ -110,12 +110,11 @@ extension MuseClient: IXNMuseDataListener {
     }
 
     private func handleHorseshoe(_ p: IXNMuseDataPacket) {
-        let vals = [
-            p.getEegChannelValue(.EEG1),
-            p.getEegChannelValue(.EEG2),
-            p.getEegChannelValue(.EEG3),
-            p.getEegChannelValue(.EEG4)
-        ]
+        // hsiPrecision values are 1/2/4 quality indicators — use values() not getEegChannelValue
+        // getEegChannelValue applies ADC→µV conversion which corrupts non-EEG packets
+        let raw = p.values()
+        guard raw.count >= 4 else { return }
+        let vals = (0..<4).map { raw[$0].doubleValue }
         let snap = FitCheckSnapshot(
             tp9:  vals[0] < 2.0,
             af7:  vals[1] < 2.0,
