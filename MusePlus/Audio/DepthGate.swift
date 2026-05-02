@@ -30,9 +30,11 @@ final class DepthGate {
 
     private let chime = ChimeEngine.shared
 
+    var contactsGood: Bool = true   // set by Probe on every fit-check update
+
     // Call every time a new DepthResult arrives.
     func update(_ result: DepthResult) {
-        guard result.isCalibrated else {
+        guard result.isCalibrated, contactsGood else {
             smoothedScore = 0.5
             return
         }

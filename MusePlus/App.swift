@@ -69,7 +69,8 @@ final class Probe: ObservableObject {
                 guard let self else { return }
                 let wasGood = self.fit.allGood
                 self.fit = snap
-                // Fire gong once on good→bad transition
+                self.gate.contactsGood = snap.allGood
+                // Gong on good→bad; depth chimes suppressed until all green again
                 if wasGood && !snap.allGood {
                     ChimeEngine.shared.playContactLost()
                 }
