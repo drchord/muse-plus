@@ -13,9 +13,10 @@ struct MusePlusApp: App {
     }
 }
 
-// MARK: - Probe (Gate 1 debug harness)
+// MARK: - Probe
 
 final class Probe: ObservableObject {
+    // Gate 1
     @Published var muses: [String] = []
     @Published var connection: String = "—"
     @Published var fit: FitCheckSnapshot = .zero
@@ -25,7 +26,16 @@ final class Probe: ObservableObject {
     @Published var hsiCount: Int = 0
     @Published var hsiRaw: [Double] = []
 
-    let client = MuseClient()
+    // Gate 2
+    @Published var frontAlpha: Float = 0
+    @Published var frontTheta: Float = 0
+    @Published var frontBeta: Float  = 0
+    @Published var depth: DepthResult = DepthResult(score: 0.5, isCalibrated: false, calibrationProgress: 0)
+    @Published var bandUpdateCount: Int = 0
+
+    let client   = MuseClient()
+    let pipeline = EEGPipeline()
+    let scorer   = DepthScore()
     private var bag = Set<AnyCancellable>()
 
     func start() {
@@ -59,8 +69,10 @@ final class Probe: ObservableObject {
         client.eegPacket
             .receive(on: RunLoop.main)
             .sink { [weak self] pkt in
-                self?.lastEEG = pkt.channels
-                self?.packetCount += 1
+                guard let self else { return }
+                self.lastEEG = pkt.channels
+                self.packetCount += 1
+                self.pipeline.process(pkt)
             }
             .store(in: &bag)
 
@@ -72,12 +84,29 @@ final class Probe: ObservableObject {
             }
             .store(in: &bag)
 
+        pipeline.onBandPowers = { [weak self] powers in
+            guard let self else { return }
+            let frontal = powers.filter { [1, 2].contains($0.channel) }
+            if !frontal.isEmpty {
+                self.frontAlpha = frontal.map(\.alpha).reduce(0, +) / Float(frontal.count)
+                self.frontTheta = frontal.map(\.theta).reduce(0, +) / Float(frontal.count)
+                self.frontBeta  = frontal.map(\.beta).reduce(0, +)  / Float(frontal.count)
+                self.bandUpdateCount += 1
+            }
+            self.scorer.process(powers)
+        }
+
+        scorer.onResult = { [weak self] result in
+            self?.depth = result
+        }
+
         client.startScan()
     }
 
     func connectFirst() {
         if let m = IXNMuseManagerIos.sharedManager().getMuses().first {
             client.connect(to: m)
+            scorer.startCalibration()
         }
     }
 }
@@ -94,23 +123,24 @@ struct ProbeView: View {
                     if probe.muses.isEmpty {
                         Text("Scanning…").foregroundStyle(.secondary)
                     } else {
-                        ForEach(probe.muses, id: \.self) { name in
-                            Text(name)
-                        }
+                        ForEach(probe.muses, id: \.self) { name in Text(name) }
                         Button("Connect first") { probe.connectFirst() }
                             .foregroundStyle(.blue)
                     }
                 }
+
                 Section("Connection") {
-                    LabeledContent("State", value: probe.connection)
+                    LabeledContent("State",   value: probe.connection)
                     LabeledContent("Battery", value: "\(Int(probe.battery))%")
                 }
+
                 Section("Fit Check") {
                     FitDot("TP9",  on: probe.fit.tp9)
                     FitDot("AF7",  on: probe.fit.af7)
                     FitDot("AF8",  on: probe.fit.af8)
                     FitDot("TP10", on: probe.fit.tp10)
                 }
+
                 Section("EEG") {
                     LabeledContent("Packets", value: "\(probe.packetCount)")
                     if probe.lastEEG.count == 4 {
@@ -120,9 +150,32 @@ struct ProbeView: View {
                         LabeledContent("TP10", value: String(format: "%.1f", probe.lastEEG[3]))
                     }
                 }
+
+                Section("Band Powers (frontal avg, log10 µV²)") {
+                    LabeledContent("Windows", value: "\(probe.bandUpdateCount)")
+                    LabeledContent("Alpha 8–13 Hz", value: String(format: "%.3f", probe.frontAlpha))
+                    LabeledContent("Theta 4–8 Hz",  value: String(format: "%.3f", probe.frontTheta))
+                    LabeledContent("Beta 13–30 Hz", value: String(format: "%.3f", probe.frontBeta))
+                }
+
+                Section("Depth Score") {
+                    if probe.depth.isCalibrated {
+                        LabeledContent("Score", value: String(format: "%.2f", probe.depth.score))
+                        ProgressView(value: Double(probe.depth.score))
+                            .tint(scoreColor(probe.depth.score))
+                    } else {
+                        LabeledContent("Calibrating…",
+                                       value: "\(Int(probe.depth.calibrationProgress * 60))s / 60s")
+                        ProgressView(value: Double(probe.depth.calibrationProgress))
+                    }
+                }
             }
-            .navigationTitle("Muse Plus — Gate 1 Probe")
+            .navigationTitle("Muse++ — Gate 2")
         }
+    }
+
+    private func scoreColor(_ s: Float) -> Color {
+        s > 0.65 ? .green : s > 0.4 ? .yellow : .red
     }
 }
 

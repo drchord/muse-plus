@@ -49,6 +49,7 @@ targets:
         embed: false
       - sdk: CoreBluetooth.framework
       - sdk: libc++.tbd
+      - sdk: Accelerate.framework
     settings:
       base:
         FRAMEWORK_SEARCH_PATHS:
