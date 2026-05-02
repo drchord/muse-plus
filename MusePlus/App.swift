@@ -219,6 +219,10 @@ struct ProbeView: View {
                         ProgressView(value: Double(probe.depth.calibrationProgress))
                     }
                 }
+                Section("Soundscape") {
+                    SoundscapeLayerView()
+                }
+
                 Section("Spotify") {
                     SpotifyRow()
                 }
@@ -229,6 +233,39 @@ struct ProbeView: View {
 
     private func scoreColor(_ s: Float) -> Color {
         s > 0.65 ? .green : s > 0.4 ? .yellow : .red
+    }
+}
+
+private struct SoundscapeLayerView: View {
+    @ObservedObject private var sound = SoundscapePlayer.shared
+
+    var body: some View {
+        ForEach(SoundLayer.allCases) { layer in
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label(layer.rawValue, systemImage: layer.icon)
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { sound.activeLayers.contains(layer) },
+                        set: { _ in sound.toggle(layer) }
+                    ))
+                    .labelsHidden()
+                }
+                if sound.activeLayers.contains(layer) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "speaker.fill")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Slider(value: Binding(
+                            get: { Double(sound.layerVolumes[layer] ?? 0.35) },
+                            set: { sound.setVolume(Float($0), for: layer) }
+                        ), in: 0...1)
+                        Image(systemName: "speaker.wave.3.fill")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
     }
 }
 
