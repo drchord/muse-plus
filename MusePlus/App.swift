@@ -262,6 +262,16 @@ private struct SoundscapeLayerView: View {
                         Image(systemName: "speaker.wave.3.fill")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    if layer == .binaural {
+                        Picker("Beat", selection: $sound.binauralPreset) {
+                            ForEach(BinauralPreset.allCases) { p in
+                                Text(p.rawValue).tag(p)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        Text("Use headphones for binaural effect")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
             }
             .padding(.vertical, 2)
