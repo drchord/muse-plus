@@ -8,6 +8,7 @@ final class MuseClient: NSObject {
     let connectionState = CurrentValueSubject<IXNConnectionState, Never>(.unknown)
     let eegPacket       = PassthroughSubject<EEGPacket, Never>()
     let fitCheck        = CurrentValueSubject<FitCheckSnapshot, Never>(.zero)
+    let hsiRaw          = PassthroughSubject<[Double], Never>()
     let battery         = CurrentValueSubject<Double, Never>(0)
     let errors          = PassthroughSubject<MuseClientError, Never>()
 
@@ -109,15 +110,22 @@ extension MuseClient: IXNMuseDataListener {
     }
 
     private func handleHorseshoe(_ p: IXNMuseDataPacket) {
-        // Horseshoe values: 1.0 = good contact, 2.0+ = poor
-        let good: (IXNEeg) -> Bool = { p.getEegChannelValue($0) < 2.0 }
+        let vals = [
+            p.getEegChannelValue(.EEG1),
+            p.getEegChannelValue(.EEG2),
+            p.getEegChannelValue(.EEG3),
+            p.getEegChannelValue(.EEG4)
+        ]
         let snap = FitCheckSnapshot(
-            tp9:  good(.EEG1),
-            af7:  good(.EEG2),
-            af8:  good(.EEG3),
-            tp10: good(.EEG4)
+            tp9:  vals[0] < 2.0,
+            af7:  vals[1] < 2.0,
+            af8:  vals[2] < 2.0,
+            tp10: vals[3] < 2.0
         )
-        DispatchQueue.main.async { self.fitCheck.send(snap) }
+        DispatchQueue.main.async {
+            self.hsiRaw.send(vals)
+            self.fitCheck.send(snap)
+        }
     }
 
     private func handleBattery(_ p: IXNMuseDataPacket) {

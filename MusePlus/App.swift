@@ -22,6 +22,8 @@ final class Probe: ObservableObject {
     @Published var lastEEG: [Float] = []
     @Published var battery: Double = 0
     @Published var packetCount: Int = 0
+    @Published var hsiCount: Int = 0
+    @Published var hsiRaw: [Double] = []
 
     let client = MuseClient()
     private var bag = Set<AnyCancellable>()
@@ -62,6 +64,14 @@ final class Probe: ObservableObject {
             }
             .store(in: &bag)
 
+        client.hsiRaw
+            .receive(on: RunLoop.main)
+            .sink { [weak self] vals in
+                self?.hsiCount += 1
+                self?.hsiRaw = vals
+            }
+            .store(in: &bag)
+
         client.startScan()
     }
 
@@ -96,6 +106,13 @@ struct ProbeView: View {
                     LabeledContent("Battery", value: "\(Int(probe.battery))%")
                 }
                 Section("Fit Check") {
+                    LabeledContent("HSI packets", value: "\(probe.hsiCount)")
+                    if probe.hsiRaw.count == 4 {
+                        LabeledContent("TP9 raw",  value: String(format: "%.1f", probe.hsiRaw[0]))
+                        LabeledContent("AF7 raw",  value: String(format: "%.1f", probe.hsiRaw[1]))
+                        LabeledContent("AF8 raw",  value: String(format: "%.1f", probe.hsiRaw[2]))
+                        LabeledContent("TP10 raw", value: String(format: "%.1f", probe.hsiRaw[3]))
+                    }
                     FitDot("TP9",  on: probe.fit.tp9)
                     FitDot("AF7",  on: probe.fit.af7)
                     FitDot("AF8",  on: probe.fit.af8)
