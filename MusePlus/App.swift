@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import UIKit
 
 @main
 struct MusePlusApp: App {
@@ -44,6 +45,7 @@ final class Probe: ObservableObject {
     private var bag = Set<AnyCancellable>()
     private var sampleIndex = 0
     private let sessionStart = Date()
+    private var reconnectAttempts = 0
 
     func start() {
         client.discoveredMuses
@@ -67,10 +69,16 @@ final class Probe: ObservableObject {
 
         client.connectionState
             .receive(on: RunLoop.main)
-            .sink { state in
+            .sink { [weak self] state in
                 switch state {
-                case .connected:    SessionRecorder.shared.startSession()
-                case .disconnected: SessionRecorder.shared.endSession()
+                case .connected:
+                    UIApplication.shared.isIdleTimerDisabled = true
+                    SessionRecorder.shared.startSession()
+                    self?.reconnectAttempts = 0
+                case .disconnected:
+                    UIApplication.shared.isIdleTimerDisabled = false
+                    SessionRecorder.shared.endSession()
+                    self?.scheduleReconnect()
                 default: break
                 }
             }
@@ -162,6 +170,28 @@ final class Probe: ObservableObject {
             client.connect(to: m)
             scorer.startCalibration()
             gate.reset()
+        }
+    }
+
+    private func reconnect() {
+        // Reconnect without resetting calibration or gate — preserve session continuity
+        if let m = IXNMuseManagerIos.sharedManager().getMuses().first {
+            client.connect(to: m)
+        }
+    }
+
+    private func scheduleReconnect() {
+        guard reconnectAttempts < 3 else {
+            reconnectAttempts = 0
+            return
+        }
+        reconnectAttempts += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, self.connection == "Disconnected" else {
+                self?.reconnectAttempts = 0
+                return
+            }
+            self.reconnect()
         }
     }
 }
