@@ -235,7 +235,8 @@ struct ProbeView: View {
                         Text("Waiting for data…").foregroundStyle(.secondary)
                     } else {
                         BandChart(history: probe.bandHistory)
-                            .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
+                            .listRowInsets(EdgeInsets(top: 6, leading: 6, bottom: 6, trailing: 6))
+                            .listRowBackground(Color.clear)
                     }
                 }
 
