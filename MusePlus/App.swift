@@ -32,11 +32,14 @@ final class Probe: ObservableObject {
     @Published var frontBeta: Float  = 0
     @Published var depth: DepthResult = DepthResult(score: 0.5, isCalibrated: false, calibrationProgress: 0)
     @Published var bandUpdateCount: Int = 0
+    @Published var bandHistory: [BandSample] = []
 
     let client   = MuseClient()
     let pipeline = EEGPipeline()
     let scorer   = DepthScore()
     private var bag = Set<AnyCancellable>()
+    private var sampleIndex = 0
+    private let sessionStart = Date()
 
     func start() {
         client.discoveredMuses
@@ -88,10 +91,24 @@ final class Probe: ObservableObject {
             guard let self else { return }
             let frontal = powers.filter { [1, 2].contains($0.channel) }
             if !frontal.isEmpty {
-                self.frontAlpha = frontal.map(\.alpha).reduce(0, +) / Float(frontal.count)
-                self.frontTheta = frontal.map(\.theta).reduce(0, +) / Float(frontal.count)
-                self.frontBeta  = frontal.map(\.beta).reduce(0, +)  / Float(frontal.count)
+                let n = Float(frontal.count)
+                let alpha = frontal.map(\.alpha).reduce(0, +) / n
+                let theta = frontal.map(\.theta).reduce(0, +) / n
+                let beta  = frontal.map(\.beta).reduce(0, +)  / n
+                let delta = frontal.map(\.delta).reduce(0, +) / n
+                let gamma = frontal.map(\.gamma).reduce(0, +) / n
+                self.frontAlpha = alpha
+                self.frontTheta = theta
+                self.frontBeta  = beta
                 self.bandUpdateCount += 1
+                let sample = BandSample(
+                    id: self.sampleIndex,
+                    time: Date().timeIntervalSince(self.sessionStart),
+                    alpha: alpha, theta: theta, beta: beta, delta: delta, gamma: gamma
+                )
+                self.sampleIndex += 1
+                self.bandHistory.append(sample)
+                if self.bandHistory.count > 120 { self.bandHistory.removeFirst() }
             }
             self.scorer.process(powers)
         }
@@ -148,6 +165,15 @@ struct ProbeView: View {
                         LabeledContent("AF7",  value: String(format: "%.1f", probe.lastEEG[1]))
                         LabeledContent("AF8",  value: String(format: "%.1f", probe.lastEEG[2]))
                         LabeledContent("TP10", value: String(format: "%.1f", probe.lastEEG[3]))
+                    }
+                }
+
+                Section("Band Powers — last 60 s") {
+                    if probe.bandHistory.isEmpty {
+                        Text("Waiting for data…").foregroundStyle(.secondary)
+                    } else {
+                        BandChart(history: probe.bandHistory)
+                            .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
                     }
                 }
 

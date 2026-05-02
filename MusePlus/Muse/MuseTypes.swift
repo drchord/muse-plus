@@ -36,6 +36,16 @@ struct DepthResult {
     let calibrationProgress: Float  // 0–1 during calibration
 }
 
+struct BandSample: Identifiable {
+    let id: Int
+    let time: Double        // seconds since session start
+    let alpha: Float
+    let theta: Float
+    let beta:  Float
+    let delta: Float
+    let gamma: Float
+}
+
 enum MuseClientError: Error {
     case connectionFailed(String)
     case dataStreamLost(String)
