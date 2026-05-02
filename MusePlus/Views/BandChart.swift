@@ -62,7 +62,16 @@ struct BandChart: View {
                 .lineStyle(StrokeStyle(lineWidth: 3))
                 .interpolationMethod(.catmullRom)
             }
-            .chartForegroundStyleScale(Self.colors)
+            .chartForegroundStyleScale(
+                domain: ["Delta", "Theta", "Alpha", "Beta", "Gamma"],
+                range: [
+                    Color(red: 1.00, green: 0.22, blue: 0.22),
+                    Color(red: 0.72, green: 0.28, blue: 1.00),
+                    Color(red: 0.18, green: 0.82, blue: 1.00),
+                    Color(red: 0.38, green: 0.90, blue: 0.22),
+                    Color(red: 1.00, green: 0.58, blue: 0.00),
+                ]
+            )
             .chartXScale(domain: xDomain)
             .chartYScale(domain: -2.5...1.5)
             .chartYAxis {

@@ -106,11 +106,16 @@ final class EEGPipeline {
         }
 
         return BandPowers(
-            delta: logPow(1, 4),    deltaPeak: peakFreq(1, 4),
-            theta: logPow(4, 8),    thetaPeak: peakFreq(4, 8),
-            alpha: logPow(8, 13),   alphaPeak: peakFreq(8, 13),
-            beta:  logPow(13, 30),  betaPeak:  peakFreq(13, 30),
-            gamma: logPow(30, 50),  gammaPeak: peakFreq(30, 50),
+            delta: logPow(1, 4),
+            theta: logPow(4, 8),
+            alpha: logPow(8, 13),
+            beta:  logPow(13, 30),
+            gamma: logPow(30, 50),
+            deltaPeak: peakFreq(1, 4),
+            thetaPeak: peakFreq(4, 8),
+            alphaPeak: peakFreq(8, 13),
+            betaPeak:  peakFreq(13, 30),
+            gammaPeak: peakFreq(30, 50),
             channel: channel,
             timestamp: timestamp
         )
