@@ -41,6 +41,8 @@ final class MuseClient: NSObject {
         muse.unregisterAllListeners()
         muse.register(self as IXNMuseConnectionListener?)
         muse.register(self as IXNMuseDataListener?, type: .eeg)
+        muse.register(self as IXNMuseDataListener?, type: .hsi)
+        muse.register(self as IXNMuseDataListener?, type: .battery)
         muse.setPreset(.preset21)   // default for muse2019 (Muse S Athena) — no preset change = no disconnect cycle
         muse.runAsynchronously()
     }
