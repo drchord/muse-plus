@@ -8,9 +8,10 @@ final class ChimeEngine {
     private let sampleRate: Double = 44100
 
     init() {
-        // Attach and connect BEFORE starting — no stop/restart needed
+        // Explicit mono format — prevents format mismatch after route changes
+        let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
         engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        engine.connect(player, to: engine.mainMixerNode, format: fmt)
         configureSession()
         try? engine.start()
         observeAudio()
@@ -87,18 +88,24 @@ final class ChimeEngine {
         NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine, queue: .main
-        ) { [weak self] _ in self?.ensureRunning() }
+        ) { [weak self] _ in
+            // Delay lets iOS finish the route-change before we restart
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self?.ensureRunning()
+            }
+        }
 
         NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil, queue: .main
         ) { [weak self] note in
-            guard let info = note.userInfo,
+            guard let self,
+                  let info = note.userInfo,
                   let raw  = info[AVAudioSessionInterruptionTypeKey] as? UInt,
                   let type = AVAudioSession.InterruptionType(rawValue: raw),
                   type == .ended else { return }
-            self?.configureSession()
-            self?.ensureRunning()
+            self.configureSession()
+            self.ensureRunning()
         }
     }
 }

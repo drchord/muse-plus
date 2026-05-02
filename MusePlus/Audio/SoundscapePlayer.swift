@@ -64,12 +64,13 @@ final class SoundscapePlayer: ObservableObject {
     private let bufferSecs: Double = 20
 
     init() {
-        // Attach ALL nodes before engine starts
+        // Explicit stereo format — prevents format mismatch after Bluetooth/route changes
+        let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
         for layer in SoundLayer.allCases {
             let node = AVAudioPlayerNode()
             nodes[layer] = node
             engine.attach(node)
-            engine.connect(node, to: engine.mainMixerNode, format: nil)
+            engine.connect(node, to: engine.mainMixerNode, format: fmt)
         }
         configureSession()
         try? engine.start()
@@ -99,9 +100,11 @@ final class SoundscapePlayer: ObservableObject {
     }
 
     private func startLayer(_ layer: SoundLayer) {
-        let vol = layerVolumes[layer] ?? 0.35
+        let vol  = layerVolumes[layer] ?? 0.35
+        // Capture beatHz on main thread — binauralPreset is @Published, not thread-safe
+        let beat = (layer == .binaural) ? binauralPreset.beatHz : 0.0
         DispatchQueue.global(qos: .userInitiated).async {
-            let buf = self.makeBuffer(layer)
+            let buf = self.makeBuffer(layer, beatHz: beat)
             DispatchQueue.main.async {
                 self.buffers[layer] = buf
                 guard self.activeLayers.contains(layer),
@@ -140,16 +143,9 @@ final class SoundscapePlayer: ObservableObject {
             forName: .AVAudioEngineConfigurationChange,
             object: engine, queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            self.ensureRunning()
-            // Restart active layers after engine recovers
-            let active = self.activeLayers
-            for layer in active {
-                guard let node = self.nodes[layer],
-                      let buf  = self.buffers[layer] else { continue }
-                node.stop()
-                node.scheduleBuffer(buf, at: nil, options: .loops)
-                node.play()
+            // Delay lets iOS finish the route-change before we restart
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self?.restartEngine()
             }
         }
 
@@ -163,13 +159,36 @@ final class SoundscapePlayer: ObservableObject {
                   let type = AVAudioSession.InterruptionType(rawValue: raw),
                   type == .ended else { return }
             self.configureSession()
-            self.ensureRunning()
+            self.restartEngine()
+        }
+    }
+
+    private func restartEngine() {
+        guard !engine.isRunning else {
+            resumeActiveLayers()
+            return
+        }
+        do {
+            try engine.start()
+            resumeActiveLayers()
+        } catch {
+            // Will retry on next configuration change notification
+        }
+    }
+
+    private func resumeActiveLayers() {
+        for layer in activeLayers {
+            guard let node = self.nodes[layer],
+                  let buf  = self.buffers[layer],
+                  !node.isPlaying else { continue }
+            node.scheduleBuffer(buf, at: nil, options: .loops)
+            node.play()
         }
     }
 
     // MARK: - Buffer factory
 
-    private func makeBuffer(_ layer: SoundLayer) -> AVAudioPCMBuffer {
+    private func makeBuffer(_ layer: SoundLayer, beatHz: Double = 0) -> AVAudioPCMBuffer {
         let n   = AVAudioFrameCount(sampleRate * bufferSecs)
         let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
         let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: n)!
@@ -183,7 +202,7 @@ final class SoundscapePlayer: ObservableObject {
         case .brook:      fillBrook(buf)
         case .forest:     fillForest(buf)
         case .birds:      fillBirds(buf)
-        case .binaural:   fillBinaural(buf)
+        case .binaural:   fillBinaural(buf, beatHz: beatHz)
         }
         return buf
     }
@@ -351,14 +370,14 @@ final class SoundscapePlayer: ObservableObject {
 
     // MARK: - Binaural Beats
 
-    private func fillBinaural(_ buf: AVAudioPCMBuffer) {
+    private func fillBinaural(_ buf: AVAudioPCMBuffer, beatHz: Double) {
         let n = Int(buf.frameLength)
         let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        let carrier = 200.0, beat = binauralPreset.beatHz
+        let carrier = 200.0
         for i in 0..<n {
             let t = Double(i) / sampleRate
-            L[i] = Float(sin(2 * .pi * carrier         * t)) * 0.45
-            R[i] = Float(sin(2 * .pi * (carrier + beat) * t)) * 0.45
+            L[i] = Float(sin(2 * .pi * carrier             * t)) * 0.45
+            R[i] = Float(sin(2 * .pi * (carrier + beatHz)  * t)) * 0.45
         }
     }
 
