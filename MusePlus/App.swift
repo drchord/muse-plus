@@ -105,18 +105,18 @@ struct ProbeView: View {
                     LabeledContent("State", value: probe.connection)
                     LabeledContent("Battery", value: "\(Int(probe.battery))%")
                 }
-                Section("Fit Check") {
+                Section("Fit Check Debug") {
                     LabeledContent("HSI packets", value: "\(probe.hsiCount)")
-                    if probe.hsiRaw.count == 4 {
-                        LabeledContent("TP9 raw",  value: String(format: "%.1f", probe.hsiRaw[0]))
-                        LabeledContent("AF7 raw",  value: String(format: "%.1f", probe.hsiRaw[1]))
-                        LabeledContent("AF8 raw",  value: String(format: "%.1f", probe.hsiRaw[2]))
-                        LabeledContent("TP10 raw", value: String(format: "%.1f", probe.hsiRaw[3]))
+                    if probe.hsiRaw.count >= 2 {
+                        let n = probe.hsiRaw.count
+                        let typeRaw = Int(probe.hsiRaw[n - 2])
+                        let size    = Int(probe.hsiRaw[n - 1])
+                        LabeledContent("Packet type#", value: "\(typeRaw)")
+                        LabeledContent("Values count", value: "\(size)")
+                        ForEach(0..<(n - 2), id: \.self) { i in
+                            LabeledContent("val[\(i)]", value: String(format: "%.3f", probe.hsiRaw[i]))
+                        }
                     }
-                    FitDot("TP9",  on: probe.fit.tp9)
-                    FitDot("AF7",  on: probe.fit.af7)
-                    FitDot("AF8",  on: probe.fit.af8)
-                    FitDot("TP10", on: probe.fit.tp10)
                 }
                 Section("EEG") {
                     LabeledContent("Packets", value: "\(probe.packetCount)")

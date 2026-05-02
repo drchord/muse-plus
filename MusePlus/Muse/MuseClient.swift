@@ -110,21 +110,12 @@ extension MuseClient: IXNMuseDataListener {
     }
 
     private func handleHorseshoe(_ p: IXNMuseDataPacket) {
-        // hsiPrecision values are 1/2/4 quality indicators — use values() not getEegChannelValue
-        // getEegChannelValue applies ADC→µV conversion which corrupts non-EEG packets
         let raw = p.values()
-        guard raw.count >= 4 else { return }
-        let vals = (0..<4).map { raw[$0].doubleValue }
-        let snap = FitCheckSnapshot(
-            tp9:  vals[0] < 2.0,
-            af7:  vals[1] < 2.0,
-            af8:  vals[2] < 2.0,
-            tp10: vals[3] < 2.0
-        )
-        DispatchQueue.main.async {
-            self.hsiRaw.send(vals)
-            self.fitCheck.send(snap)
-        }
+        let typeRaw = p.packetType().rawValue
+        let allVals = (0..<raw.count).map { raw[$0].doubleValue }
+        // debug: send all values + [typeRaw, size] appended so UI can inspect
+        let debug = allVals + [Double(typeRaw), Double(raw.count)]
+        DispatchQueue.main.async { self.hsiRaw.send(debug) }
     }
 
     private func handleBattery(_ p: IXNMuseDataPacket) {
