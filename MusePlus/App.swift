@@ -226,14 +226,8 @@ struct ProbeView: View {
                     FitDot("TP10", on: probe.fit.tp10)
                 }
 
-                Section("EEG") {
-                    LabeledContent("Packets", value: "\(probe.packetCount)")
-                    if probe.lastEEG.count == 4 {
-                        LabeledContent("TP9",  value: String(format: "%.1f", probe.lastEEG[0]))
-                        LabeledContent("AF7",  value: String(format: "%.1f", probe.lastEEG[1]))
-                        LabeledContent("AF8",  value: String(format: "%.1f", probe.lastEEG[2]))
-                        LabeledContent("TP10", value: String(format: "%.1f", probe.lastEEG[3]))
-                    }
+                Section("Signal Quality") {
+                    SignalQualityView(hsi: probe.hsiRaw, packets: probe.packetCount)
                 }
 
                 Section("Band Powers — last 60 s") {
@@ -379,6 +373,49 @@ private struct SpotifyRow: View {
             Text("Start a playlist in Spotify first, then tap Connect.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - Signal quality
+
+private struct SignalQualityView: View {
+    let hsi:     [Double]
+    let packets: Int
+
+    private let channels = ["TP9", "AF7", "AF8", "TP10"]
+
+    var body: some View {
+        if hsi.count >= 4 {
+            ForEach(0..<4, id: \.self) { i in
+                LabeledContent(channels[i]) {
+                    Text(label(hsi[i]))
+                        .foregroundStyle(color(hsi[i]))
+                        .fontWeight(.medium)
+                }
+            }
+        } else {
+            Text("Waiting for signal…").foregroundStyle(.secondary)
+        }
+        LabeledContent("Packets received", value: packets.formatted())
+            .foregroundStyle(.secondary)
+            .font(.caption)
+    }
+
+    private func label(_ v: Double) -> String {
+        switch v {
+        case ..<1.5: "Excellent"
+        case ..<2.5: "Good"
+        case ..<3.5: "Fair"
+        default:     "Poor"
+        }
+    }
+
+    private func color(_ v: Double) -> Color {
+        switch v {
+        case ..<2.5: .green
+        case ..<3.5: .yellow
+        default:     .red
         }
     }
 }
