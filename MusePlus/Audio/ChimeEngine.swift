@@ -21,6 +21,17 @@ final class ChimeEngine {
     func playExitDeep()    { play(fundamental: 528, decayRate: 1.8, duration: 2.0, amplitude: 0.25) }
     func playContactLost() { playGong(fundamental: 120, decayRate: 0.5, duration: 5.0, amplitude: 0.55) }
 
+    func playTimerEnd() {
+        // Three descending strikes — distinct from all other chimes
+        playGong(fundamental: 80, decayRate: 0.22, duration: 7.0, amplitude: 0.70)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.playGong(fundamental: 80, decayRate: 0.22, duration: 7.0, amplitude: 0.50)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+            self?.playGong(fundamental: 80, decayRate: 0.22, duration: 7.0, amplitude: 0.35)
+        }
+    }
+
     // MARK: - Bowl bell
 
     private func play(fundamental: Double, decayRate: Double, duration: Double, amplitude: Double) {

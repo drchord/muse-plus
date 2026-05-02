@@ -223,6 +223,25 @@ struct ProbeView: View {
                     SoundscapeLayerView()
                 }
 
+                Section("Chimes — tap to preview") {
+                    ChimePreviewRow(label: "Enter Deep State",
+                                   detail: "432 Hz bowl · 3.5 s · fires when depth sustains 20 s",
+                                   color: .green) { ChimeEngine.shared.playEnterDeep() }
+                    ChimePreviewRow(label: "Exit Deep State",
+                                   detail: "528 Hz bowl · 2 s · fires when depth drops for 15 s",
+                                   color: .blue) { ChimeEngine.shared.playExitDeep() }
+                    ChimePreviewRow(label: "Contact Lost",
+                                   detail: "120 Hz gong · 5 s · fires when any electrode loses contact",
+                                   color: .orange) { ChimeEngine.shared.playContactLost() }
+                    ChimePreviewRow(label: "Timer End",
+                                   detail: "80 Hz gong · triple strike · fires when timer reaches zero",
+                                   color: .purple) { ChimeEngine.shared.playTimerEnd() }
+                }
+
+                Section("Meditation Timer") {
+                    MeditationTimerView()
+                }
+
                 Section("Spotify") {
                     SpotifyRow()
                 }
@@ -309,5 +328,110 @@ private struct FitDot: View {
     var body: some View {
         Label(label, systemImage: on ? "checkmark.circle.fill" : "circle")
             .foregroundStyle(on ? .green : .secondary)
+    }
+}
+
+// MARK: - Chime preview row
+
+private struct ChimePreviewRow: View {
+    let label:  String
+    let detail: String
+    let color:  Color
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button(label, action: action).foregroundStyle(color)
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - Meditation timer model
+
+final class MeditationTimer: ObservableObject {
+    static let shared = MeditationTimer()
+
+    @Published var duration:  TimeInterval = 20 * 60
+    @Published var remaining: TimeInterval = 0
+    @Published var isRunning  = false
+    @Published var isDone     = false
+
+    private var endDate:      Date?
+    private var displayTimer: Timer?
+
+    func start() {
+        isDone    = false
+        isRunning = true
+        endDate   = Date().addingTimeInterval(duration)
+        remaining = duration
+        displayTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+    }
+
+    func stop() {
+        displayTimer?.invalidate()
+        displayTimer = nil
+        isRunning    = false
+        isDone       = false
+        remaining    = 0
+    }
+
+    var formattedRemaining: String {
+        let r = max(0, remaining)
+        let h = Int(r) / 3600
+        let m = (Int(r) % 3600) / 60
+        let s = Int(r) % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, s)
+            : String(format: "%d:%02d", m, s)
+    }
+
+    private func tick() {
+        guard let end = endDate else { return }
+        let r = max(0, end.timeIntervalSinceNow)
+        remaining = r
+        if r <= 0 {
+            displayTimer?.invalidate()
+            displayTimer = nil
+            isRunning    = false
+            isDone       = true
+            ChimeEngine.shared.playTimerEnd()
+        }
+    }
+}
+
+// MARK: - Meditation timer view
+
+private struct MeditationTimerView: View {
+    @ObservedObject private var mt = MeditationTimer.shared
+
+    private let presets: [(String, TimeInterval)] = [
+        ("5 min",  300),  ("10 min", 600),  ("15 min", 900),
+        ("20 min", 1200), ("30 min", 1800), ("45 min", 2700),
+        ("60 min", 3600), ("90 min", 5400),
+    ]
+
+    var body: some View {
+        Picker("Duration", selection: $mt.duration) {
+            ForEach(presets, id: \.1) { label, secs in
+                Text(label).tag(secs)
+            }
+        }
+        .pickerStyle(.menu)
+        .disabled(mt.isRunning)
+
+        if mt.isRunning || mt.isDone {
+            LabeledContent(mt.isDone ? "Session complete" : "Remaining",
+                           value: mt.isDone ? "" : mt.formattedRemaining)
+                .foregroundStyle(mt.isDone ? .green : .primary)
+        }
+
+        Button(mt.isRunning ? "Stop" : "Start") {
+            mt.isRunning ? mt.stop() : mt.start()
+        }
+        .foregroundStyle(mt.isRunning ? .red : .green)
     }
 }
