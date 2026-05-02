@@ -33,7 +33,16 @@ final class Probe: ObservableObject {
             .assign(to: &$muses)
 
         client.connectionState
-            .map { s in "\(s.rawValue)" }
+            .map { s -> String in
+                switch s {
+                case .unknown:      return "Unknown"
+                case .connecting:   return "Connecting…"
+                case .connected:    return "Connected"
+                case .disconnected: return "Disconnected"
+                case .needsUpdate:  return "Needs Update"
+                @unknown default:   return "State \(s.rawValue)"
+                }
+            }
             .receive(on: RunLoop.main)
             .assign(to: &$connection)
 

@@ -33,11 +33,12 @@ final class MuseClient: NSObject {
     }
 
     func connect(to muse: IXNMuse) {
+        // Stop scanning first — active BLE scan interferes with connection stability
+        manager.stopListening()
         queue.async {
             self.disconnectInternal()
             self.connectedMuse = muse
-            // Preset must be set BEFORE registering listeners (SDK requirement)
-            muse.setPreset(.preset53)   // Muse S Athena — try .preset50/.preset55 if no packets
+            muse.setPreset(.preset50)   // Muse S Athena: preset50 (220Hz raw) — stable; preset53 causes drop cycles
             muse.register(self as IXNMuseConnectionListener?)
             muse.register(self as IXNMuseDataListener?, type: .eeg)
             muse.register(self as IXNMuseDataListener?, type: .hsi)
