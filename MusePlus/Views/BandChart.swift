@@ -21,6 +21,11 @@ struct BandChart: View {
         ]}
     }
 
+    private var xDomain: ClosedRange<Double> {
+        guard let last = history.last else { return 0...60 }
+        return max(0, last.time - 60)...last.time
+    }
+
     var body: some View {
         Chart(pts) { pt in
             LineMark(
@@ -32,12 +37,13 @@ struct BandChart: View {
             .interpolationMethod(.catmullRom)
         }
         .chartForegroundStyleScale([
-            "Delta": Color(red: 0.20, green: 0.80, blue: 0.20),   // bright green
-            "Theta": Color(red: 0.68, green: 0.32, blue: 0.87),   // violet
-            "Alpha": Color(red: 0.00, green: 0.48, blue: 1.00),   // iOS blue
-            "Beta":  Color(red: 1.00, green: 0.58, blue: 0.00),   // amber
-            "Gamma": Color(red: 1.00, green: 0.18, blue: 0.33),   // hot red
+            "Delta": Color(red: 0.20, green: 0.80, blue: 0.20),
+            "Theta": Color(red: 0.68, green: 0.32, blue: 0.87),
+            "Alpha": Color(red: 0.00, green: 0.48, blue: 1.00),
+            "Beta":  Color(red: 1.00, green: 0.58, blue: 0.00),
+            "Gamma": Color(red: 1.00, green: 0.18, blue: 0.33),
         ])
+        .chartXScale(domain: xDomain)
         .chartYScale(domain: -2.5...1.5)
         .chartYAxis {
             AxisMarks(values: [-2, -1, 0, 1]) {
