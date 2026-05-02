@@ -9,6 +9,7 @@ struct MusePlusApp: App {
         WindowGroup {
             ProbeView(probe: probe)
                 .onAppear { probe.start() }
+                .onOpenURL { SpotifyManager.shared.handleCallback($0) }
         }
     }
 }
@@ -64,7 +65,16 @@ final class Probe: ObservableObject {
 
         client.fitCheck
             .receive(on: RunLoop.main)
-            .assign(to: &$fit)
+            .sink { [weak self] snap in
+                guard let self else { return }
+                let wasGood = self.fit.allGood
+                self.fit = snap
+                // Fire gong once on good→bad transition
+                if wasGood && !snap.allGood {
+                    ChimeEngine.shared.playContactLost()
+                }
+            }
+            .store(in: &bag)
 
         client.battery
             .receive(on: RunLoop.main)
@@ -208,6 +218,9 @@ struct ProbeView: View {
                         ProgressView(value: Double(probe.depth.calibrationProgress))
                     }
                 }
+                Section("Spotify") {
+                    SpotifyRow()
+                }
             }
             .navigationTitle("Muse++ — Gate 2")
         }
@@ -215,6 +228,29 @@ struct ProbeView: View {
 
     private func scoreColor(_ s: Float) -> Color {
         s > 0.65 ? .green : s > 0.4 ? .yellow : .red
+    }
+}
+
+private struct SpotifyRow: View {
+    @ObservedObject private var spotify = SpotifyManager.shared
+
+    var body: some View {
+        if spotify.isConnected {
+            LabeledContent("Status", value: "Connected")
+            if !spotify.currentTrack.isEmpty {
+                LabeledContent("Track", value: spotify.currentTrack)
+            }
+            Button(spotify.isPaused ? "Resume" : "Pause") {
+                spotify.isPaused ? spotify.play() : spotify.pause()
+            }
+            Button("Disconnect", role: .destructive) { spotify.disconnect() }
+        } else {
+            Button("Connect Spotify") { spotify.authorize() }
+                .foregroundStyle(.green)
+            Text("Start a playlist in Spotify first, then tap Connect.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

@@ -13,10 +13,10 @@ struct BandChart: View {
 
     private var pts: [Pt] {
         history.flatMap { s in [
-            Pt(id: "\(s.id)α", t: s.time, v: Double(s.alpha), band: "Alpha"),
-            Pt(id: "\(s.id)θ", t: s.time, v: Double(s.theta), band: "Theta"),
-            Pt(id: "\(s.id)β", t: s.time, v: Double(s.beta),  band: "Beta"),
             Pt(id: "\(s.id)δ", t: s.time, v: Double(s.delta), band: "Delta"),
+            Pt(id: "\(s.id)θ", t: s.time, v: Double(s.theta), band: "Theta"),
+            Pt(id: "\(s.id)α", t: s.time, v: Double(s.alpha), band: "Alpha"),
+            Pt(id: "\(s.id)β", t: s.time, v: Double(s.beta),  band: "Beta"),
             Pt(id: "\(s.id)γ", t: s.time, v: Double(s.gamma), band: "Gamma"),
         ]}
     }
@@ -28,18 +28,19 @@ struct BandChart: View {
                 y: .value("log₁₀ µV²", pt.v)
             )
             .foregroundStyle(by: .value("Band", pt.band))
+            .lineStyle(StrokeStyle(lineWidth: 2))
             .interpolationMethod(.catmullRom)
         }
         .chartForegroundStyleScale([
-            "Alpha": Color.blue,
-            "Theta": Color.purple,
-            "Beta":  Color.red,
-            "Delta": Color.teal,
-            "Gamma": Color.orange,
+            "Delta": Color(red: 0.20, green: 0.80, blue: 0.20),   // bright green
+            "Theta": Color(red: 0.68, green: 0.32, blue: 0.87),   // violet
+            "Alpha": Color(red: 0.00, green: 0.48, blue: 1.00),   // iOS blue
+            "Beta":  Color(red: 1.00, green: 0.58, blue: 0.00),   // amber
+            "Gamma": Color(red: 1.00, green: 0.18, blue: 0.33),   // hot red
         ])
-        .chartYScale(domain: -3.0...1.0)
+        .chartYScale(domain: -2.5...1.5)
         .chartYAxis {
-            AxisMarks(values: [-3, -2, -1, 0, 1]) {
+            AxisMarks(values: [-2, -1, 0, 1]) {
                 AxisGridLine()
                 AxisValueLabel()
             }

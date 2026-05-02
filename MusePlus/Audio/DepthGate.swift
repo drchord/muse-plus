@@ -28,7 +28,7 @@ final class DepthGate {
     private var lastEnterChime     = Date.distantPast
     private var lastExitChime      = Date.distantPast
 
-    private let chime = ChimeEngine()
+    private let chime = ChimeEngine.shared
 
     // Call every time a new DepthResult arrives.
     func update(_ result: DepthResult) {
