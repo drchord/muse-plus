@@ -27,7 +27,7 @@ struct BandPowers {
     let channel: Int        // 0=TP9, 1=AF7, 2=AF8, 3=TP10
     let timestamp: TimeInterval
 
-    var meditationIndex: Float { alpha - beta }
+    var meditationIndex: Float { (alpha + theta) - 2 * beta }
 }
 
 struct DepthResult {

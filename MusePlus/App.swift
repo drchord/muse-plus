@@ -153,9 +153,9 @@ struct ProbeView: View {
 
                 Section("Band Powers (frontal avg, log10 µV²)") {
                     LabeledContent("Windows", value: "\(probe.bandUpdateCount)")
-                    LabeledContent("Alpha 8–13 Hz", value: String(format: "%.3f", probe.frontAlpha))
-                    LabeledContent("Theta 4–8 Hz",  value: String(format: "%.3f", probe.frontTheta))
-                    LabeledContent("Beta 13–30 Hz", value: String(format: "%.3f", probe.frontBeta))
+                    LabeledContent("Alpha 8–13 Hz ↑", value: String(format: "%.3f", probe.frontAlpha))
+                    LabeledContent("Theta 4–8 Hz  ↑", value: String(format: "%.3f", probe.frontTheta))
+                    LabeledContent("Beta 13–30 Hz ↓", value: String(format: "%.3f", probe.frontBeta))
                 }
 
                 Section("Depth Score") {
