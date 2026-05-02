@@ -30,7 +30,9 @@ final class Probe: ObservableObject {
     // Gate 2
     @Published var frontAlpha: Float = 0
     @Published var frontTheta: Float = 0
-    @Published var frontBeta: Float  = 0
+    @Published var frontBeta:  Float = 0
+    @Published var frontDelta: Float = 0
+    @Published var frontGamma: Float = 0
     @Published var depth: DepthResult = DepthResult(score: 0.5, isCalibrated: false, calibrationProgress: 0)
     @Published var bandUpdateCount: Int = 0
     @Published var bandHistory: [BandSample] = []
@@ -63,6 +65,17 @@ final class Probe: ObservableObject {
             .receive(on: RunLoop.main)
             .assign(to: &$connection)
 
+        client.connectionState
+            .receive(on: RunLoop.main)
+            .sink { state in
+                switch state {
+                case .connected:    SessionRecorder.shared.startSession()
+                case .disconnected: SessionRecorder.shared.endSession()
+                default: break
+                }
+            }
+            .store(in: &bag)
+
         client.fitCheck
             .receive(on: RunLoop.main)
             .sink { [weak self] snap in
@@ -73,6 +86,7 @@ final class Probe: ObservableObject {
                 // Gong on good→bad; depth chimes suppressed until all green again
                 if wasGood && !snap.allGood {
                     ChimeEngine.shared.playContactLost()
+                    SessionRecorder.shared.addFitEvent()
                 }
             }
             .store(in: &bag)
@@ -112,6 +126,8 @@ final class Probe: ObservableObject {
                 self.frontAlpha = alpha
                 self.frontTheta = theta
                 self.frontBeta  = beta
+                self.frontDelta = delta
+                self.frontGamma = gamma
                 self.bandUpdateCount += 1
                 let sample = BandSample(
                     id: self.sampleIndex,
@@ -123,6 +139,13 @@ final class Probe: ObservableObject {
                 if self.bandHistory.count > 120 { self.bandHistory.removeFirst() }
             }
             self.scorer.process(powers)
+            // Record after scorer.process so depth reflects current frame
+            SessionRecorder.shared.addSample(
+                alpha: self.frontAlpha, theta: self.frontTheta,
+                beta:  self.frontBeta,  delta: self.frontDelta,
+                gamma: self.frontGamma, depth: Float(self.depth.score),
+                inDeep: self.gate.inDeepState
+            )
         }
 
         scorer.onResult = { [weak self] result in
@@ -208,10 +231,10 @@ struct ProbeView: View {
                         LabeledContent("State") {
                             Label(
                                 probe.gate.inDeepState ? "Deep" : "Shallow",
-                                systemImage: probe.gate.inDeepState
-                                    ? "bell.fill" : "bell.slash"
+                                systemImage: probe.gate.inDeepState ? "bell.fill" : "bell.slash"
                             )
-                            .foregroundStyle(probe.gate.inDeepState ? .green : .secondary)
+                            .foregroundStyle(probe.gate.inDeepState ? .green : .red)
+                            .fontWeight(.semibold)
                         }
                     } else {
                         LabeledContent("Calibrating…",
@@ -242,11 +265,20 @@ struct ProbeView: View {
                     MeditationTimerView()
                 }
 
+                Section("Recording") {
+                    RecordingControlView()
+                }
+
+                Section("Past Sessions") {
+                    SessionsListView()
+                }
+
                 Section("Spotify") {
                     SpotifyRow()
                 }
             }
             .navigationTitle("Muse++ — Gate 2")
+            .onAppear { SessionRecorder.shared.loadSavedSessions() }
         }
     }
 
@@ -433,5 +465,56 @@ private struct MeditationTimerView: View {
             mt.isRunning ? mt.stop() : mt.start()
         }
         .foregroundStyle(mt.isRunning ? .red : .green)
+    }
+}
+
+// MARK: - Recording control
+
+private struct RecordingControlView: View {
+    @ObservedObject private var rec = SessionRecorder.shared
+
+    var body: some View {
+        if rec.isRecording {
+            Label("Recording in progress", systemImage: "circle.fill")
+                .foregroundStyle(.red)
+            Button("Save & Stop") { rec.endSession() }
+                .foregroundStyle(.orange)
+        } else {
+            Button("Start Manual Recording") { rec.startSession() }
+                .foregroundStyle(.blue)
+        }
+        Text("Auto-starts when Muse connects · saved to Files → MusePlus → MuseSessions")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+// MARK: - Sessions list
+
+private struct SessionsListView: View {
+    @ObservedObject private var rec = SessionRecorder.shared
+
+    var body: some View {
+        if rec.savedSessions.isEmpty {
+            Text("No sessions recorded yet.").foregroundStyle(.secondary)
+        } else {
+            ForEach(rec.savedSessions, id: \.path) { url in
+                HStack {
+                    Text(url.deletingPathExtension().lastPathComponent
+                            .replacingOccurrences(of: "session_", with: "")
+                            .replacingOccurrences(of: "_", with: "  "))
+                        .font(.subheadline.monospacedDigit())
+                    Spacer()
+                    ShareLink(item: url,
+                              preview: SharePreview(url.lastPathComponent,
+                                                    image: Image(systemName: "doc.text"))) {
+                        Image(systemName: "square.and.arrow.up")
+                            .foregroundStyle(.blue)
+                    }
+                }
+            }
+            .onDelete { idxs in
+                idxs.forEach { rec.deleteSession(at: rec.savedSessions[$0]) }
+            }
+        }
     }
 }

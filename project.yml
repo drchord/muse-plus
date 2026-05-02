@@ -41,6 +41,8 @@ targets:
           - bluetooth-le
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        UIFileSharingEnabled: YES
+        LSSupportsOpeningDocumentsInPlace: YES
         CFBundleURLTypes:
           - CFBundleURLSchemes:
               - muse-monitor
