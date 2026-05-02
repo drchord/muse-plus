@@ -193,9 +193,10 @@ struct ProbeView: View {
                         LabeledContent("Score", value: String(format: "%.2f", probe.depth.score))
                         ProgressView(value: Double(probe.depth.score))
                             .tint(scoreColor(probe.depth.score))
+                        LabeledContent("Smoothed", value: String(format: "%.2f", probe.gate.smoothedScore))
                         LabeledContent("State") {
                             Label(
-                                probe.gate.inDeepState ? "Deep 🔔" : "Shallow",
+                                probe.gate.inDeepState ? "Deep" : "Shallow",
                                 systemImage: probe.gate.inDeepState
                                     ? "bell.fill" : "bell.slash"
                             )
