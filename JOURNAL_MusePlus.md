@@ -34,6 +34,27 @@
 
 ---
 
+## 2026-05-03 | Sparky (laptop) | ~1h | Build 50 — TestFlight unblocked
+
+**Focus:** CI debugging, Apple upload limit resolution, checkpoint/memory update
+
+**Decided:** Nothing architectural — pure ops.
+
+**What happened:**
+- Discovered builds 45–47 were compile failures (never uploaded), build 48 uploaded but Apple daily limit was hit
+- Fixed 2 compile errors: BandPowers label order (EEGPipeline) + chartForegroundStyleScale type (BandChart)
+- Apple limit reset ~17:00 EST; triggered empty commit → build 50 uploaded successfully
+- Build 50 is the first TestFlight build since 44 to include: rolling chart, Mind Monitor dark style, spectral peak Hz
+
+**Left off at:** Build 50 live in TestFlight. User to test on device.
+
+**Next session needs:**
+- Test build 50: Mind Monitor chart, spectral peak Hz per band, chart scrolling
+- Test Spotify connect flow (never device-tested)
+- If stable → begin App Store submission prep (see STATUS.md Phase 1–5)
+
+---
+
 ## Earlier sessions (pre-journal, reconstructed from git log)
 
 | Date (approx) | Builds | Focus |

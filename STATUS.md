@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-02
+**Last updated:** 2026-05-03
 
 ## Build State
 
@@ -10,13 +10,15 @@
 | 41 | Chime preview + meditation timer | ✅ Uploaded | Timer-end triple gong, 5–90 min presets |
 | 42 | Session recording (JSON → Files app) | ✅ Uploaded | ShareLink for Google Drive export |
 | 43 | Idle timer disable + auto-reconnect | ✅ Uploaded | 3 attempts × 3s, preserves calibration |
-| 44 | Signal quality view | ✅ **Last visible in TestFlight** | Replaced raw µV with HSI Excellent/Good/Fair/Poor |
+| 44 | Signal quality view | ✅ Uploaded | Replaced raw µV with HSI Excellent/Good/Fair/Poor |
 | 45 | Chart X-axis rolling 60s window | ❌ Compile fail | Never reached TestFlight |
 | 46 | Mind Monitor dark chart redesign | ❌ Compile fail | Never reached TestFlight |
 | 47 | Spectral peak Hz per band | ❌ Compile fail | Never reached TestFlight |
-| 48 | **Compile fixes** | ⏳ Pending upload limit | BandPowers label order + chartForegroundStyleScale type |
+| 48 | Compile fixes (BandPowers + chartScale) | ❌ Upload limit | Apple daily limit hit |
+| 49 | Empty trigger commit | ❌ Upload limit | Still blocked |
+| 50 | All of 45–48 features | ✅ **Current TestFlight build** | CI run 25291031222 — uploaded 2026-05-03 |
 
-**Current blocker:** Apple TestFlight upload limit hit (too many CI attempts). Resets ~24h from 2026-05-02 ~22:00 UTC. Code is clean — next CI push will succeed.
+**Current blocker:** None. Build 50 live in TestFlight.
 
 ## What Build 48 Contains (over build 44)
 
@@ -135,18 +137,17 @@
 MusePlus iOS app — Muse S EEG real-time meditation companion.
 Project: C:\Users\sugat\MusePlus. Git remote: drchord/muse-plus.
 
-CURRENT STATE (2026-05-02):
-- Last TestFlight build: 44 (signal quality view)
-- Build 48 pushed and compiles clean — waiting for Apple upload limit to reset (~24h)
-- Build 48 contains: rolling chart X-axis, Mind Monitor dark chart style, spectral peak Hz per band
+CURRENT STATE (2026-05-03):
+- Last TestFlight build: 50 ✅ — uploaded successfully 2026-05-03
+- CI run: 25291031222 (github.run_number=50)
 - CI uses github.run_number as build number
 
-WHAT BUILD 48 ADDS OVER 44:
-1. BandChart: Mind Monitor style — dark card Color(white:0.07), MM colors, 3pt catmullRom
-2. BandChart header: δ Delta 1–4 Hz | live dominant Hz (bold) per band via vDSP_maxvi
+WHAT BUILD 50 CONTAINS (over build 44):
+1. BandChart: Mind Monitor dark style — Color(white:0.07) card, MM colors, 3pt catmullRom lines
+2. BandChart header: δ Delta 1–4 Hz | live dominant Hz bold per band (vDSP_maxvi on FFT mag2)
 3. Chart X-axis: rolling 60s window (xDomain = max(0, last.time-60)...last.time)
 
-KEY BUG FIXES IN 48:
+KEY BUG FIXES THAT WERE IN BUILDS 45-48:
 - EEGPipeline BandPowers init: labels must be delta,theta,alpha,beta,gamma THEN deltaPeak...gammaPeak
 - BandChart chartForegroundStyleScale: use domain:/range: arrays, NOT [String:Color] dict
 
