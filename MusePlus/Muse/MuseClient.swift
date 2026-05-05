@@ -36,6 +36,11 @@ final class MuseClient: NSObject {
     // True once we confirm notchFilteredEeg is emitting; falls back to raw .eeg if never set.
     // Accessed only on the SDK callback thread (serial), so no lock needed.
     private var hasNotchEeg = false
+    // Rate-limit quality-based suppression: isGood fires at 10 Hz; without gating, poor frontal
+    // contact during settle-in floods suppressWindows and permanently blocks the EEG pipeline.
+    // 5s minimum between successive quality-triggered artifact events is sufficient — artifacts
+    // suppress 4 windows × 0.5s = 2s, so a new trigger is only needed if problem persists.
+    private var lastQualitySuppression: TimeInterval = 0
 
     override init() {
         self.manager = IXNMuseManagerIos.sharedManager()
@@ -111,6 +116,7 @@ final class MuseClient: NSObject {
         presetAppliedFor = nil
         connectedMuseModel = nil
         hasNotchEeg = false
+        lastQualitySuppression = 0
     }
 
     // Choose the right preset for the connected hardware. Called once per session
@@ -239,12 +245,16 @@ extension MuseClient: IXNMuseDataListener {
 
     // IsGood: 4 values (1=good, 0=bad) per EEG channel, emitted at 10 Hz.
     // If frontal channels (AF7=idx1, AF8=idx2) are bad, trigger artifact suppression.
+    // Rate-limited: max one suppression event per 5s to prevent settle-in flood.
     private func handleIsGood(_ p: IXNMuseDataPacket) {
         let vals = p.values()
         guard vals.count >= 4 else { return }
         let af7Good = vals[1].doubleValue > 0.5
         let af8Good = vals[2].doubleValue > 0.5
         guard !af7Good || !af8Good else { return }
+        let now = Date().timeIntervalSinceReferenceDate
+        guard now - lastQualitySuppression >= 5.0 else { return }
+        lastQualitySuppression = now
         DispatchQueue.main.async { self.artifactDetected.send(true) }
     }
 
@@ -347,6 +357,7 @@ extension MuseClient: IXNMuseDataListener {
     }
 
     // Head motion > 0.25g deviation from resting 1g magnitude triggers artifact suppression.
+    // Rate-limited via lastQualitySuppression: same 5s gate as handleIsGood.
     private func handleAccelerometer(_ p: IXNMuseDataPacket) {
         let x: Double = p.getAccelerometerValue(.X)
         let y: Double = p.getAccelerometerValue(.Y)
@@ -354,6 +365,9 @@ extension MuseClient: IXNMuseDataListener {
         let sumSq: Double = x*x + y*y + z*z
         let magnitude: Double = sqrt(sumSq)
         guard abs(magnitude - 1.0) > 0.25 else { return }
+        let now = Date().timeIntervalSinceReferenceDate
+        guard now - lastQualitySuppression >= 5.0 else { return }
+        lastQualitySuppression = now
         DispatchQueue.main.async { self.artifactDetected.send(true) }
     }
 }

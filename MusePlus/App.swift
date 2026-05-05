@@ -55,8 +55,6 @@ final class Probe: ObservableObject {
     private var recordingStartWork: DispatchWorkItem?
     // True once the 300s recording work item has been scheduled this connection.
     private var calibrationFiredRecording = false
-    // Suppresses contact chimes during initial headband settle-in.
-    private var fitFirstReceived = false
     // Last time the beta-wander cue fired — 30s minimum gap.
     private var lastBetaCueDate = Date.distantPast
 
@@ -89,7 +87,6 @@ final class Probe: ObservableObject {
                     self?.sessionStart = Date()
                     self?.sampleIndex  = 0
                     self?.bandHistory  = []
-                    self?.fitFirstReceived = false
                     self?.reconnectAttempts = 0
                     self?.sessionSummary = nil
                     // Recording scheduled in scorer.onResult after calibration + 300s grace.
@@ -101,7 +98,6 @@ final class Probe: ObservableObject {
                     self?.calibrationFiredRecording = false
                     self?.recordingStartWork?.cancel()
                     self?.recordingStartWork = nil
-                    self?.fitFirstReceived = false
                     let recUrl = SessionRecorder.shared.endSession()
                     self?.pipeline.endSession()
                     // Decode saved session on main thread. Typical session JSON ≤ 400 KB
@@ -135,12 +131,10 @@ final class Probe: ObservableObject {
                 let wasGood = self.fit.allGood
                 self.fit = snap
                 self.gate.contactsGood = snap.allGood
-                if !self.fitFirstReceived {
-                    // Suppress chime on very first packet — fit starts as allGood=false,
-                    // so the first good packet would falsely trigger "contact restored".
-                    self.fitFirstReceived = true
-                    return
-                }
+                // Gate contact chimes behind calibration: during 60s settle-in the headband
+                // frequently fluctuates between good/bad contact. Chiming before calibration
+                // completes is noisy and unhelpful — user can see contact state via dots.
+                guard self.depth.isCalibrated else { return }
                 if wasGood && !snap.allGood {
                     ChimeEngine.shared.playContactLost()
                     SessionRecorder.shared.addFitEvent()
@@ -743,12 +737,14 @@ private struct SignalChipsView: View {
     let hsi: [Double]
 
     private func hsiLabel(_ i: Int) -> (String, Color) {
-        guard hsi.count > i else { return ("?", .gray) }
+        guard hsi.count > i else { return ("●", .gray) }
+        // HSI SDK values: 1=good, 2=mediocre, 4=no contact.
+        // Threshold aligns with FitCheckSnapshot.allGood (< 2.0) so green dot = genuinely good.
+        // Removes yellow: HSI=2 (headband partially off or nearby) now shows orange, not yellow.
         switch hsi[i] {
-        case ..<1.5: return ("●", .green)
-        case ..<2.5: return ("●", .yellow)
-        case ..<3.5: return ("●", .orange)
-        default:     return ("●", .red)
+        case ..<2.0: return ("●", .green)   // good contact
+        case ..<3.5: return ("●", .orange)  // mediocre — not ideally seated or off skin
+        default:     return ("●", .red)     // no contact (HSI=4)
         }
     }
 
@@ -1001,16 +997,17 @@ private struct SignalQualityView: View {
     private func label(_ v: Double) -> String {
         switch v {
         case ..<1.5: "Excellent"
-        case ..<2.5: "Good"
-        case ..<3.5: "Fair"
-        default:     "Poor"
+        case ..<2.0: "Good"
+        case ..<2.5: "Mediocre"
+        case ..<3.5: "Poor"
+        default:     "No contact"
         }
     }
 
     private func color(_ v: Double) -> Color {
         switch v {
-        case ..<2.5: .green
-        case ..<3.5: .yellow
+        case ..<2.0: .green   // matches allGood threshold
+        case ..<3.5: .orange
         default:     .red
         }
     }
