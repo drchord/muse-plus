@@ -55,6 +55,34 @@
 
 ---
 
+## 2026-05-04 | Sparky (laptop) | ~30min | Build 51 — comprehensive overhaul shipped
+
+**Focus:** Commit Build 51 (already code-complete from prior session), push, fix one compile error, ship to TestFlight.
+
+**Decided:** Nothing new architectural. Followed BUILD_PLAN_51.md verbatim through phases 1–5.
+
+**What happened:**
+- Pre-flight grep verified compile risks per plan §0.2: BandPowers init order, AVAudioUnitReverb.largeHall, IXNPpg.AMBIENT, iCloud entitlement — all clean
+- Committed 80-file change set (commit `9f3df38`): 8 source files + project.yml + entitlements + 7 M4A soundscapes + STATUS.md + Reference/MuseStatsIosSwift/Muse.framework cleanup (~5MB)
+- Pushed to origin/main → CI run 25351485915 → **archive failed** at MuseClient.swift:258–261
+- Root cause: `IXNAccelerometer` enum bridges to `.X/.Y/.Z` (uppercase), not `.x/.y/.z` as STATUS.md note claimed. Swift SE-0005 treats single-letter cases as acronyms (preserved as-is). Plan §0.2 had documented this contingency.
+- Fix commit: explicit `.X/.Y/.Z` + explicit `Double` type annotations to break sqrt overload ambiguity (Duration vs Double)
+- CI run 25351592940 → **archived + uploaded in 2m4s** → Build 51 live in TestFlight
+
+**Build 51 features delivered:** see STATUS.md "What Build 51 Contains" — 7 M4A soundscapes with crossfade + adaptive binaural, stereo ChimeEngine with reverb + Haas delay, 4-layer artifact rejection (now incl. accelerometer >0.25g), PPG heart rate via AMBIENT/Green channel autocorrelation, Peniston-Kulkosky meditation index, FAA bar, full UI redesign.
+
+**Pending warnings (non-blocking, fix next session):**
+- EEGPipeline.swift:76,81 — `DSPSplitComplex(realp: &realp, imagp: &imagp)` inout pointer outlives call. Refactor with `withUnsafeMutableBufferPointer` for safety. Compiles, runs, but technically UB.
+
+**Left off at:** Build 51 live in TestFlight. Awaiting on-device test (per BUILD_PLAN_51 §6 checklist: connection, soundscapes, timer, chimes, depth gauge, FAA, artifact suppression, heart rate, session recording).
+
+**Next session needs:**
+- On-device test Build 51 against §6 checklist
+- Fix DSPSplitComplex inout warnings if user wants Swift 6 cleanliness
+- Continue pending list from STATUS.md continuation prompt: SessionRecorder fields, replay view, training stages, Sparky Python pipeline, ZIPFoundation, Spotify device test
+
+---
+
 ## Earlier sessions (pre-journal, reconstructed from git log)
 
 | Date (approx) | Builds | Focus |

@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-03
+**Last updated:** 2026-05-04
 
 ## Build State
 
@@ -17,9 +17,9 @@
 | 48 | Compile fixes (BandPowers + chartScale) | ❌ Upload limit | Apple daily limit hit |
 | 49 | Empty trigger commit | ❌ Upload limit | Still blocked |
 | 50 | All of 45–48 features | ✅ **Current TestFlight build** | CI run 25291031222 — uploaded 2026-05-03 |
-| 51 | Comprehensive overhaul (see below) | ⏳ Not yet committed | Ready to commit + push |
+| 51 | Comprehensive overhaul (see below) | ✅ **Current TestFlight build** | CI run 25351592940 — uploaded 2026-05-04 (after 1 retry — accel enum bridging) |
 
-**Current blocker:** None. Build 50 live. Build 51 code complete — needs commit + CI push.
+**Current blocker:** None. Build 51 live in TestFlight as of 2026-05-04.
 
 ## What Build 51 Contains (over build 50)
 
@@ -100,7 +100,7 @@
 - **NotchFilteredEeg**: SDK applies 45–65 Hz bandstop before our FFT. Use `.notchFilteredEeg` not `.eeg`.
 - **IsGood**: frontal AF7/AF8 quality at 10 Hz. Bad → artifact suppress (DO NOT swap channel indices).
 - **PPG heart rate**: queue-serialized buffer (ppgBuffer accessed from SDK thread + queue = must serialize). ppgBuffer cleared on disconnect. AMBIENT = Green on Muse S 2019 (SDK header confirmed). Accel values in g (SDK header: "negated to align with headband orientation" — magnitude sqrt(x²+y²+z²) = 1.0 at rest regardless of sign, so `abs(magnitude-1.0)>0.25` is correct). BPM algorithm: demean → 64-tap baseline-wander HP → 8-tap LP → autocorrelation over lags 19–128 (200–30 BPM) → quality gate (AC/power > 0.20). AC approach is more robust than peak detection for noisy wearable PPG.
-- **Accelerometer enum bridging**: IXNAccelerometerX → `.x` (lowercase — single letter, Swift SE-0005). IXNPpgAMBIENT → `.AMBIENT` (all-caps acronym rule preserved).
+- **Accelerometer enum bridging**: IXNAccelerometerX → `.X` (uppercase — Swift SE-0005 treats single letter as acronym). IXNPpgAMBIENT → `.AMBIENT` (all-caps acronym rule preserved). Build 51 first attempt failed because notes claimed lowercase; corrected in fix commit.
 - **iCloud entitlement**: iCloud.com.drchord.museplus configured in Apple Developer Portal + MusePlus.entitlements.
 
 ## App Store Submission — Step by Step
