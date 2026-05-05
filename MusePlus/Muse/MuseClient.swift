@@ -27,6 +27,11 @@ final class MuseClient: NSObject {
     private static let ppgSampleRate: Double = 64.0
     private static let ppgWindowSize: Int    = 512
 
+    // Athena (Ms03) requires preset 1041 (8 EEG @ 256Hz + 16 Optics @ 64Hz) — preset 21
+    // is rejected by Athena firmware and would leave headband disconnected.
+    // Tracks whether model-appropriate preset has been applied for current session.
+    private var presetAppliedFor: IXNMuseModel?
+
     override init() {
         self.manager = IXNMuseManagerIos.sharedManager()
         super.init()
@@ -63,7 +68,11 @@ final class MuseClient: NSObject {
         muse.register(self as IXNMuseDataListener?, type: .ppg)
         // Accelerometer: head motion > 0.25g triggers artifact suppression.
         muse.register(self as IXNMuseDataListener?, type: .accelerometer)
-        muse.setPreset(.preset21)   // default for muse2019 (Muse S Athena) — no preset change = no disconnect cycle
+        // Preset is applied AFTER connection completes — see receive(_:muse:) in
+        // IXNMuseConnectionListener extension. Per SDK docs, setting an invalid preset
+        // (e.g. preset21 on Athena) leaves the headband disconnected. We must detect
+        // model first via getMuseConfiguration().getMuseModel().
+        presetAppliedFor = nil
         muse.runAsynchronously()
     }
 
@@ -85,6 +94,28 @@ final class MuseClient: NSObject {
         }
         ppgBuffer.removeAll()
         lastBpmTs = 0
+        presetAppliedFor = nil
+    }
+
+    // Choose the right preset for the connected hardware. Called once per session
+    // after the first .connected state transition. Setting a preset triggers a
+    // disconnect/reconnect cycle on the headband per SDK contract.
+    private func applyPresetForModel(_ muse: IXNMuse) {
+        let cfg = muse.getMuseConfiguration()
+        let model = cfg.getMuseModel()
+        guard presetAppliedFor != model else { return }
+        if model == .ms03 {
+            // Athena: 8 EEG @ 256Hz/14-bit + 16 Optics @ 64Hz, low power. Provides
+            // canonical EEG1-4 + AUX1-4 plus Optics for PPG/fNIRS.
+            // Heart rate via legacy PPG path will read empty on Athena until
+            // Phase A3 lands the Optics-derived HR pipeline.
+            muse.setPreset(.preset1041)
+        } else {
+            // Muse S 2019/2021 + Muse 2 + older: preset21 ships 4 EEG + accelerometer,
+            // PPG via separate ppg packet type. Preserves Build 54 behavior exactly.
+            muse.setPreset(.preset21)
+        }
+        presetAppliedFor = model
     }
 }
 
@@ -101,7 +132,15 @@ extension MuseClient: IXNMuseListener {
 
 extension MuseClient: IXNMuseConnectionListener {
     func receive(_ packet: IXNMuseConnectionPacket, muse: IXNMuse?) {
-        DispatchQueue.main.async { self.connectionState.send(packet.currentConnectionState) }
+        let state = packet.currentConnectionState
+        DispatchQueue.main.async { self.connectionState.send(state) }
+        // On first .connected of this session, query model and apply correct preset.
+        // Subsequent .connected (after preset change disconnect/reconnect) skips,
+        // because presetAppliedFor is now set.
+        if state == .connected, let m = muse, presetAppliedFor == nil {
+            // setPreset must run on main thread (matches connect() pattern)
+            DispatchQueue.main.async { [weak self] in self?.applyPresetForModel(m) }
+        }
     }
 }
 

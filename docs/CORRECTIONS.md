@@ -135,6 +135,23 @@ These remain open. Listed in ROADMAP open questions section.
 
 ---
 
+## SDK migration discovery (2026-05-05, post-rewrite)
+
+After ROADMAP/BUILD_PLAN_55/audits v2 landed, a final verification pass found that **`Frameworks/Muse.framework` is already SDK 8.0.5** (binary md5 + headers identical to the 8.0.5 archive). My v1 + v2 plans both assumed Build 54 was running 7.x and called for a framework swap as Phase A1. That was wrong.
+
+What this means:
+- Phase A1 of BUILD_PLAN_55 (SDK migration) is a no-op. Skip it.
+- Build 54's Swift code, however, still hard-codes `setPreset(.preset21)` which is invalid on Ms03 hardware. Per IXNMusePreset.h: "If the preset is invalid for that headband model, then the headband will remain disconnected." So Build 54 likely **does not connect at all** to Athena, despite the framework supporting it.
+- Phase A2 (model detection + preset branch) is the actual minimum-viable Athena change. Implemented 2026-05-05 as a single MuseClient.swift edit:
+  - Removed the immediate `setPreset(.preset21)` from `connect()`
+  - Added `applyPresetForModel` helper that reads `IXNMuseConfiguration.getMuseModel()` and branches: Ms03 → preset1041, else → preset21
+  - Connection listener invokes the helper on first `.connected` transition (preserves single setPreset per session per SDK contract)
+- Heart rate degrades to 0 BPM on Athena until Phase A3 ships Optics-derived HR (legacy PPG packet doesn't emit on Athena).
+
+This finding came too late to refactor v2 plans — they still describe Phase A1 as if needed. The file `docs/ATHENA_SPECS.md` was inline-corrected to flag it as a no-op. BUILD_PLAN_55.md and ROADMAP.md still mention "SDK 8.0.5 migration" — those references are now nominally pointers to the verification pass + Phase A2 implementation rather than an actual framework swap.
+
+---
+
 ## What's still NOT validated
 
 The v2 plan is more honest, more grounded in canonical Athena specs, and uses 2024-2026 SOTA algorithms. But these remain unverified:

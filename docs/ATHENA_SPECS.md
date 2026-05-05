@@ -4,7 +4,7 @@
 **Model identifier:** `IXNMuseModelMs03` — "MuseS 2025 softband with USB-C, Bluetooth 5.3, improved EEG and Optics"
 **SDK version required:** 8.0.0 minimum (Athena support added). Use 8.0.5 (latest as of 2026-04).
 
-> **Note:** Build 54 ships Muse SDK 7.x (legacy). Migration to SDK 8.0.5 required before any Athena work.
+> **Note:** SDK migration verified complete as of 2026-05-05 — `Frameworks/Muse.framework` md5 matches the 8.0.5 archive exactly. Phase A1 of BUILD_PLAN_55 is a no-op. Swift code in MuseClient.swift still hard-codes preset21 (Mu04 default), which is invalid on Ms03 — Phase A2 fixes this.
 
 ## EEG
 
