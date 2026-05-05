@@ -33,6 +33,9 @@ final class MuseClient: NSObject {
     private var presetAppliedFor: IXNMuseModel?
     // Remembered after applyPresetForModel; drives 8-channel EEG read in handleEEG.
     private var connectedMuseModel: IXNMuseModel?
+    // True once we confirm notchFilteredEeg is emitting; falls back to raw .eeg if never set.
+    // Accessed only on the SDK callback thread (serial), so no lock needed.
+    private var hasNotchEeg = false
 
     override init() {
         self.manager = IXNMuseManagerIos.sharedManager()
@@ -66,6 +69,10 @@ final class MuseClient: NSObject {
         muse.register(self as IXNMuseDataListener?, type: .artifacts)
         // IsGood: 10 Hz quality flag per channel — more reliable than amplitude threshold.
         muse.register(self as IXNMuseDataListener?, type: .isGood)
+        // Raw EEG fallback: if .notchFilteredEeg does not emit on Athena at preset 1041,
+        // .eeg (unfiltered) delivers the same signal without the 45-65 Hz notch.
+        // handleEEG prefers notchFilteredEeg when available (hasNotchEeg flag).
+        muse.register(self as IXNMuseDataListener?, type: .eeg)
         // PPG: Green light (AMBIENT channel) on Muse S 2019/2021/2 for heart rate.
         // On Athena (MS-03) the .ppg packet does not emit — Optics replaces it.
         muse.register(self as IXNMuseDataListener?, type: .ppg)
@@ -103,6 +110,7 @@ final class MuseClient: NSObject {
         lastBpmTs = 0
         presetAppliedFor = nil
         connectedMuseModel = nil
+        hasNotchEeg = false
     }
 
     // Choose the right preset for the connected hardware. Called once per session
@@ -159,7 +167,11 @@ extension MuseClient: IXNMuseDataListener {
     func receive(_ packet: IXNMuseDataPacket?, muse: IXNMuse?) {
         guard let p = packet else { return }
         switch p.packetType() {
-        case .notchFilteredEeg: handleEEG(p)           // 45–65 Hz notch-filtered
+        case .notchFilteredEeg:
+            hasNotchEeg = true
+            handleEEG(p)                               // preferred: SDK notch-filtered
+        case .eeg:
+            if !hasNotchEeg { handleEEG(p) }           // fallback: raw EEG if notch not emitting
         case .hsiPrecision:     handleHorseshoe(p)
         case .battery:          handleBattery(p)
         case .isGood:           handleIsGood(p)
@@ -193,8 +205,9 @@ extension MuseClient: IXNMuseDataListener {
             ]
         }
         // Amplitude artifact rejection on canonical 4 channels only (AUX contact quality unknown).
+        // 500 µV threshold: covers Athena settle-in transients while still catching muscle artifacts.
         let maxAmp = channels.prefix(4).map(abs).max() ?? 0
-        if maxAmp > 300 {
+        if maxAmp > 500 {
             DispatchQueue.main.async { self.artifactDetected.send(true) }
             return  // drop this packet entirely
         }

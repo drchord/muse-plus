@@ -29,7 +29,7 @@ struct DeepEpisode: Codable {
     var duration:  Double? { exitTime.map { $0 - enterTime } }
 }
 
-struct SessionRecord: Codable {
+struct SessionRecord: Codable, Identifiable {
     let id:        String
     let startDate: Date
     var endDate:   Date?

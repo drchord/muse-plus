@@ -57,6 +57,24 @@ final class ChimeEngine {
         scheduleDuck(over: 3.0)
     }
 
+    /// Conditioning anchor: 7 Hz binaural theta tone (200 Hz L / 207 Hz R).
+    /// Fires 20s into sustained deep state once per episode. The brain learns to associate
+    /// this tone with the deep state — Pavlovian conditioning for faster future induction.
+    /// Binaural effect requires headphones; without them it reduces to a faint mono tone.
+    func playConditioningAnchor() {
+        reverb.wetDryMix = 10
+        scheduleBinauralPulse(carrierHz: 200.0, beatHz: 7.0, duration: 3.0, amplitude: 0.14)
+        scheduleDuck(over: 3.5)
+    }
+
+    /// Beta wander cue: brief 1 kHz sine tick — fires when frontal beta spikes during shallow state.
+    /// Trains metacognitive awareness without a jarring interrupt.
+    func playBetaCue() {
+        reverb.wetDryMix = 0
+        scheduleSine(freq: 1000.0, duration: 0.25, amplitude: 0.07)
+        // No duck — cue is soft enough and very brief
+    }
+
     /// In-session guidance check-in: 396 Hz gentle bowl — soft reminder, non-disruptive.
     func playCheckIn() {
         reverb.wetDryMix = 20
@@ -75,6 +93,47 @@ final class ChimeEngine {
             self?.scheduleGong(fundamental: 84, decayRate: 0.20, duration: 7.0, amplitude: 0.35)
         }
         scheduleDuck(over: 13.0)
+    }
+
+    // MARK: - Binaural pulse (pure sine stereo — two frequencies, no partials)
+
+    private func scheduleBinauralPulse(carrierHz: Double, beatHz: Double,
+                                        duration: Double, amplitude: Double) {
+        guard let buf = stereoBuffer(duration: duration) else { return }
+        let L = buf.floatChannelData![0]
+        let R = buf.floatChannelData![1]
+        let n = Int(buf.frameLength)
+        let fadeSamples = Int(0.15 * sampleRate)  // 150ms fade in/out
+        for i in 0..<n {
+            let t = Double(i) / sampleRate
+            let env: Double
+            if i < fadeSamples        { env = Double(i) / Double(fadeSamples) }
+            else if i > n - fadeSamples { env = Double(n - i) / Double(fadeSamples) }
+            else                        { env = 1.0 }
+            L[i] = Float(sin(2 * .pi * carrierHz           * t) * env * amplitude)
+            R[i] = Float(sin(2 * .pi * (carrierHz + beatHz) * t) * env * amplitude)
+        }
+        schedule(buf)
+    }
+
+    // MARK: - Pure sine burst (for cue tones — no partial model)
+
+    private func scheduleSine(freq: Double, duration: Double, amplitude: Double) {
+        guard let buf = stereoBuffer(duration: duration) else { return }
+        let L = buf.floatChannelData![0]
+        let R = buf.floatChannelData![1]
+        let n = Int(buf.frameLength)
+        let fadeSamples = Int(min(0.02 * sampleRate, Double(n) / 4))  // 20ms fade
+        for i in 0..<n {
+            let t = Double(i) / sampleRate
+            let env: Double
+            if i < fadeSamples        { env = Double(i) / Double(fadeSamples) }
+            else if i > n - fadeSamples { env = Double(n - i) / Double(fadeSamples) }
+            else                        { env = 1.0 }
+            let s = Float(sin(2 * .pi * freq * t) * env * amplitude)
+            L[i] = s; R[i] = s
+        }
+        schedule(buf)
     }
 
     // MARK: - Bowl synthesis (stereo, per-partial decay, Haas)

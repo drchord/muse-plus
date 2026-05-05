@@ -49,6 +49,16 @@ final class Probe: ObservableObject {
     private var sampleIndex = 0
     private var sessionStart = Date()
     private var reconnectAttempts = 0
+    // Session summary shown after disconnect if session was recorded.
+    @Published var sessionSummary: SessionRecord? = nil
+    // Deferred recording: fires 300s after calibration completes (not after connect).
+    private var recordingStartWork: DispatchWorkItem?
+    // True once the 300s recording work item has been scheduled this connection.
+    private var calibrationFiredRecording = false
+    // Suppresses contact chimes during initial headband settle-in.
+    private var fitFirstReceived = false
+    // Last time the beta-wander cue fired — 30s minimum gap.
+    private var lastBetaCueDate = Date.distantPast
 
     func start() {
         client.discoveredMuses
@@ -79,12 +89,35 @@ final class Probe: ObservableObject {
                     self?.sessionStart = Date()
                     self?.sampleIndex  = 0
                     self?.bandHistory  = []
-                    SessionRecorder.shared.startSession()
+                    self?.fitFirstReceived = false
                     self?.reconnectAttempts = 0
+                    self?.sessionSummary = nil
+                    // Recording scheduled in scorer.onResult after calibration + 300s grace.
+                    self?.calibrationFiredRecording = false
+                    self?.recordingStartWork?.cancel()
+                    self?.lastBetaCueDate = .distantPast
                 case .disconnected:
                     UIApplication.shared.isIdleTimerDisabled = false
-                    SessionRecorder.shared.endSession()
+                    self?.calibrationFiredRecording = false
+                    self?.recordingStartWork?.cancel()
+                    self?.recordingStartWork = nil
+                    self?.fitFirstReceived = false
+                    let recUrl = SessionRecorder.shared.endSession()
                     self?.pipeline.endSession()
+                    // Decode saved session for summary + fade + adaptive threshold.
+                    if let url = recUrl,
+                       let data = try? Data(contentsOf: url) {
+                        let dec = JSONDecoder()
+                        dec.dateDecodingStrategy = .iso8601
+                        if let rec = try? dec.decode(SessionRecord.self, from: data) {
+                            self?.sessionSummary = rec
+                            // Successful = had deep state AND ≥5 min recorded.
+                            if !rec.episodes.isEmpty && rec.durationMinutes >= 5.0 {
+                                SoundscapePlayer.shared.decrementBinauralFade()
+                            }
+                            self?.computeAdaptiveThreshold()
+                        }
+                    }
                     self?.scheduleReconnect()
                 default: break
                 }
@@ -98,6 +131,12 @@ final class Probe: ObservableObject {
                 let wasGood = self.fit.allGood
                 self.fit = snap
                 self.gate.contactsGood = snap.allGood
+                if !self.fitFirstReceived {
+                    // Suppress chime on very first packet — fit starts as allGood=false,
+                    // so the first good packet would falsely trigger "contact restored".
+                    self.fitFirstReceived = true
+                    return
+                }
                 if wasGood && !snap.allGood {
                     ChimeEngine.shared.playContactLost()
                     SessionRecorder.shared.addFitEvent()
@@ -166,6 +205,20 @@ final class Probe: ObservableObject {
                 if self.bandHistory.count > 120 { self.bandHistory.removeFirst() }
             }
             self.scorer.process(powers)
+            // Beta wander alert: fires when frontal beta is >1.5 SD above resting baseline
+            // AND depth is shallow (<0.3). Trains awareness of mind-wandering without jarring
+            // the session — uses additive log threshold since frontBeta is in log10 µV².
+            if self.depth.isCalibrated && self.betaCueEnabled {
+                let bm = self.scorer.calibrationBetaMean
+                let bs = self.scorer.calibrationBetaStd
+                if bs > 0, self.frontBeta > bm + 1.5 * bs, self.depth.score < 0.3 {
+                    let now = Date()
+                    if now.timeIntervalSince(self.lastBetaCueDate) >= 30.0 {
+                        self.lastBetaCueDate = now
+                        ChimeEngine.shared.playBetaCue()
+                    }
+                }
+            }
             // Record after scorer.process so depth reflects current frame
             SessionRecorder.shared.addSample(
                 alpha: self.frontAlpha, theta: self.frontTheta,
@@ -184,6 +237,15 @@ final class Probe: ObservableObject {
             self.depth = result
             self.gate.update(result)
             SoundscapePlayer.shared.updateAdaptiveDepth(result.score, iTPF: self.iTPFFrontal)
+            // First calibration completion this connection — schedule recording 300s from now.
+            // 300s grace period: brain noisy in early meditation minutes; only record settled state.
+            if result.isCalibrated && !self.calibrationFiredRecording {
+                self.calibrationFiredRecording = true
+                self.recordingStartWork?.cancel()
+                let work = DispatchWorkItem { SessionRecorder.shared.startSession() }
+                self.recordingStartWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 300, execute: work)
+            }
         }
 
         pipeline.onAperiodicUpdate = { [weak self] chi in
@@ -206,11 +268,59 @@ final class Probe: ObservableObject {
         client.startScan()
     }
 
+    // UserDefaults-backed toggle: default true. No @Published needed — Settings reads inline.
+    var betaCueEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "betaCueEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "betaCueEnabled") }
+    }
+
     func connectFirst() {
         if let m = IXNMuseManagerIos.sharedManager().getMuses().first {
             client.connect(to: m)
             scorer.startCalibration()
             gate.reset()
+            // Restore previously computed adaptive threshold (computed after prior sessions).
+            let saved = UserDefaults.standard.float(forKey: "adaptiveDeepThreshold")
+            if saved >= 0.55 {
+                gate.enterThreshold = saved
+                gate.exitThreshold  = max(0.40, saved - 0.15)
+            }
+        }
+    }
+
+    // Computes personalized deep threshold from saved sessions (background; writes to main).
+    // Only uses sessions that had at least one deep episode — ensures threshold is calibrated
+    // against actual deep states, not just average meditation quality.
+    // Requires ≥5 qualifying sessions; does nothing otherwise.
+    private func computeAdaptiveThreshold() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            // Direct file listing — avoids loadSavedSessions() which dispatches to main.
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let dir  = docs.appendingPathComponent("MuseSessions")
+            let urls = (try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil
+            ))?.filter { $0.pathExtension == "json" }
+              .sorted { $0.lastPathComponent > $1.lastPathComponent } ?? []
+            let dec = JSONDecoder()
+            dec.dateDecodingStrategy = .iso8601
+            var sessionMeans: [Float] = []
+            for url in urls.prefix(30) {
+                guard let data = try? Data(contentsOf: url),
+                      let rec = try? dec.decode(SessionRecord.self, from: data),
+                      !rec.episodes.isEmpty else { continue }
+                sessionMeans.append(rec.meanDepth)
+            }
+            guard sessionMeans.count >= 5 else { return }
+            let sorted = sessionMeans.sorted()
+            let p75idx = Int(Double(sorted.count) * 0.75)
+            let p75    = sorted[min(p75idx, sorted.count - 1)]
+            let clamped = max(0.55, min(0.85, p75))
+            DispatchQueue.main.async {
+                self.gate.enterThreshold = clamped
+                self.gate.exitThreshold  = max(0.40, clamped - 0.15)
+                UserDefaults.standard.set(clamped, forKey: "adaptiveDeepThreshold")
+            }
         }
     }
 
@@ -265,6 +375,9 @@ struct ProbeView: View {
         .sheet(isPresented: $showSettings)   { SettingsSheet(probe: probe) }
         .sheet(isPresented: $showSoundscape) { SoundscapeSheet() }
         .sheet(isPresented: $showTimer)      { TimerSheet() }
+        .sheet(item: $probe.sessionSummary)  { rec in
+            SessionSummarySheet(record: rec) { probe.sessionSummary = nil }
+        }
         .onAppear { SessionRecorder.shared.loadSavedSessions() }
     }
 }
@@ -624,6 +737,7 @@ private struct BottomButton: View {
 
 private struct SettingsSheet: View {
     @ObservedObject var probe: Probe
+    @ObservedObject private var sound = SoundscapePlayer.shared
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -663,11 +777,37 @@ private struct SettingsSheet: View {
                                    value: probe.iTPFFrontal.map { String(format: "%.2f Hz", $0) } ?? "—")
                 }
                 Section("Chimes — preview") {
-                    ChimePreviewRow(label: "Enter Deep",     detail: "432 Hz",      color: .green)  { ChimeEngine.shared.playEnterDeep() }
-                    ChimePreviewRow(label: "Exit Deep",      detail: "288 Hz",      color: .cyan)   { ChimeEngine.shared.playExitDeep() }
-                    ChimePreviewRow(label: "Contact Lost",   detail: "660 Hz ping", color: .orange) { ChimeEngine.shared.playContactLost() }
-                    ChimePreviewRow(label: "Restored",       detail: "528→660 Hz",  color: .mint)   { ChimeEngine.shared.playContactRestored() }
-                    ChimePreviewRow(label: "Timer End",      detail: "84 Hz × 3",   color: .purple) { ChimeEngine.shared.playTimerEnd() }
+                    ChimePreviewRow(label: "Enter Deep",     detail: "432 Hz",          color: .green)  { ChimeEngine.shared.playEnterDeep() }
+                    ChimePreviewRow(label: "Exit Deep",      detail: "288 Hz",          color: .cyan)   { ChimeEngine.shared.playExitDeep() }
+                    ChimePreviewRow(label: "Anchor Tone",    detail: "7 Hz θ binaural", color: .indigo) { ChimeEngine.shared.playConditioningAnchor() }
+                    ChimePreviewRow(label: "β Wander",       detail: "1 kHz tick",      color: .yellow) { ChimeEngine.shared.playBetaCue() }
+                    ChimePreviewRow(label: "Contact Lost",   detail: "660 Hz ping",     color: .orange) { ChimeEngine.shared.playContactLost() }
+                    ChimePreviewRow(label: "Restored",       detail: "528→660 Hz",      color: .mint)   { ChimeEngine.shared.playContactRestored() }
+                    ChimePreviewRow(label: "Timer End",      detail: "84 Hz × 3",       color: .purple) { ChimeEngine.shared.playTimerEnd() }
+                }
+                Section("Training") {
+                    LabeledContent("Binaural Fade Level") {
+                        Text(String(format: "%.0f%%", sound.binauralFadeLevel * 100))
+                            .foregroundStyle(sound.binauralFadeLevel < 0.5 ? .orange : .primary)
+                    }
+                    LabeledContent("Sessions (qualifying)", value: "\(sound.successfulSessionCount)")
+                    Text("Fade decreases 5% per qualifying session (≥5 min recorded, ≥1 deep episode) after 3+ sessions. Trains independence from audio entrainment. Binaural stays functional at any level — turn it off manually when ready.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if sound.binauralFadeLevel < 1.0 {
+                        Button("Reset Fade to 100%") { sound.resetBinauralFade() }
+                            .foregroundStyle(.orange)
+                    }
+                    let thresh = UserDefaults.standard.float(forKey: "adaptiveDeepThreshold")
+                    LabeledContent("Adaptive Deep Threshold",
+                                   value: thresh >= 0.55 ? String(format: "%.2f", thresh) : "Pending (need 5+ sessions with deep)")
+                    Text("Personalizes to 75th percentile of your session depth means (sessions with ≥1 deep episode only). Default 0.65 until enough data.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle("β Wander Alert", isOn: Binding(
+                        get: { probe.betaCueEnabled },
+                        set: { probe.betaCueEnabled = $0 }
+                    ))
+                    Text("Brief 1 kHz tick when frontal beta spikes >1.5 SD during shallow state. Trains metacognitive awareness of mind-wandering.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Recording") {
                     RecordingControlView()
@@ -955,7 +1095,7 @@ private struct RecordingControlView: View {
             Button("Start Manual Recording") { rec.startSession() }
                 .foregroundStyle(.blue)
         }
-        Text("Auto-starts when Muse connects · saved to Files → MusePlus → MuseSessions")
+        Text("Auto-starts 5 min after calibration completes · saved to Files → MusePlus → MuseSessions")
             .font(.caption).foregroundStyle(.secondary)
     }
 }
@@ -988,5 +1128,91 @@ private struct SessionsListView: View {
                 idxs.forEach { rec.deleteSession(at: rec.savedSessions[$0]) }
             }
         }
+    }
+}
+
+// MARK: - Session summary sheet
+
+private struct SessionSummarySheet: View {
+    let record: SessionRecord
+    let onDismiss: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("This Session") {
+                    LabeledContent("Duration",   value: fmtMins(record.durationMinutes))
+                    LabeledContent("Deep Time",  value: fmtMins(record.deepMinutes))
+                    if let latency = record.episodes.first?.enterTime {
+                        LabeledContent("First Deep", value: fmtSecs(latency))
+                    }
+                    if let longest = record.episodes.compactMap(\.duration).max() {
+                        LabeledContent("Longest Deep", value: fmtMins(longest / 60))
+                    }
+                    LabeledContent("Deep Episodes", value: "\(record.episodes.count)")
+                }
+                if chiMean != nil || itpfMean != nil {
+                    Section("Biomarkers") {
+                        if let chi = chiMean {
+                            LabeledContent("Mean χ (1/f slope)", value: String(format: "%.2f", chi))
+                        }
+                        if let itpf = itpfMean {
+                            LabeledContent("θ Peak (iTPF)", value: String(format: "%.1f Hz", itpf))
+                        }
+                    }
+                }
+                Section("Insight") {
+                    Text(coachingLine)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Session Complete")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { onDismiss() }
+                }
+            }
+        }
+    }
+
+    private var chiMean: Float? {
+        let v = record.samples.compactMap(\.aperiodicSlopeMean)
+        return v.isEmpty ? nil : v.reduce(0, +) / Float(v.count)
+    }
+
+    private var itpfMean: Float? {
+        let v = record.samples.compactMap(\.iTPFFrontal)
+        return v.isEmpty ? nil : v.reduce(0, +) / Float(v.count)
+    }
+
+    private var coachingLine: String {
+        let deep   = record.deepMinutes
+        let latency = record.episodes.first?.enterTime ?? 9999
+        let longest = record.episodes.compactMap(\.duration).max() ?? 0
+        if record.episodes.isEmpty {
+            return "No deep state this session. Focus on releasing effort — the state comes when you stop seeking it."
+        }
+        if latency < 180 {
+            return "Fast induction (\(fmtSecs(latency))). Your brain found the anchor quickly. This pathway is strengthening."
+        }
+        if longest > 600 {
+            return "Sustained depth for \(fmtMins(longest / 60)). Retention is building — this is the hardest skill."
+        }
+        if deep > 5 {
+            return "\(fmtMins(deep)) of deep time. Consistent. Each session deepens the pattern."
+        }
+        return "Deep state reached. The neural pathway is forming. Regularity matters more than duration."
+    }
+
+    private func fmtMins(_ m: Double) -> String {
+        let mins = Int(m); let secs = Int((m - Double(mins)) * 60)
+        return mins > 0 ? "\(mins)m \(secs)s" : "\(secs)s"
+    }
+
+    private func fmtSecs(_ s: Double) -> String {
+        let m = Int(s) / 60; let sec = Int(s) % 60
+        return m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
     }
 }

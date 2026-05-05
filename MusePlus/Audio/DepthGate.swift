@@ -1,32 +1,36 @@
 import Foundation
 
-// MARK: - Tuning constants
-
-// Hysteresis: enter high, exit lower — prevents oscillation at boundary
-private let kEnterThreshold: Float    = 0.65
-private let kExitThreshold:  Float    = 0.50
+// MARK: - Tuning constants (file-level, never change per-instance)
 
 // Score must hold above/below threshold for this many 0.5s windows before chiming.
-// Enter: 10s — responsive enough to reward genuine depth without false positives.
-// Exit: 10s — matches enter for symmetry; reduces ping-pong at threshold.
-private let kEnterSustained: Int      = 20   // 20 × 0.5 s = 10 s
-private let kExitSustained:  Int      = 20   // 20 × 0.5 s = 10 s
-
-// Minimum gap between two chimes in the same direction.
-// 90s cooldown: allows multiple training cycles per 20-min session.
-private let kCooldown: TimeInterval   = 90   // 1.5 minutes
-
-// EMA alpha = 0.20 → time constant ~4 windows (~2s) — fast enough to track real shifts.
-private let kEmaAlpha: Float          = 0.20
+private let kEnterSustained: Int    = 20   // 20 × 0.5 s = 10 s
+private let kExitSustained:  Int    = 20
+// Minimum gap between two enter/exit chimes (same direction).
+private let kCooldown: TimeInterval = 90   // 1.5 minutes
+// EMA alpha = 0.20 → time constant ~4 windows (~2s)
+private let kEmaAlpha: Float        = 0.20
+// Conditioning anchor: fires this many seconds after entering deep, once per episode.
+private let kAnchorDelay: TimeInterval  = 20.0
+// Minimum gap between any two anchor tones (across episodes).
+private let kAnchorCooldown: TimeInterval = 300.0  // 5 minutes
 
 final class DepthGate {
     private(set) var inDeepState   = false
     private(set) var smoothedScore: Float = 0.5
 
+    // Adaptive thresholds: default population values; overwritten by Probe after 5+ sessions.
+    var enterThreshold: Float = 0.65
+    var exitThreshold:  Float = 0.50
+
     private var consecutiveAbove   = 0
     private var consecutiveBelow   = 0
     private var lastEnterChime     = Date.distantPast
     private var lastExitChime      = Date.distantPast
+
+    // Conditioning anchor state — separate from chime timing.
+    private var deepStateEnteredAt:       Date = .distantPast
+    private var conditioningAnchorFired          = false
+    private var lastAnchorDate:           Date = .distantPast
 
     private let chime = ChimeEngine.shared
 
@@ -39,13 +43,12 @@ final class DepthGate {
             return
         }
 
-        // Exponential moving average — smooths out per-window jitter
         smoothedScore = kEmaAlpha * result.score + (1 - kEmaAlpha) * smoothedScore
 
         let now = Date()
 
         if !inDeepState {
-            if smoothedScore >= kEnterThreshold {
+            if smoothedScore >= enterThreshold {
                 consecutiveAbove += 1
                 consecutiveBelow  = 0
             } else {
@@ -54,14 +57,28 @@ final class DepthGate {
 
             if consecutiveAbove >= kEnterSustained,
                now.timeIntervalSince(lastEnterChime) >= kCooldown {
-                inDeepState      = true
-                consecutiveAbove = 0
-                lastEnterChime   = now
+                inDeepState           = true
+                consecutiveAbove      = 0
+                lastEnterChime        = now
+                deepStateEnteredAt    = now
+                conditioningAnchorFired = false
                 chime.playEnterDeep()
             }
 
         } else {
-            if smoothedScore < kExitThreshold {
+            // Conditioning anchor: fires kAnchorDelay after entering deep, once per episode,
+            // with kAnchorCooldown between any two anchors. Plays a 7 Hz binaural theta tone
+            // that acts as a Pavlovian state anchor — the brain learns to associate the sound
+            // with this exact state, speeding induction in future sessions.
+            if !conditioningAnchorFired,
+               now.timeIntervalSince(deepStateEnteredAt) >= kAnchorDelay,
+               now.timeIntervalSince(lastAnchorDate) >= kAnchorCooldown {
+                conditioningAnchorFired = true
+                lastAnchorDate          = now
+                chime.playConditioningAnchor()
+            }
+
+            if smoothedScore < exitThreshold {
                 consecutiveBelow += 1
                 consecutiveAbove  = 0
             } else {
@@ -79,11 +96,15 @@ final class DepthGate {
     }
 
     func reset() {
-        inDeepState      = false
-        smoothedScore    = 0.5
-        consecutiveAbove = 0
-        consecutiveBelow = 0
-        lastEnterChime   = .distantPast
-        lastExitChime    = .distantPast
+        inDeepState             = false
+        smoothedScore           = 0.5
+        consecutiveAbove        = 0
+        consecutiveBelow        = 0
+        lastEnterChime          = .distantPast
+        lastExitChime           = .distantPast
+        deepStateEnteredAt      = .distantPast
+        conditioningAnchorFired = false
+        lastAnchorDate          = .distantPast
+        // Intentionally NOT resetting enterThreshold / exitThreshold — persists across sessions.
     }
 }

@@ -56,6 +56,41 @@ final class SoundscapePlayer: ObservableObject {
     @Published var activeLayers:   Set<SoundLayer>     = []
     @Published var layerVolumes:   [SoundLayer: Float] = Dictionary(
         uniqueKeysWithValues: SoundLayer.allCases.map { ($0, 0.35) })
+
+    // Fade schedule: decrements 5% per successful session after 3+ sessions.
+    // Applied at buffer-synthesis time so the user volume slider is unaffected.
+    // Min 0.05 — fully silent binaural is useless; user should manually turn it off at that point.
+    @Published var binauralFadeLevel: Float = {
+        (UserDefaults.standard.object(forKey: "binauralFadeLevel") as? Float) ?? 1.0
+    }()
+
+    var successfulSessionCount: Int {
+        UserDefaults.standard.integer(forKey: "successfulSessionCount")
+    }
+
+    /// Called at session end when session had ≥1 deep episode and ≥5 min recorded.
+    func decrementBinauralFade() {
+        let count = successfulSessionCount + 1
+        UserDefaults.standard.set(count, forKey: "successfulSessionCount")
+        guard count >= 3 else { return }
+        let next = max(0.05, binauralFadeLevel - 0.05)
+        guard next != binauralFadeLevel else { return }
+        binauralFadeLevel = next
+        UserDefaults.standard.set(next, forKey: "binauralFadeLevel")
+        // Rebuild binaural buffer next time it's toggled on
+        if activeLayers.contains(.binaural) {
+            buffers.removeValue(forKey: .binaural)
+            nodes[.binaural]?.stop()
+            startLayer(.binaural)
+        }
+    }
+
+    func resetBinauralFade() {
+        binauralFadeLevel = 1.0
+        UserDefaults.standard.set(Float(1.0), forKey: "binauralFadeLevel")
+        UserDefaults.standard.set(0, forKey: "successfulSessionCount")
+    }
+
     @Published var binauralPreset: BinauralPreset      = .theta {
         didSet {
             guard activeLayers.contains(.binaural) else { return }
@@ -396,15 +431,16 @@ final class SoundscapePlayer: ObservableObject {
         let n = Int(buf.frameLength)
         let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
         let carrier = 200.0
-        // Soft amplitude envelope: 0.5s fade in/out to avoid clicks on loop
+        // Fade schedule baked into amplitude — user slider works on top unchanged.
+        let amp = Double(0.45 * binauralFadeLevel)
         let fadeSamples = Int(0.5 * sampleRate)
         for i in 0..<n {
             let t = Double(i) / sampleRate
-            var env: Float = 1.0
-            if i < fadeSamples  { env = Float(i) / Float(fadeSamples) }
-            if i > n - fadeSamples { env = Float(n - i) / Float(fadeSamples) }
-            L[i] = Float(sin(2 * .pi * carrier            * t)) * 0.45 * env
-            R[i] = Float(sin(2 * .pi * (carrier + beatHz) * t)) * 0.45 * env
+            var env: Double = 1.0
+            if i < fadeSamples  { env = Double(i) / Double(fadeSamples) }
+            if i > n - fadeSamples { env = Double(n - i) / Double(fadeSamples) }
+            L[i] = Float(sin(2 * .pi * carrier            * t) * env * amp)
+            R[i] = Float(sin(2 * .pi * (carrier + beatHz) * t) * env * amp)
         }
     }
 
