@@ -17,9 +17,12 @@
 | 48 | Compile fixes (BandPowers + chartScale) | ❌ Upload limit | Apple daily limit hit |
 | 49 | Empty trigger commit | ❌ Upload limit | Still blocked |
 | 50 | All of 45–48 features | ✅ **Current TestFlight build** | CI run 25291031222 — uploaded 2026-05-03 |
-| 51 | Comprehensive overhaul (see below) | ✅ **Current TestFlight build** | CI run 25351592940 — uploaded 2026-05-04 (after 1 retry — accel enum bridging) |
+| 51 | (docs-only commit re-uploaded) | ✅ Uploaded | Same binary as build 50; CI run 25291293534 |
+| 52 | feat(build51) overhaul — first attempt | ❌ Compile fail | Accel enum bridging — `.x` → `.X` |
+| 53 | feat(build51) overhaul — fixed | ✅ Uploaded | First binary with overhaul features; CI run 25351592940 |
+| 54 | docs: build 51 live | ✅ **Current TestFlight build** | Same binary as 53; CI run 25351719451 — uploaded 2026-05-05 |
 
-**Current blocker:** None. Build 51 live in TestFlight as of 2026-05-04.
+**Current blocker:** None. Build 54 live in TestFlight as of 2026-05-05 (binary = "Build 51 feature set" from BUILD_PLAN_51.md). Apple build number = `github.run_number`, increments on every CI run including docs.
 
 ## What Build 51 Contains (over build 50)
 
