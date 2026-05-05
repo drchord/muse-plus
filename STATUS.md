@@ -1,68 +1,52 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-04
+**Last updated:** 2026-05-05
 
 ## Build State
 
 | Build | Feature | TestFlight | Notes |
 |-------|---------|-----------|-------|
-| 40 | Audio crash fix | ✅ Uploaded | Explicit format + delayed restart + main-thread BT capture |
-| 41 | Chime preview + meditation timer | ✅ Uploaded | Timer-end triple gong, 5–90 min presets |
-| 42 | Session recording (JSON → Files app) | ✅ Uploaded | ShareLink for Google Drive export |
-| 43 | Idle timer disable + auto-reconnect | ✅ Uploaded | 3 attempts × 3s, preserves calibration |
-| 44 | Signal quality view | ✅ Uploaded | Replaced raw µV with HSI Excellent/Good/Fair/Poor |
-| 45 | Chart X-axis rolling 60s window | ❌ Compile fail | Never reached TestFlight |
-| 46 | Mind Monitor dark chart redesign | ❌ Compile fail | Never reached TestFlight |
-| 47 | Spectral peak Hz per band | ❌ Compile fail | Never reached TestFlight |
-| 48 | Compile fixes (BandPowers + chartScale) | ❌ Upload limit | Apple daily limit hit |
-| 49 | Empty trigger commit | ❌ Upload limit | Still blocked |
-| 50 | All of 45–48 features | ✅ **Current TestFlight build** | CI run 25291031222 — uploaded 2026-05-03 |
-| 51 | (docs-only commit re-uploaded) | ✅ Uploaded | Same binary as build 50; CI run 25291293534 |
-| 52 | feat(build51) overhaul — first attempt | ❌ Compile fail | Accel enum bridging — `.x` → `.X` |
-| 53 | feat(build51) overhaul — fixed | ✅ Uploaded | First binary with overhaul features; CI run 25351592940 |
-| 54 | docs: build 51 live | ✅ **Current TestFlight build** | Same binary as 53; CI run 25351719451 — uploaded 2026-05-05 |
+| 40–44 | Crash fix → signal quality | ✅ Uploaded | See archived history |
+| 45–49 | Chart/spectral fixes | ❌ Compile/upload limit | Never reached TestFlight |
+| 50–51 | Full overhaul (audio + EEG + UI) | ✅ Uploaded | Build 50 = current TF baseline |
+| 52 | feat(build51) first attempt | ❌ Compile fail | Accel enum `.x` → `.X` |
+| 53 | feat(build51) fixed | ✅ Uploaded | CI run 25351592940 |
+| 54 | docs-only re-upload | ✅ Uploaded | Same binary as 53; CI run 25351719451 |
+| 55–64 | Build 65 feature development | ⚠️ Intermediate | Never device-tested; superseded by 65 |
+| 65 | Build 65 feature set (all new features) | ✅ Uploaded | BROKEN — calibration stuck, spurious chimes |
+| **66** | **Root cause fixes for Build 65 bugs** | ✅ **Pushed** | **Ready for CI — Build 66 = target TestFlight** |
 
-**Current blocker:** None. Build 54 live in TestFlight as of 2026-05-05 (binary = "Build 51 feature set" from BUILD_PLAN_51.md). Apple build number = `github.run_number`, increments on every CI run including docs.
+**Current CI state:** Build 66 pushed to `main`. CI should be building now. Once uploaded, this is the first build with the full feature set AND working calibration.
 
-## What Build 51 Contains (over build 50)
+---
 
-**Audio overhaul:**
-1. SoundscapePlayer: 7 real M4A audio files (brook, rain, thunder, wind, ocean, forest, birds) with crossfade loop
-2. SoundscapePlayer: adaptive binaural beat tier (>0.70=4Hz delta, >0.45=6Hz theta, else=10Hz alpha)
-3. ChimeEngine: stereo (own AVAudioEngine), AVAudioUnitReverb .largeHall, Haas 53-sample delay
-4. ChimeEngine: per-partial decay, 432Hz enter / 288Hz exit / 528+660Hz restored / 84Hz timer-end
-5. ChimeEngine: contact-restored chime (NEW), check-in chime (NEW)
-6. Timer end: SoundscapePlayer.stopAll(fadeSeconds:4) fires automatically
+## What Build 65/66 Contains (over Build 54)
 
-**EEG/signal improvements:**
-7. NotchFilteredEeg: switched from .eeg to .notchFilteredEeg (45–65 Hz SDK bandstop removes 60 Hz noise)
-8. Artifact rejection layer 1: SDK blink/jawClench packet → pipeline.suppressArtifact()
-9. Artifact rejection layer 2: amplitude > 300 µV → drop packet + suppress
-10. Artifact rejection layer 3: IsGood 10 Hz flag (frontal AF7/AF8) → suppress
-11. Artifact rejection layer 4 (NEW Build 51): Accelerometer > 0.25g motion → suppress
-12. PPG heart rate (NEW Build 51): Green/AMBIENT 8s window peak detection → BPM display in top bar
+### New EEG / Signal Features
+1. **IRASA aperiodic slope (χ)**: `AperiodicSlope.swift` — PSD resampling at h-factors [1.1–1.9], geometric mean → fractalPSD, OLS in log-log space. Requires R² ≥ 0.85 to emit. Display: `χ -1.82` in MeditationView top bar (color-coded: green = deep, yellow = neutral, orange = aroused).
+2. **iTPF Kalman tracker**: `ITPFTracker.swift` — log-parabola interpolation of theta peak Hz, cross-session Kalman filter with process noise 0.01 Hz². Displayed in Settings Biomarkers.
+3. **8-channel Athena support**: `connectedMuseModel == .ms03` adds AUX1-4 channels. Preset 1041 (not preset 21) for Athena.
+4. **Athena Optics heart rate**: `handleOptics()` uses OPTICS7/8 (850 nm inner channels) fed into same autocorrelation BPM pipeline as legacy PPG.
+5. **SessionSample extended**: `heartRateBPM`, `faa`, `aperiodicSlopeMean`, `iTPFFrontal` — all Optional, Codable, back-compat with Build 54 JSON (decodeIfPresent).
 
-**Depth scoring:**
-13. Peniston-Kulkosky meditationIndex: 0.7×((α+θ)−2β) + 0.3×max(0,θ−α)
-14. FAA (Frontal Alpha Asymmetry): af8Alpha − af7Alpha, shown as approach/withdrawal bar
-15. DepthGate tuning: enter=10s, exit=10s, cooldown=90s, EMA α=0.20
+### New Training Features (DepthGate + ChimeEngine)
+6. **Conditioning anchor**: `playConditioningAnchor()` — 200/207 Hz binaural (7 Hz θ beat), fires 20s after entering deep state, once per episode, 5-min cross-episode cooldown. Pavlovian state anchor — brain learns to associate tone with absorption, speeds future induction.
+7. **Binaural entrainment fade**: `binauralFadeLevel` [0…1] baked into `fillBinaural` amplitude. Decrements 5% (fast: first deep < 5 min) or 3% (slow) per qualifying session after 3 sessions. Trains independence from entrainment. Reset button in Settings.
+8. **Beta-wander cue**: `playBetaCue()` — 1 kHz pure sine tick, 250ms, fires when `frontBeta > calibrationBetaMean + 1.5 * calibrationBetaStd` AND `depth.score < 0.3`. Additive log threshold (correct for log10 µV²). 30s minimum gap. Toggle in Settings.
+9. **Adaptive deep threshold**: After ≥ 5 qualifying sessions, `enterThreshold` = 75th percentile of session mean depths, clamped [0.40, 0.85]. Bidirectional. Persisted to UserDefaults `adaptiveDeepThreshold`.
 
-**UI redesign (full overhaul):**
-16. ConnectView: dark brain-icon screen, device list, scanning indicator
-17. MeditationView: DepthGaugeView (240px circle, score 0-100) + FAABarView + BandChart + BottomButtons
-18. Heart rate chip in top bar (shows bpm when PPG locks, hides when 0)
-19. SettingsSheet: all developer info moved here (chime preview, band powers, sessions)
-20. SoundscapeSheet + TimerSheet as modal sheets
+### Session Analytics (post-session)
+10. **Session summary sheet**: `SessionSummarySheet` — auto-shown after disconnect if session was recorded. Duration, deep time, induction latency (vs. historical avg), longest deep, episode count, biomarkers (χ, iTPF), practice streak, coaching insight line.
+11. **Practice streak**: `computeStreak` counts consecutive days with any session file. Displayed in summary and Settings.
+12. **Induction latency comparison**: Historical avg from last 30 sessions (excluding current). Shows +/- % vs history if ≥ 20% difference.
+13. **Recording deferred 300s after calibration**: `calibrationFiredRecording` flag. First calibration completion → DispatchWorkItem fires 300s later. Brain is noisy in early meditation; only capture settled state.
 
-**Infrastructure:**
-21. iCloud entitlements (CloudDocuments) in MusePlus.entitlements + project.yml
-22. Resources/Soundscapes/ with 7 M4A files (bundle path dual-lookup: subdirectory then root)
+### Build 66 Fixes (this session — root causes, not patches)
+14. **Calibration stuck (root cause)**: `handleIsGood` rate-limited to 1 event per 5s. Root cause: isGood fires at 10 Hz; poor frontal contact during 60s settle-in flooded `suppressWindows` perpetually → `onBandPowers` never fired → `calibrationProgress` stuck at 0 forever.
+15. **Spurious contact chimes (root cause)**: `fitFirstReceived` replaced with `guard self.depth.isCalibrated`. `fitFirstReceived` only suppressed one packet; all subsequent fluctuations during calibration triggered chimes. Now silent until calibrated.
+16. **Yellow dots when headband off**: `SignalChipsView.hsiLabel` now uses `< 2.0` = green (matches `allGood` threshold), `2.0–3.5` = orange, `≥ 3.5` = red. HSI=2 (mediocre/off-skin) previously showed yellow (misleading). `SignalQualityView` labels and colors aligned.
 
-## What Build 48 Contains (over build 44)
-
-1. **Chart X-axis** — rolling 60s window anchored to latest sample (was freezing/compressing)
-2. **Mind Monitor dark chart** — `Color(white: 0.07)` card, MM colors (Delta=red, Theta=violet, Alpha=cyan, Beta=lime-green, Gamma=orange), 3pt catmullRom lines, faint Y gridlines, hidden legend
-3. **Spectral peak Hz** — header above chart shows `δ Delta  1–4 Hz  [live Hz bold]` for each band using `vDSP_maxvi` on FFT mag2 within each band's bin range
+---
 
 ## Gate Status
 
@@ -76,7 +60,14 @@
 | 5 | Spotify Web API + PKCE | ✅ Code done / needs device test |
 | 6 | Session recording + export | ✅ Done |
 | 7 | Auto-reconnect + idle timer | ✅ Done |
-| 8 | Mind Monitor chart + spectral peaks | ⏳ In build 48 — pending upload |
+| 8 | Mind Monitor chart + spectral peaks | ✅ Done |
+| 9 | IRASA + iTPF biomarkers | ✅ Done (Build 65) |
+| 10 | Training system (anchor + fade + beta cue + adaptive threshold) | ✅ Done (Build 65/66) |
+| 11 | Athena 8ch + Optics HR | ✅ Done (Build 65) |
+| 12 | Session analytics + summary sheet | ✅ Done (Build 65) |
+| 13 | fNIRS OpticsPipeline (HbO/HbR) | ⏳ Next — Build 67 |
+
+---
 
 ## Key Config
 
@@ -91,127 +82,106 @@
 - Background modes: bluetooth-central, audio
 - Files app: UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace
 
+---
+
 ## Critical Architecture Notes
 
 - **AVAudioEngine format**: ChimeEngine = stereo (own engine, safe). SoundscapePlayer = stereo (`channels:2`, explicit). `format: nil` causes crash after BT route change.
 - **Config change handler**: `asyncAfter(0.5s)` delay required in `AVAudioEngineConfigurationChange` notification.
-- **Binaural beat**: `beatHz` captured on main thread before background dispatch (was race condition).
+- **Binaural beat**: `beatHz` captured on main thread before background dispatch (race condition fix).
 - **BandPowers struct field order**: `delta,theta,alpha,beta,gamma` then `deltaPeak,thetaPeak,alphaPeak,betaPeak,gammaPeak` — init call must match exactly.
 - **chartForegroundStyleScale**: use `domain:/range:` overload with arrays, not `[String:Color]` dict.
 - **Frontal channels**: AF7=ch1 (idx1), AF8=ch2 (idx2) for depth scoring and FAA.
 - **DepthGate**: EMA α=0.20, 10s sustain (kEnterSustained=20) to enter deep, 10s to exit, 90s cooldown.
-- **NotchFilteredEeg**: SDK applies 45–65 Hz bandstop before our FFT. Use `.notchFilteredEeg` not `.eeg`.
-- **IsGood**: frontal AF7/AF8 quality at 10 Hz. Bad → artifact suppress (DO NOT swap channel indices).
-- **PPG heart rate**: queue-serialized buffer (ppgBuffer accessed from SDK thread + queue = must serialize). ppgBuffer cleared on disconnect. AMBIENT = Green on Muse S 2019 (SDK header confirmed). Accel values in g (SDK header: "negated to align with headband orientation" — magnitude sqrt(x²+y²+z²) = 1.0 at rest regardless of sign, so `abs(magnitude-1.0)>0.25` is correct). BPM algorithm: demean → 64-tap baseline-wander HP → 8-tap LP → autocorrelation over lags 19–128 (200–30 BPM) → quality gate (AC/power > 0.20). AC approach is more robust than peak detection for noisy wearable PPG.
-- **Accelerometer enum bridging**: IXNAccelerometerX → `.X` (uppercase — Swift SE-0005 treats single letter as acronym). IXNPpgAMBIENT → `.AMBIENT` (all-caps acronym rule preserved). Build 51 first attempt failed because notes claimed lowercase; corrected in fix commit.
-- **iCloud entitlement**: iCloud.com.drchord.museplus configured in Apple Developer Portal + MusePlus.entitlements.
+- **NotchFilteredEeg + .eeg fallback**: `hasNotchEeg` flag. Prefers `.notchFilteredEeg`; falls back to `.eeg` if Athena never emits notch packets.
+- **IsGood rate limit**: `lastQualitySuppression` — 5s gate. CRITICAL: without this, settle-in floods `suppressWindows` and blocks calibration forever.
+- **Contact chimes gate**: `guard self.depth.isCalibrated` in fitCheck sink. `fitFirstReceived` was WRONG — only suppressed first packet.
+- **Athena preset**: `preset1041` for MS-03. `preset21` for all legacy Muse S/2. Applied AFTER first `.connected` (post-model detection). Preset change triggers reconnect cycle — this is expected.
+- **AUX1-4**: only appended to channels array when `connectedMuseModel == .ms03`. Amplitude rejection still only on first 4 channels.
+- **Beta cue threshold**: `bm + 1.5 * bs` (additive). Do NOT use multiplicative (`2.0 * mean`) — wrong in log domain when bm is near zero or negative.
+- **Binaural fade**: baked into `fillBinaural` amplitude, NOT node volume. Node volume should stay at user-set value.
+- **Adaptive threshold lower bound**: 0.40 (not 0.55). 0.55 was too high for beginners; 0.40 allows bidirectional adaptation.
+- **PPG heart rate**: queue-serialized buffer. AMBIENT = Green on Muse S 2019. Autocorrelation BPM (lag 19–128 at 64 Hz = 200–30 BPM). AC/power > 0.20 quality gate.
+- **Accelerometer enum bridging**: `.X`, `.Y`, `.Z` uppercase. `.x/.y/.z` fails ("type has no member").
+- **iCloud entitlement**: `iCloud.com.drchord.museplus` in Apple Developer Portal + MusePlus.entitlements.
 
-## App Store Submission — Step by Step
+---
 
-> Use this when you're ready to submit to the App Store (while still distributing via TestFlight).
+## Plan Forward — Build 67+
 
-### Phase 1 — Prepare (before touching App Store Connect)
+### Build 67: fNIRS OpticsPipeline
+**Goal**: Extract HbO/HbR from Athena Optics channels; store in SessionSample (already has placeholders: `hboL/hboR/hbrL/hbrR`). Display HbO/HbR in Settings Biomarkers section.
 
-1. **Stable TestFlight period**: Use the app for at least 1–2 weeks. No crashes, no forced closes. Build 48 should be that baseline.
-2. **Privacy policy**: Required by Apple. Minimum: a page stating the app does not collect/share personal data. Host free on GitHub Pages or Notion. Save the URL.
-3. **Screenshots**: Required sizes:
-   - 6.7" (iPhone 15 Pro Max): **1290 × 2796 px** — take on device or Simulator
-   - 6.5" (iPhone 14 Plus / 13 Pro Max): **1242 × 2688 px**
-   - At least 3 screenshots per size. Capture: main session screen, band chart, signal quality, timer.
-4. **App icon**: Must be 1024×1024 px PNG (no alpha/transparency). The CI-generated placeholder may not be App Store quality — consider a real icon.
-5. **No placeholder text**: Description, subtitle, keywords must be final.
+**Scope:**
+- `OpticsPipeline.swift` — modified Beer-Lambert on Optics1-6 (750 nm / 850 nm wavelength pairs), bandpass 0.01–0.2 Hz, compute oxyhemoglobin (HbO) and deoxyhemoglobin (HbR) per channel
+- `EEGPipeline.onOpticsUpdate` callback → `Probe.hboL/hboR/hbrL/hbrR`
+- Display in `MeditationView` top bar (collapsed, like χ) and Settings Biomarkers
+- Only emits on Athena; legacy Muse S/2 sees nil
 
-### Phase 2 — App Store Connect Setup
+**Prerequisites**: Build 66 must confirm calibration working on device. DO NOT push Build 67 until Build 66 confirmed.
 
-1. Go to [appstoreconnect.apple.com](https://appstoreconnect.apple.com)
-2. Click **My Apps** → **+** → **New App**
-   - Platform: iOS
-   - Name: `Muse++` (or whatever you want displayed)
-   - Primary language: English
-   - Bundle ID: `com.drchord.museplus` (must already exist from TestFlight)
-   - SKU: any unique string, e.g. `museplus-2026`
-3. Fill **App Information**:
-   - Subtitle (30 chars max): e.g. `EEG Meditation Companion`
-   - Category: Health & Fitness (primary), Utilities (secondary)
-   - Privacy Policy URL: your hosted page
-4. Fill **Pricing and Availability**: Free, All countries (or select)
-5. Fill **App Privacy**: declare no data collected (since sessions stay on device)
-6. **Age Rating**: complete questionnaire — should result in 4+
+### Build 68: Spotify device test + HRV (if fNIRS stable)
+- Spotify flow needs actual device test (muse-monitor://callback registered in Spotify dev dashboard)
+- HRV (RMSSD) from RR intervals derived from PPG/Optics beat-to-beat — requires R-peak detector on cleaned PPG
 
-### Phase 3 — Version Metadata
+### App Store Submission
+See Phase 1–5 checklist below. Not urgent — wait for fNIRS and HRV to stabilize (~Build 68–70).
 
-1. Under **1.2 Prepare for Submission**:
-   - Upload screenshots (drag into correct size slots)
-   - Description (up to 4000 chars) — explain what the app does, who it's for
-   - Keywords (100 chars) — meditation, EEG, Muse, brainwave, mindfulness
-   - Support URL (GitHub or personal site)
-   - Marketing URL (optional)
-2. **Build**: click **+** next to Build — select the TestFlight build you want to ship (e.g. build 48 or later). The same binary goes to App Store.
-3. **Review notes** (optional but smart): `App requires Muse S or Muse 2 EEG headband connected via Bluetooth. No in-app purchases. App was developed for personal meditation use.`
+---
 
-### Phase 4 — Submit
+## App Store Submission Checklist
 
-1. Click **Add for Review**
-2. Answer export compliance (no encryption beyond standard HTTPS → select No)
-3. **Submit for Review**
-4. Review time: typically 24–72 hours. Health/BLE apps sometimes get extra scrutiny.
+### Phase 1 — Prepare
+1. Stable TestFlight: 1–2 weeks of daily use, no crashes
+2. Privacy policy: host on GitHub Pages (app stores sessions on-device only)
+3. Screenshots: 6.7" (1290×2796) and 6.5" (1242×2688) — at least 3 per size
+4. App icon: 1024×1024 PNG (no alpha)
+5. Demo mode: graceful "no device" state for App Store reviewers without a Muse
 
-### Phase 5 — Common Rejection Reasons (avoid these)
-
-| Risk | How to avoid |
-|------|-------------|
-| Bluetooth perm string too vague | Already good: `connects to your Muse S headband to read EEG data` |
-| App crashes on reviewer's device | Reviewer won't have a Muse — add a **demo mode** or graceful "no device" state |
-| Missing privacy policy | Have URL ready before submitting |
-| Placeholder icon | Use a real 1024×1024 icon |
-| App doesn't work without accessory | Most important: the app must not crash or show error screens when no Muse connected — show a "connect your headband" onboarding screen instead |
-
-### After Approval
-
-- Set **release date**: Manually release (gives you control) vs. auto-release after approval
-- Monitor **App Store reviews** in App Store Connect
-- Future updates: same flow — build, TestFlight test, then submit new version
+### Phase 2–5
+See previous STATUS.md version for full App Store Connect walkthrough steps.
 
 ---
 
 ## Continuation Prompt
 
 ```
-MusePlus iOS app — Muse S EEG real-time meditation companion.
+MusePlus iOS app — Native Swift/SwiftUI EEG meditation companion for Muse S / Athena.
 Project: C:\Users\sugat\MusePlus. Git remote: drchord/muse-plus.
 
-CURRENT STATE (2026-05-03):
-- Last TestFlight build: 50 ✅ — uploaded 2026-05-03
-- Build 51: code complete, NOT YET COMMITTED. Run git status to confirm.
-- CI uses github.run_number as build number (auto-increment on push)
+CURRENT STATE (2026-05-05):
+- Build 66 pushed to main. CI building. Fixes calibration stuck + spurious chimes + yellow dots.
+- Build 65 in TestFlight (BROKEN — calibration never progresses, random chimes).
+- Once Build 66 CI completes → install on device → verify calibration completes in ~60s → no chimes during calibration.
 
-WHAT BUILD 51 ADDS (over build 50):
-Full overhaul — see STATUS.md "What Build 51 Contains" section.
-Key files changed: App.swift, MuseClient.swift, EEGPipeline.swift, MuseTypes.swift,
-DepthScore.swift, DepthGate.swift, ChimeEngine.swift, SoundscapePlayer.swift,
-project.yml, MusePlus.entitlements.
-New assets: MusePlus/Resources/Soundscapes/*.m4a (7 files).
+BUILD 66 CONTAINS (complete feature set):
+All of Build 54 PLUS:
+- IRASA aperiodic slope χ (AperiodicSlope.swift) + iTPF Kalman tracker (ITPFTracker.swift)
+- Athena 8-channel EEG (preset1041) + Optics heart rate (OPTICS7/8)
+- Conditioning anchor (7 Hz binaural θ, 20s after deep entry, Pavlovian)
+- Binaural entrainment fade (binauralFadeLevel, 5%/session after 3 sessions)
+- Beta-wander cue (1 kHz tick, +1.5 SD frontal β, shallow only)
+- Adaptive deep threshold (75th pct qualifying sessions, [0.40, 0.85])
+- Session summary sheet (post-disconnect: duration, deep time, latency, streak, coaching)
+- Recording deferred 300s after calibration
+- handleIsGood rate-limited 1 event/5s (calibration fix)
+- Contact chimes gated behind isCalibrated (spurious chime fix)
+- Dot colors: green=HSI<2.0 / orange=2.0-3.5 / red=≥3.5 (yellow removed)
 
-COMPILE-TIME RISKS FOR BUILD 51:
-- IXNAccelerometer enum bridging: .x/.y/.z (lowercase) — if compiler says member not found, try .X/.Y/.Z
-- IXNPpg.AMBIENT bridging: .AMBIENT (all-caps preserved) — if error, try .ambient
-- Check AVAudioUnitReverb preset: .largeHall (NOT .largeChamber — does not exist)
-- BandPowers init label order MUST be: delta,theta,alpha,beta,gamma then deltaPeak...gammaPeak
+KEY FILES CHANGED IN BUILD 65/66 vs BUILD 54:
+App.swift, MuseClient.swift, DepthGate.swift, DepthScore.swift, ChimeEngine.swift,
+SoundscapePlayer.swift, SessionRecorder.swift, MuseTypes.swift,
+AperiodicSlope.swift (new), ITPFTracker.swift (new)
 
-AUDIO INVARIANTS (do not change or crash returns):
-- ChimeEngine: stereo (own AVAudioEngine, safe)
-- SoundscapePlayer: explicit stereo (channels:2) on engine.connect()
-- asyncAfter(0.5s) in AVAudioEngineConfigurationChange handler
-- binauralPreset.beatHz captured on main thread before background dispatch
+CRITICAL INVARIANTS (break = crash or broken calibration):
+- handleIsGood MUST stay rate-limited (lastQualitySuppression 5s). Remove it → calibration stuck forever.
+- Contact chimes MUST be gated behind depth.isCalibrated. fitFirstReceived was the old WRONG fix.
+- Beta cue: additive threshold (bm + 1.5 * bs), NOT multiplicative.
+- Binaural fade: baked into fillBinaural amplitude, NOT node volume.
+- Athena preset: preset1041 for MS-03. preset21 for legacy. Applied post-model-detection.
 
-PENDING FOR FUTURE BUILDS:
-- SessionRecorder: add FAA, heartRate, soundscapeEvents, preSessionBaseline fields
-- Session replay view: post-session chart scrollback
-- Training program stages: findingCalm → deepening → thetaTraining → deepAbsorption
-- Python analysis pipeline on Sparky (every-5-session report → Google Drive → email)
-- ZIPFoundation SPM dependency for session ZIP export
-- Spotify flow: needs device test (muse-monitor://callback registered in Spotify dev dashboard)
-- App Store submission: see STATUS.md Phase 1-5 checklist when ready
+NEXT BUILD (67): fNIRS OpticsPipeline — HbO/HbR from Athena Optics1-6.
+RULE: Do not push Build 67 until Build 66 calibration confirmed working on device.
 
-Read STATUS.md and run `gh run list --limit 5` before doing anything.
+Run `gh run list --limit 5` first. Read STATUS.md before any work.
 ```
