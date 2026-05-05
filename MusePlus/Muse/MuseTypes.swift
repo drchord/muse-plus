@@ -33,13 +33,19 @@ struct BandPowers {
     let channel: Int        // 0=TP9, 1=AF7, 2=AF8, 3=TP10
     let timestamp: TimeInterval
 
-    var meditationIndex: Float { (alpha + theta) - 2 * beta }
+    // Weighted index: general depth term + Peniston alpha-theta crossover bonus.
+    // All log10 µV² values, so (alpha+theta)-2*beta = log10(αθ/β²).
+    // max(0, theta-alpha) rewards theta>alpha (deep absorption marker).
+    var meditationIndex: Float {
+        0.7 * ((alpha + theta) - 2 * beta) + 0.3 * max(0, theta - alpha)
+    }
 }
 
 struct DepthResult {
-    let score: Float        // 0.0 (alert) – 1.0 (deep meditation)
+    let score: Float               // 0.0 (alert) – 1.0 (deep meditation)
     let isCalibrated: Bool
-    let calibrationProgress: Float  // 0–1 during calibration
+    let calibrationProgress: Float // 0–1 during calibration
+    let faa: Float                 // Frontal Alpha Asymmetry: af8α - af7α, positive = positive affect
 }
 
 struct BandSample: Identifiable {
@@ -55,6 +61,7 @@ struct BandSample: Identifiable {
     let betaPeak:  Float
     let deltaPeak: Float
     let gammaPeak: Float
+    let faa: Float          // Frontal Alpha Asymmetry at this sample
 }
 
 enum MuseClientError: Error {

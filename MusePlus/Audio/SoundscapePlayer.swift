@@ -27,6 +27,14 @@ enum SoundLayer: String, CaseIterable, Identifiable {
         case .binaural:   "headphones"
         }
     }
+    // Layers that load from bundled M4A files vs DSP-generated
+    var isFileBased: Bool {
+        switch self {
+        case .brownNoise, .binaural: return false
+        default: return true
+        }
+    }
+    var fileName: String { rawValue.lowercased().replacingOccurrences(of: " ", with: "_").components(separatedBy: "_waves").first ?? rawValue.lowercased() }
 }
 
 enum BinauralPreset: String, CaseIterable, Identifiable {
@@ -51,20 +59,27 @@ final class SoundscapePlayer: ObservableObject {
     @Published var binauralPreset: BinauralPreset      = .theta {
         didSet {
             guard activeLayers.contains(.binaural) else { return }
+            customBinauralHz = nil
             buffers.removeValue(forKey: .binaural)
             nodes[.binaural]?.stop()
             startLayer(.binaural)
         }
     }
 
+    // Adaptive binaural: set by updateAdaptiveDepth; nil = use binauralPreset
+    var customBinauralHz: Double? = nil
+
     private let engine = AVAudioEngine()
     private var nodes:   [SoundLayer: AVAudioPlayerNode] = [:]
     private var buffers: [SoundLayer: AVAudioPCMBuffer]  = [:]
     private let sampleRate: Double = 44100
-    private let bufferSecs: Double = 20
+    private let bufferSecs: Double = 20   // DSP layers only
+
+    // Volume ducking state
+    private var unduckTimer: DispatchWorkItem?
 
     init() {
-        // Explicit stereo format — prevents format mismatch after Bluetooth/route changes
+        // Explicit stereo format — prevents crash after BT route change
         let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
         for layer in SoundLayer.allCases {
             let node = AVAudioPlayerNode()
@@ -77,7 +92,7 @@ final class SoundscapePlayer: ObservableObject {
         observeAudio()
     }
 
-    // MARK: - Public
+    // MARK: - Public API
 
     func toggle(_ layer: SoundLayer) {
         activeLayers.contains(layer) ? deactivate(layer) : activate(layer)
@@ -85,10 +100,81 @@ final class SoundscapePlayer: ObservableObject {
 
     func setVolume(_ v: Float, for layer: SoundLayer) {
         layerVolumes[layer] = v
+        guard !isDucked else { return }
         nodes[layer]?.volume = v
     }
 
-    // MARK: - Internal
+    /// Fade all active layers to silence, stop them, then clear activeLayers.
+    func stopAll(fadeSeconds: Double = 2.5) {
+        guard !activeLayers.isEmpty else { return }
+        let steps = 30
+        let stepTime = fadeSeconds / Double(steps)
+        let layersToStop = activeLayers
+        for step in 1...steps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + stepTime * Double(step)) { [weak self] in
+                guard let self else { return }
+                let t = 1.0 - Float(step) / Float(steps)
+                for layer in layersToStop {
+                    self.nodes[layer]?.volume = (self.layerVolumes[layer] ?? 0.35) * t
+                }
+                if step == steps {
+                    for layer in layersToStop {
+                        self.nodes[layer]?.stop()
+                        self.nodes[layer]?.volume = self.layerVolumes[layer] ?? 0.35
+                    }
+                    self.activeLayers.removeAll()
+                }
+            }
+        }
+    }
+
+    /// Duck all layers to level (0.0–1.0 of user volume) over fadeDuration seconds.
+    func duck(to level: Float = 0.25, fadeDuration: Double = 0.4) {
+        unduckTimer?.cancel()
+        fade(to: level, over: fadeDuration)
+    }
+
+    /// Restore all layers to user-set volumes over fadeDuration seconds.
+    func unduck(fadeDuration: Double = 1.0) {
+        unduckTimer?.cancel()
+        fade(to: 1.0, over: fadeDuration)
+    }
+
+    /// Called from depth pipeline. Updates adaptive binaural tier if .binaural is active.
+    func updateAdaptiveDepth(_ depthScore: Float) {
+        // 3-tier binaural: shallow=alpha(10Hz), mid=theta(6Hz), deep=theta(4Hz)
+        let newHz: Double = depthScore > 0.70 ? 4.0 : depthScore > 0.45 ? 6.0 : 10.0
+        guard newHz != customBinauralHz else { return }
+        customBinauralHz = newHz
+        guard activeLayers.contains(.binaural) else { return }
+        // Rebuild buffer on next tier change (brief ~100ms gap is acceptable)
+        buffers.removeValue(forKey: .binaural)
+        nodes[.binaural]?.stop()
+        startLayer(.binaural)
+    }
+
+    // MARK: - Internals
+
+    private var isDucked: Bool = false
+
+    private func fade(to multiplier: Float, over duration: Double) {
+        isDucked = (multiplier < 1.0)
+        let steps = max(1, Int(duration * 30))
+        let stepTime = duration / Double(steps)
+        for step in 1...steps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + stepTime * Double(step)) { [weak self] in
+                guard let self else { return }
+                let t = Float(step) / Float(steps)
+                for layer in self.activeLayers {
+                    let base = self.layerVolumes[layer] ?? 0.35
+                    let cur  = self.nodes[layer]?.volume ?? base
+                    let target = base * multiplier
+                    self.nodes[layer]?.volume = cur + t * (target - cur)
+                }
+                if step == steps { self.isDucked = (multiplier < 1.0) }
+            }
+        }
+    }
 
     private func activate(_ layer: SoundLayer) {
         activeLayers.insert(layer)
@@ -101,10 +187,15 @@ final class SoundscapePlayer: ObservableObject {
 
     private func startLayer(_ layer: SoundLayer) {
         let vol  = layerVolumes[layer] ?? 0.35
-        // Capture beatHz on main thread — binauralPreset is @Published, not thread-safe
-        let beat = (layer == .binaural) ? binauralPreset.beatHz : 0.0
-        DispatchQueue.global(qos: .userInitiated).async {
-            let buf = self.makeBuffer(layer, beatHz: beat)
+        let beat = (layer == .binaural) ? (customBinauralHz ?? binauralPreset.beatHz) : 0.0
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let buf: AVAudioPCMBuffer
+            if layer.isFileBased, let fileBuf = self.loadAudioBuffer(for: layer) {
+                buf = fileBuf
+            } else {
+                buf = self.makeBuffer(layer, beatHz: beat)
+            }
             DispatchQueue.main.async {
                 self.buffers[layer] = buf
                 guard self.activeLayers.contains(layer),
@@ -143,12 +234,11 @@ final class SoundscapePlayer: ObservableObject {
             forName: .AVAudioEngineConfigurationChange,
             object: engine, queue: .main
         ) { [weak self] _ in
-            // Delay lets iOS finish the route-change before we restart
+            // Delay lets iOS finish the route-change before restart
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self?.restartEngine()
             }
         }
-
         NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil, queue: .main
@@ -164,16 +254,11 @@ final class SoundscapePlayer: ObservableObject {
     }
 
     private func restartEngine() {
-        guard !engine.isRunning else {
-            resumeActiveLayers()
-            return
-        }
+        guard !engine.isRunning else { resumeActiveLayers(); return }
         do {
             try engine.start()
             resumeActiveLayers()
-        } catch {
-            // Will retry on next configuration change notification
-        }
+        } catch {}
     }
 
     private func resumeActiveLayers() {
@@ -186,7 +271,88 @@ final class SoundscapePlayer: ObservableObject {
         }
     }
 
-    // MARK: - Buffer factory
+    // MARK: - File loading
+
+    private func loadAudioBuffer(for layer: SoundLayer) -> AVAudioPCMBuffer? {
+        let names = fileNames(for: layer)
+        for name in names {
+            if let buf = loadM4A(named: name) { return buf }
+        }
+        return nil
+    }
+
+    private func fileNames(for layer: SoundLayer) -> [String] {
+        switch layer {
+        case .rain:    return ["rain"]
+        case .thunder: return ["thunder"]
+        case .ocean:   return ["ocean"]
+        case .wind:    return ["wind"]
+        case .brook:   return ["brook"]
+        case .forest:  return ["forest"]
+        case .birds:   return ["birds"]
+        default:       return []
+        }
+    }
+
+    private func loadM4A(named name: String) -> AVAudioPCMBuffer? {
+        // Try Soundscapes subfolder first, then root of bundle (handles both XcodeGen layouts)
+        let url = Bundle.main.url(forResource: name, withExtension: "m4a", subdirectory: "Soundscapes")
+               ?? Bundle.main.url(forResource: name, withExtension: "m4a")
+        guard let url else { return nil }
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        let frameCount = AVAudioFrameCount(file.length)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
+                                          frameCapacity: frameCount) else { return nil }
+        guard (try? file.read(into: buf)) != nil else { return nil }
+
+        // If format already matches engine (44100 stereo float32), skip conversion
+        let engineFmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
+        if buf.format.sampleRate == sampleRate && buf.format.channelCount == 2 {
+            return applyCrossfadeLoop(buf)
+        }
+        guard let converter = AVAudioConverter(from: buf.format, to: engineFmt) else { return nil }
+        let outFrames = AVAudioFrameCount(
+            Double(frameCount) * sampleRate / buf.format.sampleRate)
+        guard let out = AVAudioPCMBuffer(pcmFormat: engineFmt, frameCapacity: outFrames) else { return nil }
+        var error: NSError?
+        var inputDone = false
+        converter.convert(to: out, error: &error) { _, status in
+            if inputDone { status.pointee = .noDataNow; return nil }
+            inputDone = true
+            status.pointee = .haveData
+            return buf
+        }
+        guard error == nil else { return nil }
+        return applyCrossfadeLoop(out)
+    }
+
+    /// Crossfade the tail back into the head so AVAudioPlayerNode looping is seamless.
+    private func applyCrossfadeLoop(_ buf: AVAudioPCMBuffer, seconds: Double = 2.0) -> AVAudioPCMBuffer {
+        let n  = Int(buf.frameLength)
+        let xf = min(Int(seconds * sampleRate), n / 4)
+        guard buf.format.channelCount == 2,
+              let Lp = buf.floatChannelData?[0],
+              let Rp = buf.floatChannelData?[1] else { return buf }
+
+        // Blend tail into head: head[i] = head[i]*t + tail[i]*(1-t)
+        for i in 0..<xf {
+            let t = Float(i) / Float(xf)
+            Lp[i] = Lp[i] * t + Lp[n - xf + i] * (1.0 - t)
+            Rp[i] = Rp[i] * t + Rp[n - xf + i] * (1.0 - t)
+        }
+
+        // Return trimmed buffer (drop the tail that was blended into head)
+        let trimLen = AVAudioFrameCount(n - xf)
+        guard let trimmed = AVAudioPCMBuffer(pcmFormat: buf.format,
+                                              frameCapacity: trimLen) else { return buf }
+        trimmed.frameLength = trimLen
+        let bytes = Int(trimLen) * MemoryLayout<Float>.size
+        memcpy(trimmed.floatChannelData![0], Lp, bytes)
+        memcpy(trimmed.floatChannelData![1], Rp, bytes)
+        return trimmed
+    }
+
+    // MARK: - DSP buffer factory (brown noise + binaural only)
 
     private func makeBuffer(_ layer: SoundLayer, beatHz: Double = 0) -> AVAudioPCMBuffer {
         let n   = AVAudioFrameCount(sampleRate * bufferSecs)
@@ -195,211 +361,49 @@ final class SoundscapePlayer: ObservableObject {
         buf.frameLength = n
         switch layer {
         case .brownNoise: fillBrownNoise(buf)
-        case .rain:       fillRain(buf)
-        case .thunder:    fillThunder(buf)
-        case .ocean:      fillOcean(buf)
-        case .wind:       fillWind(buf)
-        case .brook:      fillBrook(buf)
-        case .forest:     fillForest(buf)
-        case .birds:      fillBirds(buf)
         case .binaural:   fillBinaural(buf, beatHz: beatHz)
+        default:          fillBrownNoise(buf)   // fallback if file missing
         }
         return buf
     }
 
-    // MARK: - Brown Noise
+    // MARK: - Brown Noise (DSP)
 
     private func fillBrownNoise(_ buf: AVAudioPCMBuffer) {
         let n = Int(buf.frameLength)
         let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        var pL: Float = 0, pR: Float = 0
+        // 3-pole pink approximation for brown (extra LP pole)
+        var b0L: Float=0, b1L: Float=0, b2L: Float=0
+        var b0R: Float=0, b1R: Float=0, b2R: Float=0
         for i in 0..<n {
-            pL = 0.998 * pL + 0.018 * .random(in: -1...1)
-            pR = 0.998 * pR + 0.018 * .random(in: -1...1)
-            L[i] = pL; R[i] = pR
+            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
+            b0L = 0.99886*b0L + wL*0.0555179; b1L = 0.99332*b1L + wL*0.0750759; b2L = 0.96900*b2L + wL*0.1538520
+            b0R = 0.99886*b0R + wR*0.0555179; b1R = 0.99332*b1R + wR*0.0750759; b2R = 0.96900*b2R + wR*0.1538520
+            L[i] = (b0L + b1L + b2L + wL * 0.5362) * 0.11
+            R[i] = (b0R + b1R + b2R + wR * 0.5362) * 0.11
         }
         norm(L, R, n: n, t: 0.70)
     }
 
-    // MARK: - Rain
-
-    private func fillRain(_ buf: AVAudioPCMBuffer) {
-        let n = Int(buf.frameLength)
-        let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        var pL: Float = 0, pR: Float = 0
-        for i in 0..<n {
-            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
-            L[i] = wL - 0.92 * pL; R[i] = wR - 0.92 * pR
-            pL = wL; pR = wR
-        }
-        for _ in 0..<Int(bufferSecs * 110) {
-            let pos = Int.random(in: 0..<(n - 100))
-            let amp = Float.random(in: 0.15...0.55), dur = Int.random(in: 20...90)
-            let ch  = Bool.random() ? L : R
-            for j in 0..<min(dur, n - pos) { ch[pos + j] += amp * expf(-Float(j) * 0.09) }
-        }
-        norm(L, R, n: n, t: 0.65)
-    }
-
-    // MARK: - Thunder
-
-    private func fillThunder(_ buf: AVAudioPCMBuffer) {
-        let n = Int(buf.frameLength)
-        let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        var lp1L: Float = 0, lp2L: Float = 0, lp1R: Float = 0, lp2R: Float = 0
-        for i in 0..<n {
-            let t = Double(i) / sampleRate
-            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
-            lp1L = 0.979 * lp1L + 0.021 * wL; lp2L = 0.9957 * lp2L + 0.0043 * wL
-            lp1R = 0.979 * lp1R + 0.021 * wR; lp2R = 0.9957 * lp2R + 0.0043 * wR
-            let mod = Float(0.5 + 0.5 * abs(sin(2 * .pi * 0.04 * t)))
-            L[i] = (lp1L - lp2L) * mod * 16.0
-            R[i] = (lp1R - lp2R) * mod * 16.0
-        }
-        norm(L, R, n: n, t: 0.22)
-        let cracks = Int.random(in: 2...4)
-        for _ in 0..<cracks {
-            guard n > Int(sampleRate * 8) else { break }
-            let o = Int.random(in: Int(sampleRate * 2)...(n - Int(sampleRate * 4)))
-            let cd = Int(sampleRate * 0.12), td = Int(sampleRate * Double.random(in: 2...4))
-            let amp = Float.random(in: 0.40...0.60)
-            for j in 0..<min(cd, n - o) {
-                let e = min(Float(j) / 5.0, 1.0) * expf(-Float(j) * 0.055)
-                L[o+j] += Float.random(in: -1...1) * e * amp
-                R[o+j] += Float.random(in: -1...1) * e * amp
-            }
-            var tr: Float = 0
-            for j in 0..<min(td, n - (o + cd)) {
-                tr = 0.986 * tr + 0.014 * Float.random(in: -1...1)
-                let e = expf(-Float(j) / Float(sampleRate) * 1.4)
-                L[o+cd+j] += tr * e * amp * 0.65
-                R[o+cd+j] += tr * e * amp * 0.65
-            }
-        }
-        norm(L, R, n: n, t: 0.72)
-    }
-
-    // MARK: - Ocean
-
-    private func fillOcean(_ buf: AVAudioPCMBuffer) {
-        let n = Int(buf.frameLength)
-        let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        var pL: Float = 0, pR: Float = 0
-        for i in 0..<n {
-            pL = 0.997 * pL + 0.014 * Float.random(in: -1...1)
-            pR = 0.997 * pR + 0.014 * Float.random(in: -1...1)
-            let t = Double(i) / sampleRate
-            L[i] = pL * Float(0.25 + 0.75 * pow(max(0, sin(2 * .pi * 0.083 * t)), 1.8))
-            R[i] = pR * Float(0.25 + 0.75 * pow(max(0, sin(2 * .pi * 0.067 * t + 1.3)), 1.8))
-        }
-        norm(L, R, n: n, t: 0.75)
-    }
-
-    // MARK: - Wind
-
-    private func fillWind(_ buf: AVAudioPCMBuffer) {
-        let n = Int(buf.frameLength)
-        let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        var a1L: Float=0, a2L: Float=0, a1R: Float=0, a2R: Float=0
-        for i in 0..<n {
-            let t = Double(i) / sampleRate
-            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
-            a1L = 0.94*a1L + 0.06*wL; a2L = 0.985*a2L + 0.015*wL
-            a1R = 0.94*a1R + 0.06*wR; a2R = 0.985*a2R + 0.015*wR
-            let g = Float(0.4 + 0.4 * sin(2 * .pi * 0.041 * t) + 0.2 * sin(2 * .pi * 0.013 * t + 1.7))
-            L[i] = (a1L - a2L) * g * 14.0
-            R[i] = (a1R - a2R) * g * 14.0
-        }
-        norm(L, R, n: n, t: 0.65)
-    }
-
-    // MARK: - Brook
-
-    private func fillBrook(_ buf: AVAudioPCMBuffer) {
-        let n = Int(buf.frameLength)
-        let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        var a1L: Float=0, a2L: Float=0, a1R: Float=0, a2R: Float=0
-        for i in 0..<n {
-            let t = Double(i) / sampleRate
-            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
-            a1L = 0.88*a1L + 0.12*wL; a2L = 0.97*a2L + 0.03*wL
-            a1R = 0.88*a1R + 0.12*wR; a2R = 0.97*a2R + 0.03*wR
-            let m = Float(0.55 + 0.35 * sin(2 * .pi * 1.7 * t) + 0.10 * sin(2 * .pi * 3.1 * t + 0.9))
-            L[i] = (a1L - a2L) * m * 9.0
-            R[i] = (a1R - a2R) * m * 9.0
-        }
-        for _ in 0..<Int(bufferSecs * 40) {
-            let pos = Int.random(in: 0..<(n - 60))
-            let amp = Float.random(in: 0.05...0.18), dur = Int.random(in: 15...50)
-            let ch  = Bool.random() ? L : R
-            for j in 0..<min(dur, n - pos) { ch[pos+j] += Float.random(in: -1...1) * amp * expf(-Float(j) * 0.12) }
-        }
-        norm(L, R, n: n, t: 0.68)
-    }
-
-    // MARK: - Forest
-
-    private func fillForest(_ buf: AVAudioPCMBuffer) {
-        let n = Int(buf.frameLength)
-        let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        var a1L: Float=0, a2L: Float=0, a1R: Float=0, a2R: Float=0
-        for i in 0..<n {
-            let t = Double(i) / sampleRate
-            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
-            a1L = 0.96*a1L + 0.04*wL; a2L = 0.99*a2L + 0.01*wL
-            a1R = 0.96*a1R + 0.04*wR; a2R = 0.99*a2R + 0.01*wR
-            let m = Float(0.5 + 0.5 * sin(2 * .pi * 0.036 * t + 0.8 * sin(2 * .pi * 0.011 * t)))
-            L[i] = (a1L - a2L) * m * 12.0
-            R[i] = (a1R - a2R) * m * 12.0
-        }
-        chirps(L, R, n: n, count: Int(bufferSecs * 0.9))
-        norm(L, R, n: n, t: 0.70)
-    }
-
-    // MARK: - Birds
-
-    private func fillBirds(_ buf: AVAudioPCMBuffer) {
-        let n = Int(buf.frameLength)
-        let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        for i in 0..<n { L[i] = 0; R[i] = 0 }
-        chirps(L, R, n: n, count: Int(bufferSecs * 2.5), fLo: 1500, fHi: 4000, amp: 0.20...0.45)
-        chirps(L, R, n: n, count: Int(bufferSecs * 1.8), fLo: 3500, fHi: 7000, amp: 0.15...0.35)
-        chirps(L, R, n: n, count: Int(bufferSecs * 1.2), fLo: 6000, fHi: 9000, amp: 0.10...0.25)
-        norm(L, R, n: n, t: 0.70)
-    }
-
-    // MARK: - Binaural Beats
+    // MARK: - Binaural Beats (DSP)
 
     private func fillBinaural(_ buf: AVAudioPCMBuffer, beatHz: Double) {
         let n = Int(buf.frameLength)
         let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
         let carrier = 200.0
+        // Soft amplitude envelope: 0.5s fade in/out to avoid clicks on loop
+        let fadeSamples = Int(0.5 * sampleRate)
         for i in 0..<n {
             let t = Double(i) / sampleRate
-            L[i] = Float(sin(2 * .pi * carrier             * t)) * 0.45
-            R[i] = Float(sin(2 * .pi * (carrier + beatHz)  * t)) * 0.45
+            var env: Float = 1.0
+            if i < fadeSamples  { env = Float(i) / Float(fadeSamples) }
+            if i > n - fadeSamples { env = Float(n - i) / Float(fadeSamples) }
+            L[i] = Float(sin(2 * .pi * carrier            * t)) * 0.45 * env
+            R[i] = Float(sin(2 * .pi * (carrier + beatHz) * t)) * 0.45 * env
         }
     }
 
-    // MARK: - Shared helpers
-
-    private func chirps(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>,
-                        n: Int, count: Int,
-                        fLo: Double = 2000, fHi: Double = 5500,
-                        amp: ClosedRange<Float> = 0.08...0.22) {
-        for _ in 0..<count {
-            let maxO = max(1, n - Int(sampleRate * 0.5))
-            let o    = Int.random(in: 0..<maxO)
-            let dur  = Int.random(in: Int(sampleRate * 0.12)...Int(sampleRate * 0.40))
-            let f0   = Double.random(in: fLo...fHi), f1 = Double.random(in: fLo...fHi)
-            let a    = Float.random(in: amp)
-            let ch   = Bool.random() ? L : R
-            for j in 0..<min(dur, n - o) {
-                let ph = Double(j) / Double(dur)
-                ch[o+j] += Float(sin(.pi * ph) * Double(a) * sin(2 * .pi * (f0 + (f1-f0)*ph) * Double(j) / sampleRate))
-            }
-        }
-    }
+    // MARK: - Shared DSP helpers
 
     private func norm(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>,
                       n: Int, t: Float) {

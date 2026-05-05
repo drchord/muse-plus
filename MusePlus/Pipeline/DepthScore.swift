@@ -33,27 +33,31 @@ final class DepthScore {
         let frontal = powers.filter { DepthScore.frontalChannels.contains($0.channel) }
         guard !frontal.isEmpty else { return }
 
-        // meditationIndex = alpha_log - beta_log per frontal channel, then average
         let idx = frontal.map(\.meditationIndex).reduce(0, +) / Float(frontal.count)
+
+        // FAA = AF8 alpha - AF7 alpha (positive = right frontal dominant = approach/positive affect)
+        let af7Alpha = powers.first(where: { $0.channel == 1 })?.alpha ?? 0
+        let af8Alpha = powers.first(where: { $0.channel == 2 })?.alpha ?? 0
+        let faa = af8Alpha - af7Alpha
 
         let progress = calibrationProgress
 
         if !isCalibrated {
             calibrationSamples.append(idx)
-            onResult?(DepthResult(score: 0.5, isCalibrated: false, calibrationProgress: progress))
+            onResult?(DepthResult(score: 0.5, isCalibrated: false,
+                                  calibrationProgress: progress, faa: faa))
             return
         }
 
-        // Finalize baseline on first calibrated call
-        if calibrationSamples.isEmpty == false {
+        if !calibrationSamples.isEmpty {
             finalizeBaseline()
         }
 
-        // Normalize: how many std-devs above baseline?
         let z = (idx - baselineMean) / max(baselineStd, 0.01)
         let score = sigmoid(z)
 
-        onResult?(DepthResult(score: score, isCalibrated: true, calibrationProgress: 1.0))
+        onResult?(DepthResult(score: score, isCalibrated: true,
+                              calibrationProgress: 1.0, faa: faa))
     }
 
     private func finalizeBaseline() {

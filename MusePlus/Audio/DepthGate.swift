@@ -7,17 +7,17 @@ private let kEnterThreshold: Float    = 0.65
 private let kExitThreshold:  Float    = 0.50
 
 // Score must hold above/below threshold for this many 0.5s windows before chiming.
-// Enter: 20s sustained deep state before celebrating with a chime.
-// Exit: 15s sustained drift before signalling — ignores momentary lapses.
-private let kEnterSustained: Int      = 40   // 40 × 0.5 s = 20 s
-private let kExitSustained:  Int      = 30   // 30 × 0.5 s = 15 s
+// Enter: 10s — responsive enough to reward genuine depth without false positives.
+// Exit: 10s — matches enter for symmetry; reduces ping-pong at threshold.
+private let kEnterSustained: Int      = 20   // 20 × 0.5 s = 10 s
+private let kExitSustained:  Int      = 20   // 20 × 0.5 s = 10 s
 
 // Minimum gap between two chimes in the same direction.
-// Experienced meditator: expect ≤2 enter chimes and ≤5 exit chimes per hour.
-private let kCooldown: TimeInterval   = 180  // 3 minutes
+// 90s cooldown: allows multiple training cycles per 20-min session.
+private let kCooldown: TimeInterval   = 90   // 1.5 minutes
 
-// EMA smoothing — raw score jitters ±0.1 per window; this gives ~6-window time constant.
-private let kEmaAlpha: Float          = 0.15
+// EMA alpha = 0.20 → time constant ~4 windows (~2s) — fast enough to track real shifts.
+private let kEmaAlpha: Float          = 0.20
 
 final class DepthGate {
     private(set) var inDeepState   = false

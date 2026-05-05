@@ -4,18 +4,28 @@ import Combine
 final class MuseClient: NSObject {
 
     // MARK: - Public publishers
-    let discoveredMuses = CurrentValueSubject<[IXNMuse], Never>([])
-    let connectionState = CurrentValueSubject<IXNConnectionState, Never>(.unknown)
-    let eegPacket       = PassthroughSubject<EEGPacket, Never>()
-    let fitCheck        = CurrentValueSubject<FitCheckSnapshot, Never>(.zero)
-    let hsiRaw          = PassthroughSubject<[Double], Never>()
-    let battery         = CurrentValueSubject<Double, Never>(0)
-    let errors          = PassthroughSubject<MuseClientError, Never>()
+    let discoveredMuses  = CurrentValueSubject<[IXNMuse], Never>([])
+    let connectionState  = CurrentValueSubject<IXNConnectionState, Never>(.unknown)
+    let eegPacket        = PassthroughSubject<EEGPacket, Never>()
+    let fitCheck         = CurrentValueSubject<FitCheckSnapshot, Never>(.zero)
+    let hsiRaw           = PassthroughSubject<[Double], Never>()
+    let battery          = CurrentValueSubject<Double, Never>(0)
+    let errors           = PassthroughSubject<MuseClientError, Never>()
+    // Fires true when a blink or jaw-clench artifact is detected.
+    let artifactDetected = PassthroughSubject<Bool, Never>()
+    // Heart rate in BPM from PPG Green channel; 0 = no valid reading yet.
+    let heartRate        = CurrentValueSubject<Double, Never>(0)
 
     // MARK: - Internals
     private let manager: IXNMuseManagerIos
     private var connectedMuse: IXNMuse?
     private let queue = DispatchQueue(label: "com.drchord.museplus.client", qos: .userInitiated)
+    // PPG heart-rate state (accessed only from SDK callback thread)
+    private var ppgBuffer:  [Double] = []
+    private var lastBpmTs:  TimeInterval = 0
+    // Muse S (2019) PPG rate is 64 Hz; window = 8s
+    private static let ppgSampleRate: Double = 64.0
+    private static let ppgWindowSize: Int    = 512
 
     override init() {
         self.manager = IXNMuseManagerIos.sharedManager()
@@ -41,16 +51,28 @@ final class MuseClient: NSObject {
         connectedMuse = muse
         muse.unregisterAllListeners()
         muse.register(self as IXNMuseConnectionListener?)
-        muse.register(self as IXNMuseDataListener?, type: .eeg)
+        // NotchFilteredEeg: SDK applies 45–65 Hz bandstop — removes 60 Hz power line noise
+        // before our vDSP FFT sees the data (critical for gamma band accuracy).
+        muse.register(self as IXNMuseDataListener?, type: .notchFilteredEeg)
         muse.register(self as IXNMuseDataListener?, type: .hsiPrecision)
         muse.register(self as IXNMuseDataListener?, type: .battery)
+        muse.register(self as IXNMuseDataListener?, type: .artifacts)
+        // IsGood: 10 Hz quality flag per channel — more reliable than amplitude threshold.
+        muse.register(self as IXNMuseDataListener?, type: .isGood)
+        // PPG: Green light (AMBIENT channel) on Muse S for heart rate.
+        muse.register(self as IXNMuseDataListener?, type: .ppg)
+        // Accelerometer: head motion > 0.25g triggers artifact suppression.
+        muse.register(self as IXNMuseDataListener?, type: .accelerometer)
         muse.setPreset(.preset21)   // default for muse2019 (Muse S Athena) — no preset change = no disconnect cycle
         muse.runAsynchronously()
     }
 
     func disconnect() {
         queue.async { self.disconnectInternal() }
-        DispatchQueue.main.async { self.connectionState.send(.disconnected) }
+        DispatchQueue.main.async {
+            self.connectionState.send(.disconnected)
+            self.heartRate.send(0)
+        }
     }
 
     // MARK: - Private
@@ -61,6 +83,8 @@ final class MuseClient: NSObject {
             m.unregisterAllListeners()
             connectedMuse = nil
         }
+        ppgBuffer.removeAll()
+        lastBpmTs = 0
     }
 }
 
@@ -87,15 +111,19 @@ extension MuseClient: IXNMuseDataListener {
     func receive(_ packet: IXNMuseDataPacket?, muse: IXNMuse?) {
         guard let p = packet else { return }
         switch p.packetType() {
-        case .eeg:      handleEEG(p)
-        case .hsiPrecision: handleHorseshoe(p)
-        case .battery:  handleBattery(p)
-        default:        break
+        case .notchFilteredEeg: handleEEG(p)           // 45–65 Hz notch-filtered
+        case .hsiPrecision:     handleHorseshoe(p)
+        case .battery:          handleBattery(p)
+        case .isGood:           handleIsGood(p)
+        case .ppg:              handlePpg(p)           // heart rate
+        case .accelerometer:    handleAccelerometer(p) // motion artifact
+        default:                break
         }
     }
 
     func receive(_ packet: IXNMuseArtifactPacket, muse: IXNMuse?) {
-        // artifact handling added in Gate 2
+        guard packet.blink || packet.jawClench else { return }
+        DispatchQueue.main.async { self.artifactDetected.send(true) }
     }
 
     private func handleEEG(_ p: IXNMuseDataPacket) {
@@ -105,6 +133,12 @@ extension MuseClient: IXNMuseDataListener {
             Float(p.getEegChannelValue(.EEG3)),
             Float(p.getEegChannelValue(.EEG4)),
         ]
+        // Amplitude artifact rejection: any channel > 300 µV is blink/muscle contamination
+        let maxAmp = channels.map(abs).max() ?? 0
+        if maxAmp > 300 {
+            DispatchQueue.main.async { self.artifactDetected.send(true) }
+            return  // drop this packet entirely
+        }
         let pkt = EEGPacket(timestamp: Date().timeIntervalSinceReferenceDate, channels: channels)
         DispatchQueue.main.async { self.eegPacket.send(pkt) }
     }
@@ -129,5 +163,103 @@ extension MuseClient: IXNMuseDataListener {
     private func handleBattery(_ p: IXNMuseDataPacket) {
         let pct = p.getBatteryValue(.chargePercentageRemaining)
         DispatchQueue.main.async { self.battery.send(pct) }
+    }
+
+    // IsGood: 4 values (1=good, 0=bad) per EEG channel, emitted at 10 Hz.
+    // If frontal channels (AF7=idx1, AF8=idx2) are bad, trigger artifact suppression.
+    private func handleIsGood(_ p: IXNMuseDataPacket) {
+        let vals = p.values()
+        guard vals.count >= 4 else { return }
+        let af7Good = vals[1].doubleValue > 0.5
+        let af8Good = vals[2].doubleValue > 0.5
+        guard !af7Good || !af8Good else { return }
+        DispatchQueue.main.async { self.artifactDetected.send(true) }
+    }
+
+    // PPG at ~64 Hz. AMBIENT = Green on Muse S (2019). Compute BPM every 2s from 8s window.
+    // Dispatch to queue to serialize buffer access with disconnectInternal (avoids data race).
+    private func handlePpg(_ p: IXNMuseDataPacket) {
+        let sample = p.getPpgChannelValue(.AMBIENT)
+        guard sample.isFinite else { return }
+        queue.async { [self] in
+            ppgBuffer.append(sample)
+            if ppgBuffer.count > MuseClient.ppgWindowSize { ppgBuffer.removeFirst() }
+            let now = Date().timeIntervalSinceReferenceDate
+            guard ppgBuffer.count == MuseClient.ppgWindowSize, now - lastBpmTs >= 2.0 else { return }
+            lastBpmTs = now
+            let bpm = computeBPM(ppgBuffer)
+            guard bpm > 30 && bpm < 200 else { return }
+            DispatchQueue.main.async { self.heartRate.send(bpm) }
+        }
+    }
+
+    private func computeBPM(_ buf: [Double]) -> Double {
+        let n = buf.count
+        let fs = MuseClient.ppgSampleRate
+
+        // 1. De-mean
+        let mu = buf.reduce(0.0, +) / Double(n)
+        var sig = buf.map { $0 - mu }
+
+        // 2. Baseline wander removal: subtract causal 1-s MA (64-tap box high-pass).
+        //    Removes breathing-driven amplitude modulation (~0.2 Hz) that biases
+        //    any amplitude-based detection downstream.
+        var trend = [Double](repeating: 0, count: n)
+        var bwSum = 0.0
+        let hpWin = Int(fs)  // 1 s = 64 samples
+        for i in 0..<n {
+            bwSum += sig[i]
+            if i >= hpWin { bwSum -= sig[i - hpWin] }
+            trend[i] = bwSum / Double(min(i + 1, hpWin))
+        }
+        for i in 0..<n { sig[i] -= trend[i] }
+
+        // 3. Low-pass: 8-tap causal box filter removes HF noise above the heart-rate band.
+        var lp = [Double](repeating: 0, count: n)
+        var lpSum = 0.0
+        let lpWin = 8
+        for i in 0..<n {
+            lpSum += sig[i]
+            if i >= lpWin { lpSum -= sig[i - lpWin] }
+            lp[i] = lpSum / Double(min(i + 1, lpWin))
+        }
+
+        // 4. Autocorrelation over physiological lag range.
+        //    Lags: 19 samples (200 BPM) → 128 samples (30 BPM) at 64 Hz.
+        //    ~56 K MACs per call, called every 2 s — negligible CPU.
+        //    AC is robust to isolated noise spikes unlike peak detection;
+        //    periodic heartbeat creates a clear AC peak at the beat interval.
+        let minLag = Int((fs * 60.0 / 200.0).rounded(.up))   // 19
+        let maxLag = Int((fs * 60.0 / 30.0).rounded(.down))  // 128
+        guard maxLag < n else { return 0 }
+
+        let power = lp.reduce(0.0) { $0 + $1 * $1 } / Double(n)
+        guard power > 0 else { return 0 }
+
+        var bestLag = minLag
+        var bestAC = -Double.infinity
+        for lag in minLag...maxLag {
+            let usable = n - lag
+            var ac = 0.0
+            for i in 0..<usable { ac += lp[i] * lp[i + lag] }
+            ac /= Double(usable)
+            if ac > bestAC { bestAC = ac; bestLag = lag }
+        }
+
+        // 5. Quality gate: AC peak must be > 20% of signal power.
+        //    Weak ratio = aperiodic noise or flat signal → suppress.
+        guard bestAC / power > 0.20 else { return 0 }
+
+        return fs * 60.0 / Double(bestLag)
+    }
+
+    // Head motion > 0.25g deviation from resting 1g magnitude triggers artifact suppression.
+    private func handleAccelerometer(_ p: IXNMuseDataPacket) {
+        let x = p.getAccelerometerValue(.x)
+        let y = p.getAccelerometerValue(.y)
+        let z = p.getAccelerometerValue(.z)
+        let magnitude = sqrt(x*x + y*y + z*z)
+        guard abs(magnitude - 1.0) > 0.25 else { return }
+        DispatchQueue.main.async { self.artifactDetected.send(true) }
     }
 }

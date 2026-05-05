@@ -52,6 +52,8 @@ targets:
       - sdk: CoreBluetooth.framework
       - sdk: libc++.tbd
       - sdk: Accelerate.framework
+    entitlements:
+      path: MusePlus/MusePlus.entitlements
     settings:
       base:
         FRAMEWORK_SEARCH_PATHS:
@@ -59,6 +61,7 @@ targets:
         ENABLE_BITCODE: NO
         SWIFT_OBJC_BRIDGING_HEADER: MusePlus/MusePlus-Bridging-Header.h
         TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_ENTITLEMENTS: MusePlus/MusePlus.entitlements
 
   MusePlusTests:
     type: bundle.unit-test

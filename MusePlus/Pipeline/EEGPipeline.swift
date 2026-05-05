@@ -13,6 +13,12 @@ final class EEGPipeline {
 
     var onBandPowers: (([BandPowers]) -> Void)?
 
+    // Call when a blink/jaw-clench is detected. Suppresses next 4 windows (~2s).
+    func suppressArtifact() {
+        suppressWindows = max(suppressWindows, 4)
+    }
+    private var suppressWindows = 0
+
     init() {
         let n = EEGPipeline.windowSize
         log2n   = vDSP_Length(log2(Float(n)))
@@ -31,6 +37,12 @@ final class EEGPipeline {
             buffers[ch].append(packet.channels[ch])
         }
         guard buffers[0].count >= EEGPipeline.windowSize else { return }
+        // Artifact suppression: drain buffer and skip this window
+        if suppressWindows > 0 {
+            suppressWindows -= 1
+            for ch in 0..<4 { buffers[ch].removeFirst(EEGPipeline.hopSize) }
+            return
+        }
 
         let ts = packet.timestamp
         let powers = (0..<4).map { ch in

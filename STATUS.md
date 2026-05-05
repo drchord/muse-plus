@@ -17,8 +17,43 @@
 | 48 | Compile fixes (BandPowers + chartScale) | ❌ Upload limit | Apple daily limit hit |
 | 49 | Empty trigger commit | ❌ Upload limit | Still blocked |
 | 50 | All of 45–48 features | ✅ **Current TestFlight build** | CI run 25291031222 — uploaded 2026-05-03 |
+| 51 | Comprehensive overhaul (see below) | ⏳ Not yet committed | Ready to commit + push |
 
-**Current blocker:** None. Build 50 live in TestFlight.
+**Current blocker:** None. Build 50 live. Build 51 code complete — needs commit + CI push.
+
+## What Build 51 Contains (over build 50)
+
+**Audio overhaul:**
+1. SoundscapePlayer: 7 real M4A audio files (brook, rain, thunder, wind, ocean, forest, birds) with crossfade loop
+2. SoundscapePlayer: adaptive binaural beat tier (>0.70=4Hz delta, >0.45=6Hz theta, else=10Hz alpha)
+3. ChimeEngine: stereo (own AVAudioEngine), AVAudioUnitReverb .largeHall, Haas 53-sample delay
+4. ChimeEngine: per-partial decay, 432Hz enter / 288Hz exit / 528+660Hz restored / 84Hz timer-end
+5. ChimeEngine: contact-restored chime (NEW), check-in chime (NEW)
+6. Timer end: SoundscapePlayer.stopAll(fadeSeconds:4) fires automatically
+
+**EEG/signal improvements:**
+7. NotchFilteredEeg: switched from .eeg to .notchFilteredEeg (45–65 Hz SDK bandstop removes 60 Hz noise)
+8. Artifact rejection layer 1: SDK blink/jawClench packet → pipeline.suppressArtifact()
+9. Artifact rejection layer 2: amplitude > 300 µV → drop packet + suppress
+10. Artifact rejection layer 3: IsGood 10 Hz flag (frontal AF7/AF8) → suppress
+11. Artifact rejection layer 4 (NEW Build 51): Accelerometer > 0.25g motion → suppress
+12. PPG heart rate (NEW Build 51): Green/AMBIENT 8s window peak detection → BPM display in top bar
+
+**Depth scoring:**
+13. Peniston-Kulkosky meditationIndex: 0.7×((α+θ)−2β) + 0.3×max(0,θ−α)
+14. FAA (Frontal Alpha Asymmetry): af8Alpha − af7Alpha, shown as approach/withdrawal bar
+15. DepthGate tuning: enter=10s, exit=10s, cooldown=90s, EMA α=0.20
+
+**UI redesign (full overhaul):**
+16. ConnectView: dark brain-icon screen, device list, scanning indicator
+17. MeditationView: DepthGaugeView (240px circle, score 0-100) + FAABarView + BandChart + BottomButtons
+18. Heart rate chip in top bar (shows bpm when PPG locks, hides when 0)
+19. SettingsSheet: all developer info moved here (chime preview, band powers, sessions)
+20. SoundscapeSheet + TimerSheet as modal sheets
+
+**Infrastructure:**
+21. iCloud entitlements (CloudDocuments) in MusePlus.entitlements + project.yml
+22. Resources/Soundscapes/ with 7 M4A files (bundle path dual-lookup: subdirectory then root)
 
 ## What Build 48 Contains (over build 44)
 
@@ -55,13 +90,18 @@
 
 ## Critical Architecture Notes
 
-- **AVAudioEngine format**: always explicit — mono for ChimeEngine (`channels: 1`), stereo for SoundscapePlayer (`channels: 2`). `format: nil` causes crash after BT route change.
+- **AVAudioEngine format**: ChimeEngine = stereo (own engine, safe). SoundscapePlayer = stereo (`channels:2`, explicit). `format: nil` causes crash after BT route change.
 - **Config change handler**: `asyncAfter(0.5s)` delay required in `AVAudioEngineConfigurationChange` notification.
 - **Binaural beat**: `beatHz` captured on main thread before background dispatch (was race condition).
 - **BandPowers struct field order**: `delta,theta,alpha,beta,gamma` then `deltaPeak,thetaPeak,alphaPeak,betaPeak,gammaPeak` — init call must match exactly.
 - **chartForegroundStyleScale**: use `domain:/range:` overload with arrays, not `[String:Color]` dict.
-- **Frontal channels**: AF7=ch1, AF8=ch2 for depth scoring.
-- **DepthGate**: EMA α=0.15, 20s sustain to enter deep, 15s to exit, 3-min cooldown.
+- **Frontal channels**: AF7=ch1 (idx1), AF8=ch2 (idx2) for depth scoring and FAA.
+- **DepthGate**: EMA α=0.20, 10s sustain (kEnterSustained=20) to enter deep, 10s to exit, 90s cooldown.
+- **NotchFilteredEeg**: SDK applies 45–65 Hz bandstop before our FFT. Use `.notchFilteredEeg` not `.eeg`.
+- **IsGood**: frontal AF7/AF8 quality at 10 Hz. Bad → artifact suppress (DO NOT swap channel indices).
+- **PPG heart rate**: queue-serialized buffer (ppgBuffer accessed from SDK thread + queue = must serialize). ppgBuffer cleared on disconnect. AMBIENT = Green on Muse S 2019 (SDK header confirmed). Accel values in g (SDK header: "negated to align with headband orientation" — magnitude sqrt(x²+y²+z²) = 1.0 at rest regardless of sign, so `abs(magnitude-1.0)>0.25` is correct). BPM algorithm: demean → 64-tap baseline-wander HP → 8-tap LP → autocorrelation over lags 19–128 (200–30 BPM) → quality gate (AC/power > 0.20). AC approach is more robust than peak detection for noisy wearable PPG.
+- **Accelerometer enum bridging**: IXNAccelerometerX → `.x` (lowercase — single letter, Swift SE-0005). IXNPpgAMBIENT → `.AMBIENT` (all-caps acronym rule preserved).
+- **iCloud entitlement**: iCloud.com.drchord.museplus configured in Apple Developer Portal + MusePlus.entitlements.
 
 ## App Store Submission — Step by Step
 
@@ -138,27 +178,36 @@ MusePlus iOS app — Muse S EEG real-time meditation companion.
 Project: C:\Users\sugat\MusePlus. Git remote: drchord/muse-plus.
 
 CURRENT STATE (2026-05-03):
-- Last TestFlight build: 50 ✅ — uploaded successfully 2026-05-03
-- CI run: 25291031222 (github.run_number=50)
-- CI uses github.run_number as build number
+- Last TestFlight build: 50 ✅ — uploaded 2026-05-03
+- Build 51: code complete, NOT YET COMMITTED. Run git status to confirm.
+- CI uses github.run_number as build number (auto-increment on push)
 
-WHAT BUILD 50 CONTAINS (over build 44):
-1. BandChart: Mind Monitor dark style — Color(white:0.07) card, MM colors, 3pt catmullRom lines
-2. BandChart header: δ Delta 1–4 Hz | live dominant Hz bold per band (vDSP_maxvi on FFT mag2)
-3. Chart X-axis: rolling 60s window (xDomain = max(0, last.time-60)...last.time)
+WHAT BUILD 51 ADDS (over build 50):
+Full overhaul — see STATUS.md "What Build 51 Contains" section.
+Key files changed: App.swift, MuseClient.swift, EEGPipeline.swift, MuseTypes.swift,
+DepthScore.swift, DepthGate.swift, ChimeEngine.swift, SoundscapePlayer.swift,
+project.yml, MusePlus.entitlements.
+New assets: MusePlus/Resources/Soundscapes/*.m4a (7 files).
 
-KEY BUG FIXES THAT WERE IN BUILDS 45-48:
-- EEGPipeline BandPowers init: labels must be delta,theta,alpha,beta,gamma THEN deltaPeak...gammaPeak
-- BandChart chartForegroundStyleScale: use domain:/range: arrays, NOT [String:Color] dict
+COMPILE-TIME RISKS FOR BUILD 51:
+- IXNAccelerometer enum bridging: .x/.y/.z (lowercase) — if compiler says member not found, try .X/.Y/.Z
+- IXNPpg.AMBIENT bridging: .AMBIENT (all-caps preserved) — if error, try .ambient
+- Check AVAudioUnitReverb preset: .largeHall (NOT .largeChamber — does not exist)
+- BandPowers init label order MUST be: delta,theta,alpha,beta,gamma then deltaPeak...gammaPeak
 
 AUDIO INVARIANTS (do not change or crash returns):
-- ChimeEngine: explicit mono format (channels:1) on engine.connect()
-- SoundscapePlayer: explicit stereo format (channels:2) on engine.connect()
+- ChimeEngine: stereo (own AVAudioEngine, safe)
+- SoundscapePlayer: explicit stereo (channels:2) on engine.connect()
 - asyncAfter(0.5s) in AVAudioEngineConfigurationChange handler
 - binauralPreset.beatHz captured on main thread before background dispatch
 
-PENDING:
-- Spotify flow: muse-monitor://callback registered in Spotify dev dashboard — needs device test
+PENDING FOR FUTURE BUILDS:
+- SessionRecorder: add FAA, heartRate, soundscapeEvents, preSessionBaseline fields
+- Session replay view: post-session chart scrollback
+- Training program stages: findingCalm → deepening → thetaTraining → deepAbsorption
+- Python analysis pipeline on Sparky (every-5-session report → Google Drive → email)
+- ZIPFoundation SPM dependency for session ZIP export
+- Spotify flow: needs device test (muse-monitor://callback registered in Spotify dev dashboard)
 - App Store submission: see STATUS.md Phase 1-5 checklist when ready
 
 Read STATUS.md and run `gh run list --limit 5` before doing anything.
