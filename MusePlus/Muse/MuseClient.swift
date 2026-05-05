@@ -64,8 +64,13 @@ final class MuseClient: NSObject {
         muse.register(self as IXNMuseDataListener?, type: .artifacts)
         // IsGood: 10 Hz quality flag per channel — more reliable than amplitude threshold.
         muse.register(self as IXNMuseDataListener?, type: .isGood)
-        // PPG: Green light (AMBIENT channel) on Muse S for heart rate.
+        // PPG: Green light (AMBIENT channel) on Muse S 2019/2021/2 for heart rate.
+        // On Athena (MS-03) the .ppg packet does not emit — Optics replaces it.
         muse.register(self as IXNMuseDataListener?, type: .ppg)
+        // Optics: 16-channel fNIRS @ 64 Hz on Athena. Also carries the heart-rate
+        // signal (850 nm inner channels OPTICS7/OPTICS8 = IR, follows blood-volume pulse).
+        // On legacy Muse S/2 hardware Optics hardware is absent; the packet never fires.
+        muse.register(self as IXNMuseDataListener?, type: .optics)
         // Accelerometer: head motion > 0.25g triggers artifact suppression.
         muse.register(self as IXNMuseDataListener?, type: .accelerometer)
         // Preset is applied AFTER connection completes — see receive(_:muse:) in
@@ -154,7 +159,8 @@ extension MuseClient: IXNMuseDataListener {
         case .hsiPrecision:     handleHorseshoe(p)
         case .battery:          handleBattery(p)
         case .isGood:           handleIsGood(p)
-        case .ppg:              handlePpg(p)           // heart rate
+        case .ppg:              handlePpg(p)           // heart rate — legacy Muse S/2
+        case .optics:           handleOptics(p)        // heart rate + fNIRS — Athena only
         case .accelerometer:    handleAccelerometer(p) // motion artifact
         default:                break
         }
@@ -220,6 +226,27 @@ extension MuseClient: IXNMuseDataListener {
     private func handlePpg(_ p: IXNMuseDataPacket) {
         let sample = p.getPpgChannelValue(.AMBIENT)
         guard sample.isFinite else { return }
+        queue.async { [self] in
+            ppgBuffer.append(sample)
+            if ppgBuffer.count > MuseClient.ppgWindowSize { ppgBuffer.removeFirst() }
+            let now = Date().timeIntervalSinceReferenceDate
+            guard ppgBuffer.count == MuseClient.ppgWindowSize, now - lastBpmTs >= 2.0 else { return }
+            lastBpmTs = now
+            let bpm = computeBPM(ppgBuffer)
+            guard bpm > 30 && bpm < 200 else { return }
+            DispatchQueue.main.async { self.heartRate.send(bpm) }
+        }
+    }
+
+    // Athena Optics heart-rate path. 850 nm inner channels (OPTICS7 left, OPTICS8 right)
+    // follow blood-volume pulse. Average both for SNR. Feed same autocorrelation BPM
+    // pipeline as legacy PPG — unit-agnostic (periodic signal detection only).
+    // Legacy devices have no Optics hardware; this method never fires for them.
+    private func handleOptics(_ p: IXNMuseDataPacket) {
+        let left  = p.getOpticsChannelValue(.OPTICS7)  // 850 nm inner left
+        let right = p.getOpticsChannelValue(.OPTICS8)  // 850 nm inner right
+        guard left.isFinite, right.isFinite else { return }
+        let sample = (left + right) * 0.5
         queue.async { [self] in
             ppgBuffer.append(sample)
             if ppgBuffer.count > MuseClient.ppgWindowSize { ppgBuffer.removeFirst() }
