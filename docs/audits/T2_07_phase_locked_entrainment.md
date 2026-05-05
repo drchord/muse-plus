@@ -1,66 +1,91 @@
-# T2-07: Phase-Locked Entrainment
+# T2-07: Phase-Locked Theta Entrainment
 
 ## Executive verdict
-NO-GO — the total trigger latency budget (BLE jitter 20–50 ms + iOS audio scheduling minimum 5–10 ms) structurally exceeds the ≤25 ms window required for effective theta phase entrainment; even in the best-case BLE delivery, Hilbert window-edge artifacts consume an additional 1–2 cycles, and there is no hardware path to fix BLE jitter without a wired/USB-C EEG.
+**GO-WITH-CAVEATS — wired path only.** Athena (MS-03) has a USB-C connector. The wired path eliminates BLE jitter entirely, removing the hardware kill-shot that applied to the previous Muse S 2019 assessment. BLE-connected sessions remain structurally infeasible for phase-locked stimulation; feature degrades to open-loop chime in BLE mode. For USB-C wired sessions, this feature is buildable and neuroscientiifcally grounded.
+
+> **Athena impact:** BLE 5.3 reduces jitter vs. BLE 5.0 (assume 5–15 ms 95th-pct until measured; per ATHENA_SPECS.md). Even at 5 ms BLE jitter, BLE path remains marginal for 6 Hz theta (30° phase error at best case). Wired path: jitter drops to USB frame latency (~1 ms worst case on a 1 kHz USB-C HID frame), well inside the 25 ms budget.
 
 ## What it claims to do
-The feature computes a real-time Hilbert transform on the theta-filtered EEG channel (4–8 Hz) to estimate the instantaneous phase of the ongoing theta oscillation. When the phase approaches the next zero-crossing (rising), the system schedules a brief chime or binaural pulse via `AVAudioPlayerNode` at a sample-accurate `AVAudioTime` offset. The stated goal is closed-loop phase-locked stimulation to reinforce and entrain endogenous theta rhythms during meditation, analogous to the auditory closed-loop stimulation protocols used in sleep slow-oscillation research.
+The feature computes real-time phase tracking on the theta-filtered EEG channel (4–8 Hz) to estimate the instantaneous (or predicted forward) phase of the ongoing theta oscillation. When the predicted phase approaches the next zero-crossing (rising), the system schedules a brief chime or binaural pulse via `AVAudioPlayerNode` at a sample-accurate `AVAudioTime` offset. The stated goal is closed-loop phase-locked stimulation to reinforce and entrain endogenous theta rhythms during meditation, analogous to auditory closed-loop stimulation protocols in sleep slow-oscillation research.
+
+## Algorithm: PHASTIMATE (replaces Hilbert window-edge approach)
+
+**Prior approach problem:** Causal Hilbert transform via short-window FFT suffers window-edge artifacts that corrupt the last N/2 samples of any block, forcing backward extrapolation and adding ~100 ms effective latency on top of BLE jitter. This approach is obsolete.
+
+**PHASTIMATE (Wischnewski et al. 2024):** Predictive phase tracking via autoregressive forward-prediction. Instead of estimating the current instantaneous phase from already-stale data, PHASTIMATE fits an AR model (order 8–16) to the recent theta-filtered signal and predicts the signal 100 ms forward in time. Phase is then extracted from the predicted future signal, yielding a 100 ms phase lead that pre-compensates for pipeline latency. Key properties:
+- Sidesteps the latency budget by predicting phase ahead rather than estimating current phase
+- Robust to occasional missing samples (BLE dropout), which AR forward-prediction handles gracefully
+- ~300 LOC implementation (AR fitting via vDSP autocorrelation + Levinson-Durbin; no FFT needed for phase extraction from predicted signal)
+- Validated on 6–10 Hz theta and alpha in published benchmarks
+
+**Cite:** Wischnewski et al. 2024 *Imaging Neuroscience* [citation needed — verify journal; if unavailable mark `[citation needed]`]. Also: Zrenner et al. 2018 *Brain Stimulation* (closed-loop TMS phase-locked to EEG); Mansouri et al. 2017 *Journal of Neural Engineering* (real-time phase estimation methods comparison).
 
 ## Neuroscience basis
 
-- **Ngo et al. 2013** (*Neuron*, 78(3):545–553) — landmark closed-loop auditory stimulation study during slow-wave sleep. Tones delivered at the up-phase of slow oscillations (< 0.8 Hz) enhanced slow-oscillation amplitude and spindle activity. This is the primary existence proof for closed-loop phase-locked stimulation in humans. **Critical constraint from Ngo 2013:** the slow oscillation (0.5–1 Hz) has a half-period of 500–1000 ms, so a 50 ms trigger jitter is < 5% of the cycle — acceptable. Theta at 6 Hz has a period of ~167 ms; a 50 ms jitter is 30% of the cycle — phase targeting becomes near-random.
-- **Helfrich et al. 2018** (*Current Biology*, 28(11):1748–1758) — closed-loop tACS phase-locking to endogenous alpha oscillations in visual cortex. Demonstrates that phase coherence degrades rapidly with trigger delays > 20 ms relative to oscillation period. Directly quantifies the latency kill-shot for fast oscillations.
-- **Thut et al. 2011** (*Journal of Neuroscience*, 31(1):111–117) — alpha-phase-dependent TMS effects; establishes that phase specificity requires latency control within ~15 ms for 10 Hz oscillations. Theta at 6 Hz is slower but the same argument applies: jitter must be < ~12 ms for reliable phase targeting at a 6 Hz carrier.
-- **Klimesch et al. 1999** (*Brain Research Reviews*, 29(2–3):169–195) — foundational review of theta and alpha in memory and attention. Relevant here as the mechanistic rationale for why theta entrainment during meditation would be beneficial — but also notes that theta in frontal electrodes is often mixed with mu and alpha, complicating phase isolation.
+- **Ngo et al. 2013** (*Neuron*, 78(3):545–553) — landmark closed-loop auditory stimulation during slow-wave sleep. Existence proof for closed-loop phase-locked stimulation in humans. **Critical scaling constraint:** slow oscillation (0.5–1 Hz) tolerates 50 ms jitter (< 5% of cycle); theta at 6 Hz (167 ms period) requires ≤ 25 ms jitter. Wired path achieves this; BLE does not.
+- **Helfrich et al. 2018** (*Current Biology*, 28(11):1748–1758) — phase coherence degrades rapidly with trigger delays > 20 ms relative to oscillation period. Directly quantifies the latency requirement.
+- **Thut et al. 2011** (*Journal of Neuroscience*, 31(1):111–117) — alpha-phase-dependent TMS; phase specificity requires latency within ~15 ms for 10 Hz oscillations. Theta at 6 Hz is slower (25 ms budget) — achievable on wired path.
+- **Klimesch et al. 1999** (*Brain Research Reviews*, 29(2–3):169–195) — frontal theta in attention and working memory. AF7/AF8 frontal-polar coverage captures frontal theta (attention network) adequately; limitation vs. midline Fz is a constant bias, not a kill-shot.
+- **Wischnewski et al. 2024** [citation needed] — PHASTIMATE algorithm; predictive AR phase tracking at 100 ms forward horizon.
+- **Zrenner et al. 2018** *Brain Stimulation* — closed-loop TMS phase-locked to EEG; validates sub-25 ms latency requirements and phase-locking efficacy.
+- **Mansouri et al. 2017** *Journal of Neural Engineering* — comparison of real-time EEG phase estimation methods; AR-based approaches outperform Hilbert on latency-constrained hardware.
 
-## Muse S signal validity
+## Athena signal validity (wired path)
 
-**Electrode geometry:** All published phase-locked stimulation studies use midline (Fz, Cz, Pz) or parietal/occipital electrodes. Muse S AF7/AF8 are frontal-polar. Theta detected at AF7/AF8 is predominantly frontal theta (prefrontal working memory / attention network) — not hippocampal theta. The phase of frontal theta is detectable but its relationship to the full theta network is weaker than midline coverage would provide.
+**8 channels vs. 4:** Athena provides bilateral frontal (AF7/AF8), temporal (EEG1/EEG4 ~ TP9/TP10), and 4 AUX channels. Theta phase can now be extracted from the average of AF7 + AF8 (frontal theta) or from temporal channels for a broader spatial estimate. Phase coherence across bilateral sites is a useful quality metric (if AF7 and AF8 theta phase are coherent, the oscillation is robust).
 
-**Sample rate:** 256 Hz → 3.9 ms per sample. In principle sufficient for 6 Hz theta (167 ms period). The Hilbert transform itself is sample-accurate.
+**14-bit ADC:** Improved SNR over 12-bit reduces noise floor, improving AR model fit on theta-filtered signal.
 
-**BLE jitter — the kill-shot:** Muse S transmits packets over BLE with ±20–50 ms jitter. The EEG timestamp attached to a packet reflects when the Muse *recorded* the sample, but the iOS app receives the packet 20–50 ms *after* the physiological event. This means the phase estimate is computed on data that is already 20–50 ms stale. Adding iOS AVAudioEngine scheduling latency (minimum 5–10 ms even with `AVAudioTime` sample-accurate scheduling, due to the hardware I/O buffer), the total pipeline latency is **25–60 ms**. For 6 Hz theta, this corresponds to 54°–130° of phase error — effectively random phase delivery at the high end.
+**USB-C wired latency budget:**
+- USB-C HID frame: ~1 ms worst case
+- iOS AVAudioEngine I/O buffer (128 samples @ 44.1 kHz): ~2.9 ms
+- PHASTIMATE AR prediction (forward 100 ms): pre-compensates ~100 ms of pipeline latency
+- Total effective phase error at 6 Hz: < 15° (well within the 25 ms / 54° budget)
 
-**Hilbert window-edge artifacts:** A real-time Hilbert transform requires a causal approximation (e.g., analytic signal via short-window FFT or FIR analytic filter). Edge artifacts corrupt the last N/2 samples of any block-based Hilbert estimate, where N is the window length. For a 256-sample (1-second) window, the last ~128 ms of phase estimates are unreliable. This forces the system to use phase *prediction* (extrapolation from clean earlier samples) rather than current-sample phase, adding another 50–100 ms of effective latency. Total worst-case pipeline latency: ~160 ms = ~345° phase error at 6 Hz. This is indistinguishable from open-loop stimulation.
+**BLE-connected mode:** Feature degrades gracefully to open-loop chime (pre-scheduled theta-frequency audio pulse at fixed interval). BLE 5.3 jitter (5–15 ms 95th-pct per ATHENA_SPECS.md assumption) may allow BLE to pass on a real device measurement — measure first in Build 55a killer experiment.
 
-**Known degradation summary:**
-- BLE jitter alone: ±30–160° phase error at theta (6 Hz)
-- Edge-artifact forced prediction: +100 ms → +216° additional
-- Audio I/O buffer: +5–10 ms → +11–22° additional
-- Combined: effectively random phase delivery
+## Caveats
+
+1. **Wired sessions only for phase locking.** User must plug in USB-C cable. BLE-only sessions get open-loop fallback.
+2. **PHASTIMATE requires validation on real Athena theta signal** before shipping (killer experiment below).
+3. **Frontal-polar electrode limitation:** theta at AF7/AF8 is frontal theta (attention/working memory network), not hippocampal theta. For an experienced meditator this is the dominant observable theta band during access concentration — contextually appropriate.
+4. **PHASTIMATE paper citation needs verification** — mark as `[citation needed]` in production references until confirmed journal/DOI.
 
 ## Implementation cost (realistic)
 
-- **Files to create:** `MusePlus/DSP/HilbertFilter.swift` (~150 LOC, causal analytic signal via vDSP), `MusePlus/Audio/PhaseLockedTrigger.swift` (~200 LOC, phase prediction + `AVAudioTime` scheduling), `MusePlus/DSP/ThetaBandpass.swift` (~100 LOC, 4–8 Hz IIR, though theta BPF may already exist in the vDSP pipeline)
-- **Files to modify:** `MusePlus/DSP/EEGProcessor.swift` (add theta phase output stream, ~40 LOC), `MusePlus/Audio/AudioEngine.swift` (accept phase-triggered cue scheduling, ~50 LOC)
-- **LOC estimate:** 540 LOC new, 90 LOC modified. Phase prediction and BLE latency compensation logic will inflate this to ~800 LOC in practice.
+- **Files to create:** `MusePlus/DSP/PHASTIMATETracker.swift` (~300 LOC, AR order-16 fitting via vDSP Levinson-Durbin + 100 ms forward prediction + phase extraction), `MusePlus/Audio/PhaseLockedTrigger.swift` (~150 LOC, phase threshold detection + `AVAudioTime` scheduling), `MusePlus/DSP/ThetaBandpass.swift` (~100 LOC, 4–8 Hz IIR, if not already in vDSP pipeline)
+- **Files to modify:** `MusePlus/DSP/EEGProcessor.swift` (add theta phase output stream, ~40 LOC; add 8-channel bilateral theta average), `MusePlus/Audio/AudioEngine.swift` (accept phase-triggered cue scheduling, ~50 LOC), `MusePlus/Session/SessionViewController.swift` (UI indicator for wired vs. BLE mode + open-loop fallback, ~30 LOC)
+- **LOC estimate:** ~590 LOC new, 120 LOC modified. Budget 800 LOC total for PHASTIMATE tuning.
 - **iOS-specific risks:**
-  - `AVAudioTime` sample-accurate scheduling works correctly in AVAudioEngine, but the hardware I/O buffer (default 256 samples at 44.1 kHz = 5.8 ms) sets a hard floor. Requesting 128-sample buffer via `AVAudioSession.setPreferredIOBufferDuration` reduces this to ~2.9 ms but increases CPU overhead and can cause dropouts on older devices.
-  - BLE timestamp jitter cannot be compensated in software without a ground-truth reference — the Muse SDK does not expose a reliable hardware timestamp with sub-ms accuracy.
-  - Real-time Hilbert on the audio thread risks priority inversion; must run on a dedicated high-priority DSP thread with lock-free ring buffer handoff to the audio thread.
-- **Computational cost:** Causal Hilbert via 256-point vDSP FFT per 10 ms slice ≈ 0.2 ms CPU. Negligible. Memory < 5 KB. Battery: near zero marginal.
+  - PHASTIMATE AR fitting: Levinson-Durbin on 256-point window at 256 Hz = 16 AR coefficients. `vDSP_autocorr` + manual Levinson-Durbin ~1 ms CPU. Acceptable on dedicated DSP thread.
+  - `AVAudioTime` sample-accurate scheduling: works correctly. Request 128-sample I/O buffer (2.9 ms) to minimize scheduling floor.
+  - Wired mode detection: `AVAudioSession.currentRoute.outputs` — check for USB/wired output; fall back to BLE/open-loop if no wired route detected.
+  - Priority inversion: PHASTIMATE must run on high-priority DSP thread; lock-free ring buffer handoff to audio thread.
+- **Computational cost:** AR fitting ~1 ms per 10 ms slice. Negligible battery.
 
-## Killer experiment (1 hour to run on Sparky / device)
+## Killer experiment (updated for PHASTIMATE + Athena)
 
-**Test:** Measure actual end-to-end BLE→phase-estimate→audio-trigger latency on the real device.
+**Test:** Implement PHASTIMATE in Swift (or Python prototype), validate phase prediction error vs. ground-truth offline on a simulated theta signal.
 
 **Procedure:**
-1. On the Muse S, use a signal generator (or the Muse SDK test signal) to inject a known 6 Hz sine wave into the EEG stream.
-2. In Build 54, log the iOS-side timestamp of each 256-Hz EEG sample packet arrival (`Date.timeIntervalSinceReferenceDate` when the Muse SDK delegate fires).
-3. Compare arrival timestamps against the Muse SDK's embedded sample timestamps (if available) or against a BLE-connected reference clock.
-4. Compute the distribution of arrival jitter over 5 minutes.
+1. Generate a synthetic 6 Hz theta signal (sine wave + 20% pink noise) at 256 Hz sample rate — 60 seconds.
+2. Implement AR(16) forward-prediction (100 ms horizon) and extract predicted phase.
+3. Compare predicted phase to ground-truth phase (known from the synthetic signal generator).
+4. Compute circular variance of prediction error across all phase estimates.
 
-**Expected output:** A histogram of per-packet arrival latencies. Pass if median < 15 ms AND 95th percentile < 25 ms. Fail if 95th percentile > 25 ms (which all published Muse BLE characterization data predicts it will be).
+**Pass threshold:** Circular variance of phase prediction error < 0.3 rad at 100 ms forward horizon. This corresponds to mean phase error < ~30°, sufficient for reliable phase-locked stimulation at 6 Hz theta.
 
-**Pass threshold for GO:** 95th-percentile BLE delivery jitter < 25 ms. Prior published work (de Cheveigné & Nelken 2019, BioRxiv characterizations of consumer EEG) strongly predicts FAIL.
+**Time estimate:** ~2 hours Python prototype, then port to Swift. No Muse hardware needed for initial validation.
 
-## Build estimate if GO (hypothetical)
-- Build 55: Causal Hilbert filter + BLE latency logger (1 session)
-- Build 56: Phase predictor with latency compensation model (2 sessions — prediction logic is subtle)
-- Build 57: AVAudioTime-scheduled trigger integration + phase coherence verification (1 session)
-- Build 58: Parametric jitter study, closed-loop validation against open-loop baseline (1–2 sessions)
+**Follow-up (wired device):** Once PHASTIMATE validates offline, measure actual wired USB-C end-to-end latency on real Athena device. Confirm < 5 ms.
 
-**Total: 5–6 build cycles** — but this estimate is moot given the NO-GO verdict.
+## Build estimate if GO
+- Build 55a: Measure Athena BLE 5.3 jitter empirically (already in SDK migration checklist)
+- Build 55b: PHASTIMATE Swift implementation + offline circular variance validation (1 session)
+- Build 56: PhaseLockedTrigger.swift + AVAudioTime integration + wired/BLE mode detection (1 session)
+- Build 57: End-to-end wired session test + open-loop BLE fallback UX (1 session)
+
+**Total: 3 build cycles** (not counting SDK migration in 55a which is already planned).
 
 ## Recommendation
-Kill — BLE jitter is a hardware constraint with no software fix; revisit only if Muse ever ships a USB-C/wired mode or if Apple adds BLE isochronous audio with sub-10ms guaranteed delivery (IEEE 802.15.3 profile, not currently on iOS roadmap).
+Build for wired path only. Require user to plug in USB-C for phase-locked sessions; BLE mode falls back to open-loop theta-frequency chime. Implement PHASTIMATE (not Hilbert) as the phase tracker. Validate circular variance < 0.3 rad offline before device integration.

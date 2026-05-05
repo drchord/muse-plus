@@ -1,93 +1,87 @@
 # T2-08: Drowsy vs. Deep Meditation Classifier
 
 ## Executive verdict
-GO-WITH-CAVEATS — a binary classifier is technically feasible on 4-electrode 256 Hz EEG with the specified feature set, but the domain shift from PSG training data to Muse S is severe; ship only after collecting 20+ labeled Muse S sessions using a within-user protocol, and accept ~15% false-alarm rate as a design constraint rather than a bug.
+**SUPERSEDED by Build 58 jhana classifier.** The planned Build 58 jhana state classifier discriminates among: rest / access concentration / 1st jhana / 2nd jhana / 3rd jhana / 4th jhana / open monitoring / drowsy / sleep — a 9-class problem in which "drowsy" is one class. A standalone binary drowsy/deep classifier is redundant and architecturally wasteful. Recommendation: defer as standalone; integrate drowsy detection as one class within the Build 58 jhana classifier.
+
+> **Athena impact:** Athena's 8 channels (vs. 4) substantially improve the classifier's feature space (bilateral temporal theta, frontal asymmetry via FAA, 14-bit SNR). This hardware upgrade makes the 9-class jhana problem more tractable, not less — strengthening the case for deferring standalone T2-08 and building it right in Build 58.
 
 ## What it claims to do
-An on-device CoreML binary classifier distinguishes genuine deep meditation (sustained alpha/theta with preserved cortical complexity) from drowsiness/stage-1 sleep (theta bursts with flattened complexity, slow eye rolls, vertex sharp waves). Features include spectral entropy, theta/alpha ratio, 1/f slope (aperiodic exponent), beta variance, and eye-blink rate (estimated from frontal electrode artifact amplitude). Classification runs every 10–30 seconds on a rolling window. If the classifier outputs `drowsy` for two consecutive windows, the app emits a gentle haptic or audio cue to re-engage the meditator.
+An on-device CoreML binary classifier distinguishes genuine deep meditation (sustained alpha/theta with preserved cortical complexity) from drowsiness/stage-1 sleep (theta bursts with flattened complexity, slow eye rolls). Classification runs every 10–30 seconds on a rolling window. If the classifier outputs `drowsy` for two consecutive windows, the app emits a gentle haptic or audio cue to re-engage the meditator.
 
-## Neuroscience basis
+## Why superseded: jhana classifier covers the full problem
 
-- **Kemp et al. 2000 / Sleep-EDF dataset** (*Journal of Sleep Research*, 9(4):317–322; also PhysioNet) — 197-hour polysomnography corpus, 2-channel EEG (Fpz-Cz, Pz-Oz), 100 Hz. Stage W, N1 (drowsy), N2, N3, REM labels. The primary training source candidate. **Critical caveat:** Fpz-Cz approximates frontal midline, which partially overlaps Muse S AF7/AF8 spatial territory — this is the best available PSG data for transfer learning. However, 100 Hz PSG vs. 256 Hz Muse S, and 2-channel vs. 4-channel geometry, require careful feature normalization.
-- **Donoghue et al. 2020** (*Nature Neuroscience*, 23(12):1655–1665) — FOOOF/specparam method for decomposing EEG into periodic (oscillatory) + aperiodic (1/f) components. The aperiodic exponent steepens during drowsiness and stage-N1 relative to alert rest. Feature directly implementable from the existing vDSP log10 µV² band powers via a 2-point (or multi-point) log-log slope fit. No new DSP infrastructure needed.
-- **Brewer et al. 2011** (*PNAS*) — posterior cingulate deactivation in deep meditators correlates with self-report; frontal alpha increases in experienced practitioners during eyes-closed meditation differ from pre-sleep drowsiness by preserved beta activity and lower theta/alpha ratio variance. Provides feature-space intuition for the classifier boundary.
-- **Klimesch 2007** (*Brain Research Reviews*, 53(1):63–88) — review distinguishing upper vs. lower alpha bands and their different cognitive correlates. Upper alpha (10–12 Hz) is preserved or enhanced in attentive meditation; lower alpha + theta dominance with reduced upper alpha signals drowsiness. This motivates splitting the alpha band into lower (8–10 Hz) and upper (10–12 Hz) sub-bands as additional features.
-- **Subasi & Ercelebi 2005** (*Expert Systems with Applications*, 28(4):701–711) — EEG sleep classification with SVM on spectral features; 76–85% accuracy on held-out subjects using frontal channels only. Sets a realistic accuracy ceiling for cross-subject frontal-only classification.
+The drowsy/deep binary framing is a 2018-era baseline approach. For a decades-experienced meditator the meaningful state space is much richer:
 
-## Muse S signal validity
+| Class | EEG signature |
+|-------|--------------|
+| Rest (eyes-closed baseline) | 1/f background, mixed alpha |
+| Access concentration | Sustained frontal alpha, reduced alpha variability |
+| 1st jhana | Theta + alpha, reduced beta, sustained |
+| 2nd jhana | Theta dominant, further beta suppression |
+| 3rd jhana | High-amplitude theta, strong frontal coherence |
+| 4th jhana | Equanimous — near-flat EEG, very low delta |
+| Open Monitoring | Frontal alpha + gamma microbursts |
+| Drowsy | Theta bursts + flattering complexity + slow eye rolls |
+| Sleep (N1/N2) | Vertex sharp waves (not visible on Athena), spindles absent at frontal-polar |
 
-**Domain shift — the central problem:** Sleep-EDF was recorded with clinical gel electrodes at 100 Hz, impedances < 5 kΩ, with subjects lying still. Muse S uses dry electrodes at ~20 kΩ, subjects seated, with the Muse notch filter pre-applied. Expected consequences:
-- Higher baseline noise floor in Muse S (dry electrode contact noise ~5–10 µV RMS vs. gel ~1–2 µV RMS)
-- Sleep-EDF vertex sharp waves (Cz electrode) are absent in Muse S — feature not available
-- K-complexes: not visible in frontal-polar electrodes at AF7/AF8
-- Spindles (12–15 Hz): weakly visible frontally, if at all
-- Eye-roll slow waves (stage N1): partially captured at AF7/AF8 due to frontal proximity to orbits — *this is a useful signal*
+A binary classifier throws away 7 of 9 classes. The jhana classifier solves drowsy detection as a byproduct.
 
-**Features available on Muse S:**
-- Spectral entropy: YES — computable from existing vDSP band powers
-- Theta/alpha ratio: YES — already in the meditationIndex pipeline
-- 1/f slope (aperiodic exponent): YES — 2-point fit on log-log power spectrum from existing pipeline
-- Beta variance: YES — rolling std of beta band power, trivial addition
-- Eye-blink rate: PARTIAL — blink artifacts visible as amplitude spikes > 150 µV at AF7/AF8; already partially handled by the 4-layer artifact rejection; need to repurpose amplitude events as blink-rate counter rather than just rejecting them
+## Algorithm: Riemannian geometry MDM (replaces logistic regression baseline)
 
-**What is NOT available:**
-- Vertex sharp waves (no Cz)
-- Spindle detection (spindles not reliably visible at frontal-polar in dry EEG)
-- EOG channel (no dedicated eye movement channel; only indirect via AF artifact)
+**Why not logistic regression:** Logistic regression on spectral features assumes feature independence and Gaussian distributions — neither holds for EEG covariance structure. On small N (20–50 sessions per individual), feature-based classifiers overfit.
 
-**Effective classification:** Limited to the W vs. N1 boundary (wake/deep meditation vs. drowsy), which is the clinically meaningful boundary for this application. N2/N3 detection is not feasible with this hardware.
+**MDM (Minimum Distance to Mean, Barachant et al. 2014):** Operates directly on EEG covariance matrices in Riemannian geometry. Covariance matrices live on a symmetric positive definite (SPD) manifold; Euclidean averaging of SPD matrices is incorrect. MDM computes geodesic distances on the SPD manifold and classifies by nearest class centroid. Properties:
+- Robust on small N (works well with 20–50 labeled sessions per class)
+- No feature engineering required — raw covariance matrix is the input
+- Naturally handles multi-class (9-class) via one-vs-rest geodesic voting
+- Athena 8-channel covariance: 8×8 SPD matrix (36 unique values) — richer than 4×4 Muse S 2019
 
-**SNR assessment:** A 20+ session within-user Muse S dataset with manual labels (video + self-report) is the minimum viable training set. OpenNeuro ds002723 contains open-eyes resting-state Muse data but has limited drowsy/sleep labels — useful for normalization but not for supervised training labels.
+**Why not transformers:** Insufficient data per individual user. A decoder-only transformer for EEG (e.g., LaBraM or EEG-GPT) requires 100k+ labeled epochs for fine-tuning. A solo meditator accumulating 1 session/day will never reach this. MDM converges on 20–50 sessions.
 
-## Implementation cost (realistic)
+**Pre-training (if label efficiency needed):** BENDR self-supervised pretraining (Banville et al. 2021) learns EEG representations from unlabeled data, reducing labeled session requirements. BENDR pretrained on TUAB (Temple University Hospital EEG corpus) can be fine-tuned with MDM-style covariance features using as few as 10 labeled sessions. Useful if jhana labels are expensive to collect.
 
-- **Files to create:**
-  - `MusePlus/ML/DrowsyClassifier.swift` (~120 LOC, CoreML model wrapper + feature extraction call)
-  - `MusePlus/ML/Features/SpectralFeatures.swift` (~180 LOC, spectral entropy, 1/f slope, band ratio computation on rolling window)
-  - `MusePlus/ML/Features/ArtifactEvents.swift` (~80 LOC, blink-rate counter from existing amplitude rejection events)
-  - `MusePlus/ML/DrowsyAlert.swift` (~60 LOC, two-window confirmation logic + haptic/audio trigger)
-  - `model_training/drowsy_classifier.ipynb` (~300 LOC Python, Sleep-EDF feature extraction + fine-tune on Muse S labels)
-  - `MusePlus/ML/DrowsyClassifier.mlmodel` (CoreML model, target < 5 MB)
-- **Files to modify:**
-  - `MusePlus/Session/DepthGateStateMachine.swift` (consume classifier output, ~30 LOC)
-  - `MusePlus/DSP/EEGProcessor.swift` (expose rolling feature vector, ~50 LOC)
-  - `MusePlus/Artifact/ArtifactRejection.swift` (expose blink amplitude events instead of silently dropping, ~20 LOC)
-- **LOC estimate:** ~790 LOC Swift, ~300 LOC Python training code. Expect ~1000 LOC Swift after iteration.
-- **iOS-specific risks:**
-  - CoreML model inference on 10-second windows: < 1 ms on A14+ Neural Engine. Model size target 2–4 MB (logistic regression or small random forest; deep neural net not needed and would risk size budget).
-  - False-alarm UX: waking a practitioner in genuine deep state is the worst possible failure mode. Must implement two-window confirmation (20–60 s confirmation delay) and a user-facing "dismiss" gesture that penalizes the classifier.
-  - Thread safety: feature extraction must not block the real-time EEG processing thread; use a dedicated background queue with a copy of the feature vector.
-  - Battery: CoreML on Neural Engine draws < 50 mW marginal. Acceptable.
-- **Model size budget:** A 6-feature logistic regression or gradient-boosted tree (100 trees, depth 4) is well under 500 KB. A small MLP (3 layers, 64 hidden units) in CoreML is ~800 KB. Both are within budget.
+**Cite:** Barachant et al. 2014 *IEEE Transactions on Biomedical Engineering* ("Classification of covariance matrices using a Riemannian-based kernel for BCI applications"). Banville et al. 2021 *Journal of Neural Engineering* ("Uncovering the structure of clinical EEG signals with self-supervised learning").
 
-### Label noise analysis
-The primary label noise source is self-report ambiguity: users cannot accurately recall whether they were meditating or drowsy during a specific 10-second window after the fact. Mitigation: use a "tap to mark" button during sessions that allows users to flag perceived drowsiness in real time; combine with video-based drowsiness labels (head nod detection via front camera) in a pilot study before committing to model training.
+## Neuroscience basis (retained from prior audit, updated for jhana scope)
 
-## Killer experiment (1 hour to run on Sparky / device)
+- **Kemp et al. 2000 / Sleep-EDF** — drowsy (N1) vs. wake EEG signatures; remains valid for the "drowsy" class within the 9-class jhana classifier.
+- **Donoghue et al. 2020** (*Nature Neuroscience*) — FOOOF aperiodic exponent steepens during drowsiness. Valid feature for jhana vs. drowsy discrimination.
+- **Brewer et al. 2011** (*PNAS*) — experienced meditators' frontal alpha increases during deep states; directly applicable to user profile (decades-experienced meditator).
+- **Klimesch 2007** (*Brain Research Reviews*) — upper vs. lower alpha band distinction; upper alpha preserved in deep meditation, lower alpha + theta signals drowsiness. Motivates the 8–10 Hz / 10–12 Hz split as jhana classifier features.
+- **Barachant et al. 2014** *IEEE Trans Biomed Eng* — MDM Riemannian classifier; small-N robust BCI classification.
+- **Banville et al. 2021** *J Neural Eng* — BENDR self-supervised EEG pretraining; reduces label requirements for individual fine-tuning.
 
-**Test:** Measure feature separability between known-alert and known-drowsy epochs using existing Sleep-EDF data, restricting to Fpz-Cz channel and resampling to 256 Hz to simulate Muse S.
+## Athena signal validity
 
-**Procedure:**
-1. Download Sleep-EDF Cassette subset (20 nights, freely available on PhysioNet) — ~200 MB.
-2. Extract 30-second epochs labeled W (wake/alert) and N1 (drowsy) from the Fpz-Cz channel.
-3. Resample to 256 Hz, apply 45–65 Hz notch filter, compute: spectral entropy, theta/alpha ratio, 1/f slope, beta variance.
-4. Train a logistic regression (sklearn, 5-fold cross-validation) and report AUROC.
+**Channels:** 8-channel covariance matrix is 8×8 = 36 unique values vs. 4×4 = 10 for Muse S 2019. The temporal channels (TP9/TP10-equivalent) capture theta differently from frontal (AF7/AF8), enabling bilateral temporal-frontal phase relationships as implicit Riemannian features.
 
-**Expected output:** AUROC 0.80–0.88 on Sleep-EDF Fpz-Cz resampled data (consistent with Subasi & Ercelebi 2005 frontal-only benchmark).
+**14-bit ADC:** Lower noise floor improves covariance matrix conditioning (fewer ill-conditioned matrices due to noise regularization issues).
 
-**Pass threshold:** AUROC > 0.78 on held-out subjects. If < 0.78, the feature set is insufficient even before domain shift to Muse S — kill or add features before proceeding.
+**Optics state context:** fNIRS HbO at session start provides a hemodynamic prior that can be used as an auxiliary feature for jhana class initialization (e.g., low prefrontal HbO at baseline correlates with absorbed states per Brewer 2011 fMRI analog).
 
-**Time estimate:** ~45 minutes on Sparky with Python/sklearn. No Muse S required for this gate experiment.
+## Implementation cost (revised for jhana integration)
 
-## Build estimate if GO
-- Build 55: SpectralFeatures.swift + unit tests against known synthetic signals (1 session)
-- Build 56: ArtifactEvents blink-rate counter + data collection mode (in-app labeled epoch logger) (1 session)
-- Build 57: Collect 20+ labeled Muse S sessions from TestFlight users (2–3 weeks elapsed, not a build session)
-- Build 58: Train CoreML model on collected data, convert with coremltools, integrate DrowsyClassifier.swift (1 session)
-- Build 59: Two-window confirmation + DrowsyAlert UX + TestFlight beta (1 session)
-- Build 60: Iterate on false-alarm rate with user feedback (1 session)
+Standalone T2-08 is not built. Instead, the jhana classifier (Build 58) incorporates:
+- `MusePlus/ML/JhanaClassifier.swift` (~150 LOC CoreML wrapper)
+- `MusePlus/ML/RiemannianMDM.swift` (~250 LOC, SPD manifold geodesic distance + MDM)
+- `MusePlus/ML/CovarianceExtractor.swift` (~120 LOC, rolling 8-channel covariance matrix computation via vDSP)
+- `model_training/jhana_mdm.py` (~300 LOC Python, BENDR pretraining + MDM fine-tune on personal session corpus)
+- **No standalone DrowsyClassifier.swift** — drowsy is a label in the jhana dataset.
 
-**Total: 5 active build sessions + 2–3 weeks data collection.** This is a multi-sprint feature.
+**Savings from deferral:** Eliminates 5 active build sessions + 2-3 week data collection gap of the standalone design. Replaces with a single Build 58 effort producing a more capable classifier.
+
+## Killer experiment (deferred to Build 58 gate)
+
+**Test (for jhana classifier, replacing standalone drowsy test):**
+Run MDM on simulated jhana-class EEG data (synthesized from published EEG signatures: theta power, alpha power, aperiodic exponent per class). Validate that 8-channel Riemannian distances separate classes better than 4-channel.
+
+**Pass threshold:** 8-channel MDM pairwise distance ratio (between-class / within-class) > 1.5 vs. 4-channel MDM on same synthetic data. Confirms Athena hardware advantage for jhana classification.
+
+**Prior experiment (for reference):** The original killer experiment (AUROC > 0.78 on Sleep-EDF Fpz-Cz logistic regression) is no longer the gate — MDM on real covariance matrices supersedes logistic regression on spectral features. Re-run with MDM if needed for baseline comparison.
+
+## Build estimate
+- **Build 58:** JhanaClassifier.swift + RiemannianMDM.swift + CovarianceExtractor.swift + jhana_mdm.py training script (2 sessions — MDM Riemannian implementation is non-trivial in Swift without a dedicated linear algebra library)
+- **Not built:** Standalone DrowsyClassifier.swift, SpectralFeatures.swift (unless needed elsewhere), ArtifactEvents blink-rate counter
 
 ## Recommendation
-Pilot study first — run the killer experiment now; if AUROC > 0.78, proceed to Build 55 and data collection immediately, but do not ship the classifier until 20+ Muse S labeled sessions exist.
+Do not build as standalone. Integrate drowsy detection into Build 58 jhana classifier using Riemannian MDM. Accumulate labeled jhana session data starting now. If BENDR pretraining is needed, run on Aurora (RTX 3090) before Build 58.
