@@ -83,6 +83,45 @@
 
 ---
 
+## 2026-05-05 | Sparky (laptop) | ~1.5h | Roadmap + Build 55 plan + Tier 2 audits
+
+**Focus:** Strategic planning. Pivot from "biofeedback meter" to "trainer that produces at-will state access". Build numbering reconciliation. Tier 2 feasibility audits.
+
+**Decided:**
+- Apple TestFlight build number = `github.run_number`, increments on every CI run including docs-only commits. Build 54 = current, binary identical to build 53 (= "Build 51 features" per BUILD_PLAN_51.md). Aligning labels going forward — build N = TestFlight number.
+- 3-pillar trainer thesis: Entry (56-59) → Sustain (60-63) → At Will (64-68) → R&D stretch (69-70). Codified in ROADMAP.md.
+- 5 non-negotiable architectural rules: no grasping; haptic-first feedback during practice; feature fade is a feature; personal baseline > absolute thresholds; interoception bridges to transfer.
+- Build 55 = foundations: 1/f aperiodic slope (Donoghue 2020) + iTPF (Klimesch 1999, Mierau 2017) + complete SessionRecorder fields per STATUS pending list + BaselineView (Berger ratio capture). ~650 LOC, 1 session.
+- T2-#7 Hilbert phase-lock **killed** by audit. BLE jitter ±20-50 ms structurally exceeds 25 ms latency budget at 6 Hz theta. Hardware kill-shot — no software fix; only wired/USB-C EEG would unblock.
+
+**Verified facts (grep):** Build 54 has zero training/curriculum/lesson/onboard/haptic/metacognition primitives. SessionRecorder missing HR, FAA, soundscape events, baseline (per STATUS pending). Single Views/ file (BandChart only). App.swift = 959 LOC monolith. Confirmed all 9 advanced biomarkers + closed loops are 0/9 implemented.
+
+**Artifacts shipped:**
+- `ROADMAP.md` (10KB) — 16-build pillar roadmap with citations + dependencies + non-negotiables + open questions.
+- `BUILD_PLAN_55.md` (8KB) — phases, compile risks, file list, 8 acceptance gates AS-1..AS-8, JSON back-compat strategy, synthetic-signal validation tests.
+- `docs/audits/T2_06...T2_09.md` (~31KB total) — feasibility memos with neuroscience cites + Muse S signal validity analysis + LOC estimates + killer experiments + recommendations.
+- `docs/audits/AUDIT_INDEX.md` — verdict summary table + cross-cutting findings.
+
+**Tier 2 verdicts:**
+| # | Feature | Verdict | Killer experiment |
+|---|---------|---------|------------------|
+| 6 | RL bandit adaptive audio | GO-WITH-CAVEATS | Simulate 100 sessions, Thompson + pop prior; pass < 30 sessions to converge |
+| 7 | Phase-lock entrainment | **NO-GO** | (moot — BLE jitter is the kill-shot, not running) |
+| 8 | Drowsy/deep classifier | GO-WITH-CAVEATS | Sleep-EDF Fpz-Cz @ 256 Hz logistic regression, AUROC > 0.78 |
+| 9 | Vagal coherence HRV+EEG | GO-WITH-CAVEATS | 64 Hz PPG vs ECG LF-HRV on PhysioNet, r > 0.80 |
+
+**Routing this session:** Sonnet agent (general-purpose, background) wrote all 4 audit memos in parallel — 264s wall-clock, 32K tokens. Opus inline did roadmap + plan-55 (high parent-context dependency, novel design synthesis). ctx_execute for grep/LOC ground truth.
+
+**Left off at:** Builds 50-54 live in TestFlight, ROADMAP + plan-55 + audits all pushed to main, Build 55 implementation not yet started.
+
+**Next session needs:**
+1. Implement Build 55 per BUILD_PLAN_55.md (1/f slope + iTPF + SessionRecorder fields + BaselineView)
+2. Or: run killer experiment for T2-#9 vagal coherence (PhysioNet PPG vs ECG comparison) — pre-build 62 gate
+3. Or: pilot study setup for T2-#8 drowsy classifier (need 2-3 weeks labeled Muse data)
+4. Recommended order: Build 55 first (unblocks 56-67), then T2-#9 killer experiment in parallel with Build 56-59 dev work
+
+---
+
 ## Earlier sessions (pre-journal, reconstructed from git log)
 
 | Date (approx) | Builds | Focus |
