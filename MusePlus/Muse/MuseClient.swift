@@ -101,8 +101,8 @@ final class MuseClient: NSObject {
     // after the first .connected state transition. Setting a preset triggers a
     // disconnect/reconnect cycle on the headband per SDK contract.
     private func applyPresetForModel(_ muse: IXNMuse) {
-        let cfg = muse.getMuseConfiguration()
-        let model = cfg.getMuseModel()
+        // IXNMuse exposes getModel() directly; no need to go through configuration.
+        let model = muse.getModel()
         guard presetAppliedFor != model else { return }
         if model == .ms03 {
             // Athena: 8 EEG @ 256Hz/14-bit + 16 Optics @ 64Hz, low power. Provides
