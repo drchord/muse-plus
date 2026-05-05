@@ -82,12 +82,12 @@ The hard part. Decouple skill from device. Goal: user can self-rate state with r
 
 ### R&D / Stretch (builds 69–70)
 
-Tier 2 #7 and #8 are higher risk; Tier 1 #1 #2 #4 limited by Muse S coverage.
+Tier 1 #1 #2 #4 limited by Muse S coverage. Tier 2 #7 **killed** by audit (2026-05-05) — BLE jitter ±20-50 ms structurally exceeds 25 ms latency budget at 6 Hz theta (Helfrich 2018, Thut 2011). No software fix path; only wired/USB-C EEG would unblock.
 
 | Build | Features | Status |
 |---|---|---|
-| **69** | Tier 2 #7 Hilbert phase-locked entrainment (only if iOS audio latency audit passes) + Tier 2 #8 drowsy classifier (CoreML) | Audits gate. #7 likely no-go due to BLE jitter; #8 likely go-with-caveats (training data). |
-| **70** | Tier 1 #1 EEG microstates (2-state proxy on 4-electrode Muse S) + Tier 1 #2 theta-gamma PAC (frontal only, 30-45 Hz upper bound) + Tier 1 #4 HEP averaging (interoception-trained users only, frontal-only signal — research-grade only, not clinical) | All limited by frontal-only 4-electrode coverage; ship as research-mode feature behind developer toggle. |
+| **69** | Tier 2 #8 drowsy classifier (CoreML, on-device binary) | Audit verdict: GO-WITH-CAVEATS. Killer experiment first: Sleep-EDF Fpz-Cz @ 256 Hz resample → logistic regression → AUROC > 0.78 on held-out subjects. Then 2-3 week labeled Muse S data collection. Original slot also held #7 phase-lock — that is now killed. |
+| **70** | Tier 1 #1 EEG microstates (2-state proxy on 4-electrode Muse S) + Tier 1 #2 theta-gamma PAC (frontal only, 30-45 Hz upper bound) + Tier 1 #4 HEP averaging (frontal-only, research-mode toggle) | All limited by frontal-only 4-electrode coverage; ship as research-mode feature behind developer toggle. |
 
 ---
 
@@ -116,16 +116,16 @@ Build 55 unblocks everything. Builds 60 + 61 + 62 + 63 can be parallelized after
 
 ## TIER 2 AUDIT GATING
 
-Before scheduling any Tier 2 build, the corresponding audit memo in `docs/audits/` must show GO or GO-WITH-CAVEATS.
+Audit verdicts (2026-05-05) — see `docs/audits/AUDIT_INDEX.md`.
 
-| Build | Audit | Status |
-|---|---|---|
-| 61 | T2-#6 RL bandit | drafted 2026-05-05 (parallel to this roadmap) |
-| 62 | T2-#9 vagal coherence | drafted 2026-05-05 |
-| 69 part 1 | T2-#7 Hilbert phase-lock | drafted 2026-05-05 |
-| 69 part 2 | T2-#8 drowsy classifier | drafted 2026-05-05 |
+| Build | Audit | Verdict | Killer experiment status |
+|---|---|---|---|
+| 61 | T2-#6 RL bandit (adaptive audio) | GO-WITH-CAVEATS | Pending: simulate 100 sessions, Thompson + population prior; pass = convergence < 30 sessions |
+| 62 | T2-#9 vagal coherence (HRV+EEG) | GO-WITH-CAVEATS | Pending: 64 Hz PPG vs ECG LF-HRV on PhysioNet; pass = r > 0.80 |
+| 69 | T2-#7 Hilbert phase-lock | **NO-GO — killed** | BLE jitter ±20-50 ms exceeds 25 ms budget for 6 Hz theta (Helfrich 2018, Thut 2011). Hardware kill-shot. |
+| 69 | T2-#8 drowsy classifier (CoreML) | GO-WITH-CAVEATS | Pending: Sleep-EDF Fpz-Cz @ 256 Hz logistic regression; pass = AUROC > 0.78 on held-out subjects. Then 2-3 weeks Muse S labeled data collection. |
 
-If audit verdict = NO-GO, drop that feature; rebalance roadmap (e.g. if #7 is no-go, build 69 ships only #8 + advance build 70 by one).
+Build slot 69 originally held #7 + #8; now ships only #8. Build 70 advanced by one slot (Tier 1 #1/#2/#4 still gated by Muse S coverage limits, not audits).
 
 ---
 
