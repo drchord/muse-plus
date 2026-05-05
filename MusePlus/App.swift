@@ -372,9 +372,11 @@ final class Probe: ObservableObject {
     }
 
     private func reconnect() {
-        // Reconnect without resetting calibration or gate — preserve session continuity
         if let m = IXNMuseManagerIos.sharedManager().getMuses().first {
-            client.connect(to: m)
+            // preservePreset: headband already has the correct preset from user-initiated connect.
+            // Re-applying it causes an extra disconnect/reconnect loop that delays EEG flow
+            // and runs the calibration timer past 60s before any band powers arrive.
+            client.connect(to: m, preservePreset: true)
         }
     }
 

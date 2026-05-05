@@ -33,9 +33,11 @@ final class MuseClient: NSObject {
     private var presetAppliedFor: IXNMuseModel?
     // Remembered after applyPresetForModel; drives 8-channel EEG read in handleEEG.
     private var connectedMuseModel: IXNMuseModel?
-    // True once we confirm notchFilteredEeg is emitting; falls back to raw .eeg if never set.
-    // Accessed only on the SDK callback thread (serial), so no lock needed.
-    private var hasNotchEeg = false
+    // Timestamp of last received .notchFilteredEeg packet (SDK callback thread only — no lock needed).
+    // Used to gate the .eeg fallback: if .notchFilteredEeg has not arrived in 2s, .eeg is active.
+    // Boolean hasNotchEeg was insufficient: Athena at preset1041 emits ONE notch packet on connect
+    // then stops, locking hasNotchEeg = true and permanently blocking the .eeg fallback.
+    private var lastNotchEegTs: TimeInterval = 0
     // Rate-limit quality-based suppression: isGood fires at 10 Hz; without gating, poor frontal
     // contact during settle-in floods suppressWindows and permanently blocks the EEG pipeline.
     // 5s minimum between successive quality-triggered artifact events is sufficient — artifacts
@@ -58,7 +60,10 @@ final class MuseClient: NSObject {
         manager.stopListening()
     }
 
-    func connect(to muse: IXNMuse) {
+    // preservePreset: pass true for auto-reconnect (preset already applied to hardware,
+    // re-applying causes another disconnect/reconnect loop). Pass false (default) only
+    // for user-initiated connects where model detection should start fresh.
+    func connect(to muse: IXNMuse, preservePreset: Bool = false) {
         // SDK requires setup on main thread (matches reference app pattern)
         assert(Thread.isMainThread)
         manager.stopListening()
@@ -66,32 +71,19 @@ final class MuseClient: NSObject {
         connectedMuse = muse
         muse.unregisterAllListeners()
         muse.register(self as IXNMuseConnectionListener?)
-        // NotchFilteredEeg: SDK applies 45–65 Hz bandstop — removes 60 Hz power line noise
-        // before our vDSP FFT sees the data (critical for gamma band accuracy).
         muse.register(self as IXNMuseDataListener?, type: .notchFilteredEeg)
         muse.register(self as IXNMuseDataListener?, type: .hsiPrecision)
         muse.register(self as IXNMuseDataListener?, type: .battery)
         muse.register(self as IXNMuseDataListener?, type: .artifacts)
-        // IsGood: 10 Hz quality flag per channel — more reliable than amplitude threshold.
         muse.register(self as IXNMuseDataListener?, type: .isGood)
-        // Raw EEG fallback: if .notchFilteredEeg does not emit on Athena at preset 1041,
-        // .eeg (unfiltered) delivers the same signal without the 45-65 Hz notch.
-        // handleEEG prefers notchFilteredEeg when available (hasNotchEeg flag).
         muse.register(self as IXNMuseDataListener?, type: .eeg)
-        // PPG: Green light (AMBIENT channel) on Muse S 2019/2021/2 for heart rate.
-        // On Athena (MS-03) the .ppg packet does not emit — Optics replaces it.
         muse.register(self as IXNMuseDataListener?, type: .ppg)
-        // Optics: 16-channel fNIRS @ 64 Hz on Athena. Also carries the heart-rate
-        // signal (850 nm inner channels OPTICS7/OPTICS8 = IR, follows blood-volume pulse).
-        // On legacy Muse S/2 hardware Optics hardware is absent; the packet never fires.
         muse.register(self as IXNMuseDataListener?, type: .optics)
-        // Accelerometer: head motion > 0.25g triggers artifact suppression.
         muse.register(self as IXNMuseDataListener?, type: .accelerometer)
-        // Preset is applied AFTER connection completes — see receive(_:muse:) in
-        // IXNMuseConnectionListener extension. Per SDK docs, setting an invalid preset
-        // (e.g. preset21 on Athena) leaves the headband disconnected. We must detect
-        // model first via getMuseConfiguration().getMuseModel().
-        presetAppliedFor = nil
+        if !preservePreset {
+            presetAppliedFor   = nil
+            connectedMuseModel = nil
+        }
         muse.runAsynchronously()
     }
 
@@ -113,9 +105,11 @@ final class MuseClient: NSObject {
         }
         ppgBuffer.removeAll()
         lastBpmTs = 0
-        presetAppliedFor = nil
-        connectedMuseModel = nil
-        hasNotchEeg = false
+        // presetAppliedFor and connectedMuseModel intentionally NOT reset here.
+        // connect(to:preservePreset:) controls them: user-initiated connect resets both;
+        // auto-reconnect preserves them to avoid re-applying preset and the resulting
+        // disconnect/reconnect loop that delays EEG flow past the calibration window.
+        lastNotchEegTs = 0       // reset: .eeg fallback active until .notchFilteredEeg confirms
         lastQualitySuppression = 0
     }
 
@@ -174,10 +168,12 @@ extension MuseClient: IXNMuseDataListener {
         guard let p = packet else { return }
         switch p.packetType() {
         case .notchFilteredEeg:
-            hasNotchEeg = true
-            handleEEG(p)                               // preferred: SDK notch-filtered
+            lastNotchEegTs = Date().timeIntervalSinceReferenceDate
+            handleEEG(p)
         case .eeg:
-            if !hasNotchEeg { handleEEG(p) }           // fallback: raw EEG if notch not emitting
+            // Active when .notchFilteredEeg has not arrived in 2s. Handles Athena (preset1041)
+            // which may send one notch packet on connect then emit EEG only via .eeg.
+            if Date().timeIntervalSinceReferenceDate - lastNotchEegTs > 2.0 { handleEEG(p) }
         case .hsiPrecision:     handleHorseshoe(p)
         case .battery:          handleBattery(p)
         case .isGood:           handleIsGood(p)
@@ -210,10 +206,13 @@ extension MuseClient: IXNMuseDataListener {
                 Float(p.getEegChannelValue(.AUX4)),
             ]
         }
-        // Amplitude artifact rejection on canonical 4 channels only (AUX contact quality unknown).
-        // 500 µV threshold: covers Athena settle-in transients while still catching muscle artifacts.
-        let maxAmp = channels.prefix(4).map(abs).max() ?? 0
-        if maxAmp > 500 {
+        // Amplitude artifact rejection: FRONTAL CHANNELS ONLY (AF7=channels[1], AF8=channels[2]).
+        // TP9/TP10 (channels[0],[3]) mediocre contact produces high-amplitude temporal noise that
+        // is NOT used for depth scoring. Checking all 4 channels causes every EEG packet to fail
+        // the amplitude gate when TP9/TP10 have poor fit → suppressWindows never reaches 0 →
+        // onBandPowers never fires → calibrationProgress stays 0 forever.
+        let frontalMaxAmp = max(abs(channels[1]), abs(channels[2]))
+        if frontalMaxAmp > 500 {
             DispatchQueue.main.async { self.artifactDetected.send(true) }
             return  // drop this packet entirely
         }
