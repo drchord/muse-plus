@@ -255,10 +255,11 @@ extension MuseClient: IXNMuseDataListener {
 
     // Head motion > 0.25g deviation from resting 1g magnitude triggers artifact suppression.
     private func handleAccelerometer(_ p: IXNMuseDataPacket) {
-        let x = p.getAccelerometerValue(.x)
-        let y = p.getAccelerometerValue(.y)
-        let z = p.getAccelerometerValue(.z)
-        let magnitude = sqrt(x*x + y*y + z*z)
+        let x: Double = p.getAccelerometerValue(.X)
+        let y: Double = p.getAccelerometerValue(.Y)
+        let z: Double = p.getAccelerometerValue(.Z)
+        let sumSq: Double = x*x + y*y + z*z
+        let magnitude: Double = sqrt(sumSq)
         guard abs(magnitude - 1.0) > 0.25 else { return }
         DispatchQueue.main.async { self.artifactDetected.send(true) }
     }
