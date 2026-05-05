@@ -69,15 +69,21 @@ final class SoundscapePlayer: ObservableObject {
     }
 
     /// Called at session end when session had ≥1 deep episode and ≥5 min recorded.
-    func decrementBinauralFade() {
+    /// Step size is performance-adaptive:
+    ///   5% if induction was fast (first deep < 5 min) — brain is building the capability quickly
+    ///   3% if induction was slow (≥5 min) — brain still benefits from the scaffold
+    /// Rationale: prompt-fading literature shows fade rate should track performance, not time.
+    /// If the user is struggling (slow entry), fade slower. If they're excelling, fade faster.
+    func decrementBinauralFade(latencyToFirstDeep: Double?) {
         let count = successfulSessionCount + 1
         UserDefaults.standard.set(count, forKey: "successfulSessionCount")
         guard count >= 3 else { return }
-        let next = max(0.05, binauralFadeLevel - 0.05)
+        // Fast induction < 300s (5 min) = 5% step; slow = 3% step
+        let step: Float = (latencyToFirstDeep ?? 9999) < 300 ? 0.05 : 0.03
+        let next = max(0.05, binauralFadeLevel - step)
         guard next != binauralFadeLevel else { return }
         binauralFadeLevel = next
         UserDefaults.standard.set(next, forKey: "binauralFadeLevel")
-        // Rebuild binaural buffer next time it's toggled on
         if activeLayers.contains(.binaural) {
             buffers.removeValue(forKey: .binaural)
             nodes[.binaural]?.stop()

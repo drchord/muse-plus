@@ -104,7 +104,10 @@ final class Probe: ObservableObject {
                     self?.fitFirstReceived = false
                     let recUrl = SessionRecorder.shared.endSession()
                     self?.pipeline.endSession()
-                    // Decode saved session for summary + fade + adaptive threshold.
+                    // Decode saved session on main thread. Typical session JSON ≤ 400 KB
+                    // (2 Hz × 3600 s × ~50 B/sample) → decode < 20 ms. Acceptable at session end.
+                    // Backgrounding would race with scheduleReconnect (fires 3 s later) which
+                    // clears sessionSummary — synchronous decode is simpler and safe here.
                     if let url = recUrl,
                        let data = try? Data(contentsOf: url) {
                         let dec = JSONDecoder()
@@ -113,7 +116,8 @@ final class Probe: ObservableObject {
                             self?.sessionSummary = rec
                             // Successful = had deep state AND ≥5 min recorded.
                             if !rec.episodes.isEmpty && rec.durationMinutes >= 5.0 {
-                                SoundscapePlayer.shared.decrementBinauralFade()
+                                SoundscapePlayer.shared.decrementBinauralFade(
+                                    latencyToFirstDeep: rec.episodes.first?.enterTime)
                             }
                             self?.computeAdaptiveThreshold()
                         }
@@ -281,9 +285,9 @@ final class Probe: ObservableObject {
             gate.reset()
             // Restore previously computed adaptive threshold (computed after prior sessions).
             let saved = UserDefaults.standard.float(forKey: "adaptiveDeepThreshold")
-            if saved >= 0.55 {
+            if saved >= 0.40 {
                 gate.enterThreshold = saved
-                gate.exitThreshold  = max(0.40, saved - 0.15)
+                gate.exitThreshold  = max(0.28, saved - 0.12)
             }
         }
     }
@@ -315,10 +319,14 @@ final class Probe: ObservableObject {
             let sorted = sessionMeans.sorted()
             let p75idx = Int(Double(sorted.count) * 0.75)
             let p75    = sorted[min(p75idx, sorted.count - 1)]
-            let clamped = max(0.55, min(0.85, p75))
+            // Lower bound 0.40 (not 0.55): allows beginners to get feedback at their actual
+            // performance level rather than being held to a population threshold they can't reach.
+            // Upper bound 0.85: prevents trivially easy threshold even for advanced meditators.
+            // Threshold adapts BIDIRECTIONALLY — easier for beginners, harder for advanced.
+            let clamped = max(0.40, min(0.85, p75))
             DispatchQueue.main.async {
                 self.gate.enterThreshold = clamped
-                self.gate.exitThreshold  = max(0.40, clamped - 0.15)
+                self.gate.exitThreshold  = max(0.28, clamped - 0.12)
                 UserDefaults.standard.set(clamped, forKey: "adaptiveDeepThreshold")
             }
         }
@@ -799,8 +807,8 @@ private struct SettingsSheet: View {
                     }
                     let thresh = UserDefaults.standard.float(forKey: "adaptiveDeepThreshold")
                     LabeledContent("Adaptive Deep Threshold",
-                                   value: thresh >= 0.55 ? String(format: "%.2f", thresh) : "Pending (need 5+ sessions with deep)")
-                    Text("Personalizes to 75th percentile of your session depth means (sessions with ≥1 deep episode only). Default 0.65 until enough data.")
+                                   value: thresh >= 0.40 ? String(format: "%.2f", thresh) : "Pending (need 5+ sessions with deep state)")
+                    Text("Personalizes to your 75th-percentile session mean depth (qualifying sessions only). Adapts in both directions — lower for beginners, higher for advanced meditators. Default 0.65.")
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("β Wander Alert", isOn: Binding(
                         get: { probe.betaCueEnabled },
@@ -1188,22 +1196,43 @@ private struct SessionSummarySheet: View {
     }
 
     private var coachingLine: String {
-        let deep   = record.deepMinutes
-        let latency = record.episodes.first?.enterTime ?? 9999
-        let longest = record.episodes.compactMap(\.duration).max() ?? 0
+        let deep         = record.deepMinutes
+        let latency      = record.episodes.first?.enterTime ?? 9999
+        let longest      = record.episodes.compactMap(\.duration).max() ?? 0
+        let episodeCount = record.episodes.count
+
         if record.episodes.isEmpty {
-            return "No deep state this session. Focus on releasing effort — the state comes when you stop seeking it."
+            return "No confirmed deep state. Try softening jaw, eyes, and shoulders — the gate opens through release, not effort."
         }
+
+        // Chi biomarker is the strongest objective signal — lead with it when available
+        if let chi = chiMean, chi < -1.5 {
+            let chiStr = String(format: "%.2f", chi)
+            return "Aperiodic slope χ = \(chiStr) — neural evidence of genuine absorption independent of the depth score. The signature is real."
+        }
+
+        // Both fast entry AND sustained depth together is rarer than either alone
+        if latency < 180 && longest > 600 {
+            return "Fast entry (\(fmtSecs(latency))) and \(fmtMins(longest / 60)) sustained. Both metrics improving simultaneously — this is the target state."
+        }
+
+        if episodeCount >= 3 {
+            return "\(episodeCount) separate deep entries. Multiple entries in one session means the state is becoming repeatable, not a single lucky occurrence."
+        }
+
         if latency < 180 {
-            return "Fast induction (\(fmtSecs(latency))). Your brain found the anchor quickly. This pathway is strengthening."
+            return "First deep entry at \(fmtSecs(latency)). Faster induction shortens the distance between sitting and absorbing — the most trainable parameter."
         }
+
         if longest > 600 {
-            return "Sustained depth for \(fmtMins(longest / 60)). Retention is building — this is the hardest skill."
+            return "\(fmtMins(longest / 60)) in continuous deep state. Retention is the hardest skill. Most meditators improve induction first — then retention. You're ahead."
         }
+
         if deep > 5 {
-            return "\(fmtMins(deep)) of deep time. Consistent. Each session deepens the pattern."
+            return "\(fmtMins(deep)) deep across \(episodeCount) episode\(episodeCount == 1 ? "" : "s"). Frequency builds the pattern. Show up consistently."
         }
-        return "Deep state reached. The neural pathway is forming. Regularity matters more than duration."
+
+        return "Deep state confirmed. Neural encoding of the state begins from the first episode. Consistency from here is what determines transfer to eyes-open practice."
     }
 
     private func fmtMins(_ m: Double) -> String {

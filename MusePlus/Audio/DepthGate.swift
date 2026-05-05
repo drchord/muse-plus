@@ -9,10 +9,16 @@ private let kExitSustained:  Int    = 20
 private let kCooldown: TimeInterval = 90   // 1.5 minutes
 // EMA alpha = 0.20 → time constant ~4 windows (~2s)
 private let kEmaAlpha: Float        = 0.20
-// Conditioning anchor: fires this many seconds after entering deep, once per episode.
+// Conditioning anchor delay: 20s after confirmed deep entry.
+// Justified: enter chime ducks soundscape for 4.5s then 1.5s unduck → audio restored at ~6s.
+// 20s total = 14s of silence after unduck before anchor fires.
+// The 10s hysteresis window (kEnterSustained) already guarantees 10s above threshold to enter.
+// So anchor fires when user has been above threshold for 30s total — genuine deep, not transient.
 private let kAnchorDelay: TimeInterval  = 20.0
-// Minimum gap between any two anchor tones (across episodes).
-private let kAnchorCooldown: TimeInterval = 300.0  // 5 minutes
+// Cross-episode anchor cooldown: 5 minutes.
+// Justified: enough time for the brain to re-enter a distinct state transition (not rapid cycling);
+// avoids flooding within a single multi-entry session (max ~4 anchors per 20-min session).
+private let kAnchorCooldown: TimeInterval = 300.0
 
 final class DepthGate {
     private(set) var inDeepState   = false
