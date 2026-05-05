@@ -119,7 +119,7 @@ final class Probe: ObservableObject {
                                 SoundscapePlayer.shared.decrementBinauralFade(
                                     latencyToFirstDeep: rec.episodes.first?.enterTime)
                             }
-                            self?.computeAdaptiveThreshold()
+                            self?.computeSessionAnalytics()
                         }
                     }
                     self?.scheduleReconnect()
@@ -292,44 +292,89 @@ final class Probe: ObservableObject {
         }
     }
 
-    // Computes personalized deep threshold from saved sessions (background; writes to main).
-    // Only uses sessions that had at least one deep episode — ensures threshold is calibrated
-    // against actual deep states, not just average meditation quality.
-    // Requires ≥5 qualifying sessions; does nothing otherwise.
-    private func computeAdaptiveThreshold() {
+    // Single-pass background analytics after each session end.
+    // Computes three independent values from the session archive in one file pass:
+    //   1. Adaptive deep threshold (75th pct of qualifying session means)
+    //   2. Historical induction latency average (excludes current session for fair comparison)
+    //   3. Daily practice streak (consecutive days with any session file)
+    private func computeSessionAnalytics() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            // Direct file listing — avoids loadSavedSessions() which dispatches to main.
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             let dir  = docs.appendingPathComponent("MuseSessions")
-            let urls = (try? FileManager.default.contentsOfDirectory(
+            // Sorted descending: urls[0] = most recent (the session just ended)
+            let allUrls = (try? FileManager.default.contentsOfDirectory(
                 at: dir, includingPropertiesForKeys: nil
             ))?.filter { $0.pathExtension == "json" }
               .sorted { $0.lastPathComponent > $1.lastPathComponent } ?? []
+
             let dec = JSONDecoder()
             dec.dateDecodingStrategy = .iso8601
-            var sessionMeans: [Float] = []
-            for url in urls.prefix(30) {
+            var sessionMeans: [Float]    = []
+            var latencies:    [Double]   = []
+
+            for url in allUrls.prefix(30) {
                 guard let data = try? Data(contentsOf: url),
                       let rec = try? dec.decode(SessionRecord.self, from: data),
                       !rec.episodes.isEmpty else { continue }
                 sessionMeans.append(rec.meanDepth)
+                if let lat = rec.episodes.first?.enterTime { latencies.append(lat) }
             }
-            guard sessionMeans.count >= 5 else { return }
-            let sorted = sessionMeans.sorted()
-            let p75idx = Int(Double(sorted.count) * 0.75)
-            let p75    = sorted[min(p75idx, sorted.count - 1)]
-            // Lower bound 0.40 (not 0.55): allows beginners to get feedback at their actual
-            // performance level rather than being held to a population threshold they can't reach.
-            // Upper bound 0.85: prevents trivially easy threshold even for advanced meditators.
-            // Threshold adapts BIDIRECTIONALLY — easier for beginners, harder for advanced.
-            let clamped = max(0.40, min(0.85, p75))
+
+            // 1. Adaptive threshold (≥5 qualifying sessions required for statistical stability)
+            var newThreshold: Float? = nil
+            if sessionMeans.count >= 5 {
+                let sorted = sessionMeans.sorted()
+                let p75    = sorted[min(Int(Double(sorted.count) * 0.75), sorted.count - 1)]
+                // [0.40, 0.85]: lower bound helps beginners see feedback; upper bound challenges advanced.
+                // Adapts BIDIRECTIONALLY — first session to compute this may lower OR raise the default.
+                newThreshold = max(0.40, min(0.85, p75))
+            }
+
+            // 2. Historical induction latency: exclude current session (latencies[0]) for fair comparison.
+            // We want "how does today compare to history" — including today biases toward today's result.
+            var avgLatency: Double? = nil
+            let historical = Array(latencies.dropFirst())  // everything except today's session
+            if historical.count >= 3 {
+                avgLatency = historical.reduce(0, +) / Double(historical.count)
+            }
+
+            // 3. Practice streak: consecutive calendar days with any session file
+            let streak = Self.computeStreak(from: allUrls)
+
             DispatchQueue.main.async {
-                self.gate.enterThreshold = clamped
-                self.gate.exitThreshold  = max(0.28, clamped - 0.12)
-                UserDefaults.standard.set(clamped, forKey: "adaptiveDeepThreshold")
+                if let t = newThreshold {
+                    self.gate.enterThreshold = t
+                    self.gate.exitThreshold  = max(0.28, t - 0.12)
+                    UserDefaults.standard.set(t, forKey: "adaptiveDeepThreshold")
+                }
+                if let avg = avgLatency {
+                    UserDefaults.standard.set(avg, forKey: "avgInductionLatency")
+                }
+                UserDefaults.standard.set(streak, forKey: "meditationStreak")
             }
         }
+    }
+
+    // Counts consecutive days (going back from today) that contain at least one session file.
+    // Filenames: session_YYYY-MM-dd_HHmm.json — date is the second component after splitting by "_".
+    private static func computeStreak(from urls: [URL]) -> Int {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        let cal = Calendar.current
+        var dates = Set<String>()
+        for url in urls {
+            let name  = url.deletingPathExtension().lastPathComponent
+            let parts = name.split(separator: "_")
+            if parts.count >= 2 { dates.insert(String(parts[1])) }
+        }
+        var streak = 0
+        var day    = Date()
+        while dates.contains(fmt.string(from: day)) {
+            streak += 1
+            day = cal.date(byAdding: .day, value: -1, to: day)!
+        }
+        return streak
     }
 
     private func reconnect() {
@@ -1152,7 +1197,21 @@ private struct SessionSummarySheet: View {
                     LabeledContent("Duration",   value: fmtMins(record.durationMinutes))
                     LabeledContent("Deep Time",  value: fmtMins(record.deepMinutes))
                     if let latency = record.episodes.first?.enterTime {
-                        LabeledContent("First Deep", value: fmtSecs(latency))
+                        let avg = UserDefaults.standard.double(forKey: "avgInductionLatency")
+                        HStack {
+                            Text("First Deep")
+                            Spacer()
+                            Text(fmtSecs(latency))
+                                .foregroundStyle(avg > 0 ? (latency < avg ? .green : .secondary) : .secondary)
+                            if avg > 0 {
+                                let pct = Int(((avg - latency) / avg * 100).rounded())
+                                if abs(pct) >= 10 {
+                                    Text(pct > 0 ? "+\(pct)%" : "\(pct)%")
+                                        .font(.caption2)
+                                        .foregroundStyle(pct > 0 ? .green : .orange)
+                                }
+                            }
+                        }
                     }
                     if let longest = record.episodes.compactMap(\.duration).max() {
                         LabeledContent("Longest Deep", value: fmtMins(longest / 60))
@@ -1167,6 +1226,12 @@ private struct SessionSummarySheet: View {
                         if let itpf = itpfMean {
                             LabeledContent("θ Peak (iTPF)", value: String(format: "%.1f Hz", itpf))
                         }
+                    }
+                }
+                let streak = UserDefaults.standard.integer(forKey: "meditationStreak")
+                if streak > 0 {
+                    Section("Practice") {
+                        LabeledContent("Streak", value: "\(streak) day\(streak == 1 ? "" : "s")")
                     }
                 }
                 Section("Insight") {
@@ -1200,39 +1265,49 @@ private struct SessionSummarySheet: View {
         let latency      = record.episodes.first?.enterTime ?? 9999
         let longest      = record.episodes.compactMap(\.duration).max() ?? 0
         let episodeCount = record.episodes.count
+        let avgLatency   = UserDefaults.standard.double(forKey: "avgInductionLatency")
 
         if record.episodes.isEmpty {
-            return "No confirmed deep state. Try softening jaw, eyes, and shoulders — the gate opens through release, not effort."
+            return "No confirmed deep state. Soften jaw, eyes, and shoulders — the gate opens through release, not effort."
         }
 
-        // Chi biomarker is the strongest objective signal — lead with it when available
+        // Chi leads when strong — it's the only signal independent of the calibration baseline
         if let chi = chiMean, chi < -1.5 {
-            let chiStr = String(format: "%.2f", chi)
-            return "Aperiodic slope χ = \(chiStr) — neural evidence of genuine absorption independent of the depth score. The signature is real."
+            return "Aperiodic slope χ = \(String(format: "%.2f", chi)) — neural evidence of genuine absorption, independent of the depth score. The signature is real."
         }
 
-        // Both fast entry AND sustained depth together is rarer than either alone
+        // Cross-session latency comparison: only shown when meaningful (≥20% difference, ≥3 historical sessions)
+        if avgLatency > 0, latency < 9999 {
+            let improvePct = (avgLatency - latency) / avgLatency * 100
+            if improvePct >= 20 {
+                return "Induction \(Int(improvePct.rounded()))% faster than your average (\(fmtSecs(avgLatency))). The pathway is consolidating — this is the adaptation you're training for."
+            } else if improvePct <= -25 {
+                return "Slower entry today (\(fmtSecs(latency)) vs avg \(fmtSecs(avgLatency))). Normal variation. Fatigue, stress, and environment all affect induction. One session doesn't erase the trend."
+            }
+        }
+
+        // Both fast entry AND sustained depth in the same session is the rarest combination
         if latency < 180 && longest > 600 {
-            return "Fast entry (\(fmtSecs(latency))) and \(fmtMins(longest / 60)) sustained. Both metrics improving simultaneously — this is the target state."
+            return "Fast entry (\(fmtSecs(latency))) and \(fmtMins(longest / 60)) sustained. Both metrics in the same session — this is exactly the target state."
         }
 
         if episodeCount >= 3 {
-            return "\(episodeCount) separate deep entries. Multiple entries in one session means the state is becoming repeatable, not a single lucky occurrence."
+            return "\(episodeCount) deep entries this session. Multiple entries means the state is becoming repeatable, not a single occurrence."
         }
 
         if latency < 180 {
-            return "First deep entry at \(fmtSecs(latency)). Faster induction shortens the distance between sitting and absorbing — the most trainable parameter."
+            return "Entry in \(fmtSecs(latency)) — faster induction is the most trainable parameter. This pathway shortens every time you use it."
         }
 
         if longest > 600 {
-            return "\(fmtMins(longest / 60)) in continuous deep state. Retention is the hardest skill. Most meditators improve induction first — then retention. You're ahead."
+            return "\(fmtMins(longest / 60)) continuous deep state. Retention is the hardest skill. Most practitioners improve induction years before retention. You're ahead of that curve."
         }
 
         if deep > 5 {
-            return "\(fmtMins(deep)) deep across \(episodeCount) episode\(episodeCount == 1 ? "" : "s"). Frequency builds the pattern. Show up consistently."
+            return "\(fmtMins(deep)) deep across \(episodeCount) episode\(episodeCount == 1 ? "" : "s"). Frequency builds the pattern. Consistency matters more than duration."
         }
 
-        return "Deep state confirmed. Neural encoding of the state begins from the first episode. Consistency from here is what determines transfer to eyes-open practice."
+        return "Deep state confirmed. Neural encoding begins from the first episode. Consistency from here determines whether this transfers to eyes-open, unaided practice."
     }
 
     private func fmtMins(_ m: Double) -> String {
