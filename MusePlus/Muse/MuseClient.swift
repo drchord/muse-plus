@@ -206,16 +206,11 @@ extension MuseClient: IXNMuseDataListener {
                 Float(p.getEegChannelValue(.AUX4)),
             ]
         }
-        // Amplitude artifact rejection: FRONTAL CHANNELS ONLY (AF7=channels[1], AF8=channels[2]).
-        // TP9/TP10 (channels[0],[3]) mediocre contact produces high-amplitude temporal noise that
-        // is NOT used for depth scoring. Checking all 4 channels causes every EEG packet to fail
-        // the amplitude gate when TP9/TP10 have poor fit → suppressWindows never reaches 0 →
-        // onBandPowers never fires → calibrationProgress stays 0 forever.
-        let frontalMaxAmp = max(abs(channels[1]), abs(channels[2]))
-        if frontalMaxAmp > 500 {
-            DispatchQueue.main.async { self.artifactDetected.send(true) }
-            return  // drop this packet entirely
-        }
+        // No amplitude threshold here. Athena at preset1041 returns raw ADC counts (14-bit,
+        // ~0–16383) not calibrated µV, so any fixed threshold rejects nearly every packet and
+        // starves the FFT buffer → Windows stays 0 → calibration never completes.
+        // computeWindow() removes DC mean before FFT, so ADC offset does not corrupt band powers.
+        // Artifact suppression is handled by SDK blink/jaw detection + handleIsGood (rate-limited).
         let pkt = EEGPacket(timestamp: Date().timeIntervalSinceReferenceDate, channels: channels)
         DispatchQueue.main.async { self.eegPacket.send(pkt) }
     }
