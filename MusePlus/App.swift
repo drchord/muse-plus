@@ -38,6 +38,8 @@ final class Probe: ObservableObject {
     @Published var bandUpdateCount: Int = 0
     @Published var bandHistory: [BandSample] = []
     @Published var heartRate: Double = 0
+    @Published var aperiodicSlope: Float? = nil  // IRASA mean χ; nil when R² quality gate fails
+    @Published var iTPFFrontal: Float?    = nil  // frontal theta peak Hz; nil until reliable
 
     let client   = MuseClient()
     let pipeline = EEGPipeline()
@@ -82,6 +84,7 @@ final class Probe: ObservableObject {
                 case .disconnected:
                     UIApplication.shared.isIdleTimerDisabled = false
                     SessionRecorder.shared.endSession()
+                    self?.pipeline.endSession()
                     self?.scheduleReconnect()
                 default: break
                 }
@@ -167,8 +170,12 @@ final class Probe: ObservableObject {
             SessionRecorder.shared.addSample(
                 alpha: self.frontAlpha, theta: self.frontTheta,
                 beta:  self.frontBeta,  delta: self.frontDelta,
-                gamma: self.frontGamma, depth: Float(self.depth.score),
-                inDeep: self.gate.inDeepState
+                gamma: self.frontGamma, depth: self.depth.score,
+                inDeep: self.gate.inDeepState,
+                heartRateBPM: self.heartRate > 0 ? Float(self.heartRate) : nil,
+                faa: self.depth.faa,
+                aperiodicSlopeMean: self.aperiodicSlope,
+                iTPFFrontal: self.iTPFFrontal
             )
         }
 
@@ -176,7 +183,15 @@ final class Probe: ObservableObject {
             guard let self else { return }
             self.depth = result
             self.gate.update(result)
-            SoundscapePlayer.shared.updateAdaptiveDepth(result.score)
+            SoundscapePlayer.shared.updateAdaptiveDepth(result.score, iTPF: self.iTPFFrontal)
+        }
+
+        pipeline.onAperiodicUpdate = { [weak self] chi in
+            DispatchQueue.main.async { self?.aperiodicSlope = chi }
+        }
+
+        pipeline.onITPFUpdate = { [weak self] iTPF in
+            DispatchQueue.main.async { self?.iTPFFrontal = iTPF }
         }
 
         client.artifactDetected
@@ -321,6 +336,13 @@ private struct MeditationView: View {
     @ObservedObject private var timer = MeditationTimer.shared
     @ObservedObject private var sound = SoundscapePlayer.shared
 
+    // χ color: green = deep absorption (steep slope), yellow = neutral, red/orange = aroused
+    private func chiColor(_ chi: Float) -> Color {
+        if chi < -1.5 { return Color(red: 0.20, green: 0.95, blue: 0.60) }
+        if chi < -1.0 { return Color(red: 0.95, green: 0.85, blue: 0.20) }
+        return Color(red: 0.95, green: 0.50, blue: 0.25)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Top bar
@@ -331,6 +353,11 @@ private struct MeditationView: View {
                     Label("\(Int(probe.heartRate.rounded())) bpm", systemImage: "heart.fill")
                         .font(.caption2)
                         .foregroundStyle(Color(red: 1.0, green: 0.35, blue: 0.45).opacity(0.85))
+                }
+                if let chi = probe.aperiodicSlope {
+                    Text("χ \(String(format: "%.2f", chi))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(chiColor(chi))
                 }
                 if probe.battery > 0 {
                     Label("\(Int(probe.battery))%", systemImage: "battery.75")
@@ -628,6 +655,12 @@ private struct SettingsSheet: View {
                         LabeledContent("Calibrating…",
                                        value: "\(Int(probe.depth.calibrationProgress * 60))s / 60s")
                     }
+                }
+                Section("Biomarkers") {
+                    LabeledContent("1/f Slope (χ)",
+                                   value: probe.aperiodicSlope.map { String(format: "%.2f", $0) } ?? "—")
+                    LabeledContent("θ Peak (iTPF)",
+                                   value: probe.iTPFFrontal.map { String(format: "%.2f Hz", $0) } ?? "—")
                 }
                 Section("Chimes — preview") {
                     ChimePreviewRow(label: "Enter Deep",     detail: "432 Hz",      color: .green)  { ChimeEngine.shared.playEnterDeep() }

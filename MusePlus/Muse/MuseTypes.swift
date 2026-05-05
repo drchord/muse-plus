@@ -2,7 +2,7 @@ import Foundation
 
 struct EEGPacket {
     let timestamp: TimeInterval     // seconds since reference, monotonic
-    let channels: [Float]           // length 4: TP9, AF7, AF8, TP10
+    let channels: [Float]           // length 4 (legacy Muse S) or 8 (Athena: EEG1-4 + AUX1-4)
 }
 
 struct FitCheckSnapshot: Equatable {

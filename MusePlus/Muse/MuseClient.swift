@@ -31,6 +31,8 @@ final class MuseClient: NSObject {
     // is rejected by Athena firmware and would leave headband disconnected.
     // Tracks whether model-appropriate preset has been applied for current session.
     private var presetAppliedFor: IXNMuseModel?
+    // Remembered after applyPresetForModel; drives 8-channel EEG read in handleEEG.
+    private var connectedMuseModel: IXNMuseModel?
 
     override init() {
         self.manager = IXNMuseManagerIos.sharedManager()
@@ -100,6 +102,7 @@ final class MuseClient: NSObject {
         ppgBuffer.removeAll()
         lastBpmTs = 0
         presetAppliedFor = nil
+        connectedMuseModel = nil
     }
 
     // Choose the right preset for the connected hardware. Called once per session
@@ -121,6 +124,7 @@ final class MuseClient: NSObject {
             muse.setPreset(.preset21)
         }
         presetAppliedFor = model
+        connectedMuseModel = model
     }
 }
 
@@ -172,14 +176,24 @@ extension MuseClient: IXNMuseDataListener {
     }
 
     private func handleEEG(_ p: IXNMuseDataPacket) {
-        let channels: [Float] = [
+        // Canonical 4 channels on all hardware.
+        var channels: [Float] = [
             Float(p.getEegChannelValue(.EEG1)),
             Float(p.getEegChannelValue(.EEG2)),
             Float(p.getEegChannelValue(.EEG3)),
             Float(p.getEegChannelValue(.EEG4)),
         ]
-        // Amplitude artifact rejection: any channel > 300 µV is blink/muscle contamination
-        let maxAmp = channels.map(abs).max() ?? 0
+        // Athena (MS-03) adds AUX1-4 (indices 4-7) for 8-channel EEG @ 256Hz/14-bit.
+        if connectedMuseModel == .ms03 {
+            channels += [
+                Float(p.getEegChannelValue(.AUX1)),
+                Float(p.getEegChannelValue(.AUX2)),
+                Float(p.getEegChannelValue(.AUX3)),
+                Float(p.getEegChannelValue(.AUX4)),
+            ]
+        }
+        // Amplitude artifact rejection on canonical 4 channels only (AUX contact quality unknown).
+        let maxAmp = channels.prefix(4).map(abs).max() ?? 0
         if maxAmp > 300 {
             DispatchQueue.main.async { self.artifactDetected.send(true) }
             return  // drop this packet entirely

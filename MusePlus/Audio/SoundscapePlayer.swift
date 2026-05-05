@@ -141,9 +141,14 @@ final class SoundscapePlayer: ObservableObject {
     }
 
     /// Called from depth pipeline. Updates adaptive binaural tier if .binaural is active.
-    func updateAdaptiveDepth(_ depthScore: Float) {
-        // 3-tier binaural: shallow=alpha(10Hz), mid=theta(6Hz), deep=theta(4Hz)
-        let newHz: Double = depthScore > 0.70 ? 4.0 : depthScore > 0.45 ? 6.0 : 10.0
+    /// iTPF: individual theta peak in Hz from ITPFTracker (nil → falls back to fixed 6 Hz).
+    func updateAdaptiveDepth(_ depthScore: Float, iTPF: Float? = nil) {
+        // Theta tier uses personalized iTPF when reliable; fallback = 6 Hz (Klimesch 1999 mean).
+        let thetaHz = iTPF.map { Double($0) } ?? 6.0
+        // 3-tier binaural: shallow=alpha(10Hz), mid=θ peak, deep=θ peak −2 Hz (floored at 4 Hz)
+        let newHz: Double = depthScore > 0.70
+            ? max(4.0, thetaHz - 2.0)
+            : depthScore > 0.45 ? thetaHz : 10.0
         guard newHz != customBinauralHz else { return }
         customBinauralHz = newHz
         guard activeLayers.contains(.binaural) else { return }

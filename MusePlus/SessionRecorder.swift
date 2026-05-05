@@ -11,6 +11,16 @@ struct SessionSample: Codable {
     let gamma:  Float
     let depth:  Float
     let inDeep: Bool
+    // Build 65 additions — all Optional with defaults; decodeIfPresent for build 64 JSON back-compat.
+    var heartRateBPM:       Float? = nil  // BPM; Optics-derived on Athena, legacy PPG on Muse S 2019
+    var faa:                Float? = nil  // af8α - af7α; nil when either frontal channel is artifacted
+    var aperiodicSlopeMean: Float? = nil  // IRASA mean χ across canonical EEG1-4; nil if R² < 0.85
+    var iTPFFrontal:        Float? = nil  // Kalman-filtered frontal theta peak Hz; nil until reliable
+    // Build 55b placeholders — nil until OpticsPipeline lands
+    var hboL: Float? = nil
+    var hboR: Float? = nil
+    var hbrL: Float? = nil
+    var hbrR: Float? = nil
 }
 
 struct DeepEpisode: Codable {
@@ -86,12 +96,16 @@ final class SessionRecorder: ObservableObject {
     // MARK: - Data ingestion
 
     func addSample(alpha: Float, theta: Float, beta: Float,
-                   delta: Float, gamma: Float, depth: Float, inDeep: Bool) {
+                   delta: Float, gamma: Float, depth: Float, inDeep: Bool,
+                   heartRateBPM: Float? = nil, faa: Float? = nil,
+                   aperiodicSlopeMean: Float? = nil, iTPFFrontal: Float? = nil) {
         guard isRecording, var rec = current else { return }
         let t = Date().timeIntervalSince(rec.startDate)
         rec.samples.append(SessionSample(
             time: t, alpha: alpha, theta: theta, beta: beta,
-            delta: delta, gamma: gamma, depth: depth, inDeep: inDeep
+            delta: delta, gamma: gamma, depth: depth, inDeep: inDeep,
+            heartRateBPM: heartRateBPM, faa: faa,
+            aperiodicSlopeMean: aperiodicSlopeMean, iTPFFrontal: iTPFFrontal
         ))
         if inDeep && !lastDeepState {
             rec.episodes.append(DeepEpisode(enterTime: t, exitTime: nil))
