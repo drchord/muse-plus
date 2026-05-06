@@ -186,6 +186,9 @@ extension MuseClient: IXNMuseDataListener {
 
     func receive(_ packet: IXNMuseArtifactPacket, muse: IXNMuse?) {
         guard packet.blink || packet.jawClench else { return }
+        let now = Date().timeIntervalSinceReferenceDate
+        guard now - lastQualitySuppression >= 5.0 else { return }
+        lastQualitySuppression = now
         DispatchQueue.main.async { self.artifactDetected.send(true) }
     }
 

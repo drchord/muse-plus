@@ -256,7 +256,10 @@ final class Probe: ObservableObject {
 
         client.artifactDetected
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.pipeline.suppressArtifact() }
+            .sink { [weak self] _ in
+                guard let self, self.depth.isCalibrated else { return }
+                self.pipeline.suppressArtifact()
+            }
             .store(in: &bag)
 
         client.heartRate
