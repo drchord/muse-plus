@@ -24,6 +24,13 @@ final class ChimeEngine {
         observeAudio()
     }
 
+    // MARK: - Volume
+
+    var chimeVolume: Float {
+        get { UserDefaults.standard.object(forKey: "chimeVolume") as? Float ?? 0.7 }
+        set { UserDefaults.standard.set(newValue, forKey: "chimeVolume") }
+    }
+
     // MARK: - Public API
 
     /// Enter deep state: rich 432 Hz bowl — warm, welcoming, celebratory.
@@ -215,6 +222,7 @@ final class ChimeEngine {
 
     private func schedule(_ buf: AVAudioPCMBuffer) {
         ensureRunning()
+        player.volume = chimeVolume
         if !player.isPlaying { player.play() }
         player.scheduleBuffer(buf, completionHandler: nil)
     }

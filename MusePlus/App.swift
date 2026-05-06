@@ -831,6 +831,16 @@ private struct SettingsSheet: View {
                                    value: probe.iTPFFrontal.map { String(format: "%.2f Hz", $0) } ?? "—")
                 }
                 Section("Chimes — preview") {
+                    HStack(spacing: 10) {
+                        Image(systemName: "bell")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Slider(value: Binding(
+                            get: { Double(ChimeEngine.shared.chimeVolume) },
+                            set: { ChimeEngine.shared.chimeVolume = Float($0) }
+                        ), in: 0...1)
+                        Image(systemName: "bell.fill")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     ChimePreviewRow(label: "Enter Deep",     detail: "432 Hz",          color: .green)  { ChimeEngine.shared.playEnterDeep() }
                     ChimePreviewRow(label: "Exit Deep",      detail: "288 Hz",          color: .cyan)   { ChimeEngine.shared.playExitDeep() }
                     ChimePreviewRow(label: "Anchor Tone",    detail: "7 Hz θ binaural", color: .indigo) { ChimeEngine.shared.playConditioningAnchor() }
