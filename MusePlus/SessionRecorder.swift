@@ -21,6 +21,9 @@ struct SessionSample: Codable {
     var hboR: Float? = nil
     var hbrL: Float? = nil
     var hbrR: Float? = nil
+    // Build 76 — HRV via AMPD on Optics7/8 (Athena only)
+    var rmssd:      Float? = nil  // Root mean square of successive RR differences (ms)
+    var lfhfRatio:  Float? = nil  // Sympatho-vagal balance: LF (0.04-0.15 Hz) / HF (0.15-0.40 Hz)
 }
 
 struct DeepEpisode: Codable {
@@ -98,15 +101,19 @@ final class SessionRecorder: ObservableObject {
     func addSample(alpha: Float, theta: Float, beta: Float,
                    delta: Float, gamma: Float, depth: Float, inDeep: Bool,
                    heartRateBPM: Float? = nil, faa: Float? = nil,
-                   aperiodicSlopeMean: Float? = nil, iTPFFrontal: Float? = nil) {
+                   aperiodicSlopeMean: Float? = nil, iTPFFrontal: Float? = nil,
+                   rmssd: Float? = nil, lfhfRatio: Float? = nil) {
         guard isRecording, var rec = current else { return }
         let t = Date().timeIntervalSince(rec.startDate)
-        rec.samples.append(SessionSample(
+        var sample = SessionSample(
             time: t, alpha: alpha, theta: theta, beta: beta,
             delta: delta, gamma: gamma, depth: depth, inDeep: inDeep,
             heartRateBPM: heartRateBPM, faa: faa,
             aperiodicSlopeMean: aperiodicSlopeMean, iTPFFrontal: iTPFFrontal
-        ))
+        )
+        sample.rmssd     = rmssd
+        sample.lfhfRatio = lfhfRatio
+        rec.samples.append(sample)
         if inDeep && !lastDeepState {
             rec.episodes.append(DeepEpisode(enterTime: t, exitTime: nil))
         } else if !inDeep && lastDeepState && !rec.episodes.isEmpty {

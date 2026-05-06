@@ -43,8 +43,11 @@ final class Probe: ObservableObject {
 
     let client   = MuseClient()
     let pipeline = EEGPipeline()
+    let hrv      = HRVPipeline()
     let scorer   = DepthScore()
     let gate     = DepthGate()
+    @Published var rmssd:     Float? = nil  // RMSSD in ms; nil until 5-min Optics window accumulates
+    @Published var lfhfRatio: Float? = nil  // LF/HF ratio; nil until RMSSD available
     private var bag = Set<AnyCancellable>()
     private var sampleIndex = 0
     private var sessionStart = Date()
@@ -100,6 +103,9 @@ final class Probe: ObservableObject {
                     self?.recordingStartWork = nil
                     let recUrl = SessionRecorder.shared.endSession()
                     self?.pipeline.endSession()
+                    self?.hrv.reset()
+                    self?.rmssd     = nil
+                    self?.lfhfRatio = nil
                     // Decode saved session on main thread. Typical session JSON ≤ 400 KB
                     // (2 Hz × 3600 s × ~50 B/sample) → decode < 20 ms. Acceptable at session end.
                     // Backgrounding would race with scheduleReconnect (fires 3 s later) which
@@ -135,12 +141,10 @@ final class Probe: ObservableObject {
                 // frequently fluctuates between good/bad contact. Chiming before calibration
                 // completes is noisy and unhelpful — user can see contact state via dots.
                 guard self.depth.isCalibrated else { return }
-                if wasGood && !snap.allGood {
-                    ChimeEngine.shared.playContactLost()
-                    SessionRecorder.shared.addFitEvent()
-                } else if !wasGood && snap.allGood {
-                    ChimeEngine.shared.playContactRestored()
-                }
+                // Post-calibration: record fit events for data, never play contact audio.
+                // Dots give visual state — audio mid-sit breaks concentration regardless
+                // of which contacts fluctuate (TP9/TP10 are rarely simultaneously green).
+                if wasGood && !snap.allGood { SessionRecorder.shared.addFitEvent() }
             }
             .store(in: &bag)
 
@@ -226,7 +230,9 @@ final class Probe: ObservableObject {
                 heartRateBPM: self.heartRate > 0 ? Float(self.heartRate) : nil,
                 faa: self.depth.faa,
                 aperiodicSlopeMean: self.aperiodicSlope,
-                iTPFFrontal: self.iTPFFrontal
+                iTPFFrontal: self.iTPFFrontal,
+                rmssd: self.rmssd,
+                lfhfRatio: self.lfhfRatio
             )
         }
 
@@ -254,6 +260,17 @@ final class Probe: ObservableObject {
             DispatchQueue.main.async { self?.iTPFFrontal = iTPF }
         }
 
+        // HRV: feed raw Optics7/8 mean samples to HRVPipeline on SDK callback thread.
+        // process() dispatches to hrv.queue internally; sink overhead on calling thread is minimal.
+        client.opticsRawSample
+            .sink { [weak self] s in self?.hrv.process(s) }
+            .store(in: &bag)
+
+        hrv.onRMSSD = { [weak self] rmssd, lfhf in
+            self?.rmssd     = Float(rmssd)
+            self?.lfhfRatio = lfhf.map { Float($0) }
+        }
+
         client.artifactDetected
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -273,6 +290,32 @@ final class Probe: ObservableObject {
     var betaCueEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "betaCueEnabled") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "betaCueEnabled") }
+    }
+
+    // Manual session end from UI — stops recording, fades soundscape, shows summary.
+    // Does NOT disconnect the headband; visual feedback continues.
+    func manualEndSession() {
+        SoundscapePlayer.shared.stopAll(fadeSeconds: 2.0)
+        recordingStartWork?.cancel()
+        let recUrl = SessionRecorder.shared.endSession()
+        pipeline.endSession()
+        hrv.reset()
+        rmssd     = nil
+        lfhfRatio = nil
+        if let url = recUrl,
+           let data = try? Data(contentsOf: url) {
+            let dec = JSONDecoder()
+            dec.dateDecodingStrategy = .iso8601
+            if let rec = try? dec.decode(SessionRecord.self, from: data) {
+                sessionSummary = rec
+                return
+            }
+        }
+        // Recording hadn't started (ended before 300s grace period) — show empty summary
+        // so user gets sheet confirmation rather than a silent no-op after tapping End.
+        let now = Date()
+        sessionSummary = SessionRecord(id: UUID().uuidString, startDate: now, endDate: now,
+                                       samples: [], episodes: [], fitEvents: [])
     }
 
     func connectFirst() {
@@ -498,6 +541,7 @@ private struct MeditationView: View {
     @Binding var showSoundscape: Bool
     @Binding var showTimer:      Bool
 
+    @State private var showEndConfirm = false
     @ObservedObject private var timer = MeditationTimer.shared
     @ObservedObject private var sound = SoundscapePlayer.shared
 
@@ -583,14 +627,19 @@ private struct MeditationView: View {
                 Divider().frame(height: 28).background(.white.opacity(0.1))
 
                 BottomButton(
-                    icon: "checkmark.circle",
-                    label: "Check-in",
+                    icon: "stop.circle",
+                    label: "End",
                     active: false
-                ) { ChimeEngine.shared.playCheckIn() }
+                ) { showEndConfirm = true }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
             .background(Color.white.opacity(0.04))
+            .confirmationDialog("End this session?", isPresented: $showEndConfirm,
+                                titleVisibility: .visible) {
+                Button("End Session", role: .destructive) { probe.manualEndSession() }
+                Button("Cancel", role: .cancel) { }
+            }
         }
     }
 }
@@ -829,6 +878,10 @@ private struct SettingsSheet: View {
                                    value: probe.aperiodicSlope.map { String(format: "%.2f", $0) } ?? "—")
                     LabeledContent("θ Peak (iTPF)",
                                    value: probe.iTPFFrontal.map { String(format: "%.2f Hz", $0) } ?? "—")
+                    LabeledContent("RMSSD",
+                                   value: probe.rmssd.map { String(format: "%.0f ms", $0) } ?? "— (needs 5 min)")
+                    LabeledContent("LF/HF Ratio",
+                                   value: probe.lfhfRatio.map { String(format: "%.2f", $0) } ?? "—")
                 }
                 Section("Chimes — preview") {
                     HStack(spacing: 10) {
@@ -1230,13 +1283,19 @@ private struct SessionSummarySheet: View {
                     }
                     LabeledContent("Deep Episodes", value: "\(record.episodes.count)")
                 }
-                if chiMean != nil || itpfMean != nil {
+                if chiMean != nil || itpfMean != nil || rmssdMean != nil {
                     Section("Biomarkers") {
                         if let chi = chiMean {
                             LabeledContent("Mean χ (1/f slope)", value: String(format: "%.2f", chi))
                         }
                         if let itpf = itpfMean {
                             LabeledContent("θ Peak (iTPF)", value: String(format: "%.1f Hz", itpf))
+                        }
+                        if let rmssd = rmssdMean {
+                            LabeledContent("RMSSD", value: String(format: "%.0f ms", rmssd))
+                        }
+                        if let lfhf = lfhfMean {
+                            LabeledContent("LF/HF Ratio", value: String(format: "%.2f", lfhf))
                         }
                     }
                 }
@@ -1269,6 +1328,16 @@ private struct SessionSummarySheet: View {
 
     private var itpfMean: Float? {
         let v = record.samples.compactMap(\.iTPFFrontal)
+        return v.isEmpty ? nil : v.reduce(0, +) / Float(v.count)
+    }
+
+    private var rmssdMean: Float? {
+        let v = record.samples.compactMap(\.rmssd)
+        return v.isEmpty ? nil : v.reduce(0, +) / Float(v.count)
+    }
+
+    private var lfhfMean: Float? {
+        let v = record.samples.compactMap(\.lfhfRatio)
         return v.isEmpty ? nil : v.reduce(0, +) / Float(v.count)
     }
 

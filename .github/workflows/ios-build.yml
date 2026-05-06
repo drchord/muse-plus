@@ -127,6 +127,42 @@ jobs:
             -authenticationKeyID 9V47M72GKG \
             -authenticationKeyIssuerID 620b8c6b-545b-4fb4-8b7f-4b527a671243
 
+      # Ad Hoc IPA — requires ADHOC_PROVISIONING_PROFILE secret (base64 .mobileprovision).
+      # Steps fail gracefully (continue-on-error) so TestFlight build still succeeds if profile missing.
+      # Setup: Apple Developer → Profiles → Ad Hoc → name it "MusePlus AdHoc" → download →
+      #   base64 encode → add as repo secret ADHOC_PROVISIONING_PROFILE.
+      - name: Install Ad Hoc provisioning profile
+        continue-on-error: true
+        env:
+          ADHOC_PROVISIONING_PROFILE: ${{ secrets.ADHOC_PROVISIONING_PROFILE }}
+        run: |
+          [ -z "$ADHOC_PROVISIONING_PROFILE" ] && exit 0
+          PP_PATH=$RUNNER_TEMP/MusePlus_AdHoc.mobileprovision
+          echo "$ADHOC_PROVISIONING_PROFILE" | base64 --decode > "$PP_PATH"
+          cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      - name: Export Ad Hoc IPA
+        continue-on-error: true
+        env:
+          ADHOC_PROVISIONING_PROFILE: ${{ secrets.ADHOC_PROVISIONING_PROFILE }}
+        run: |
+          [ -z "$ADHOC_PROVISIONING_PROFILE" ] && exit 0
+          set -o pipefail
+          xcodebuild -exportArchive \
+            -archivePath build/MusePlus.xcarchive \
+            -exportPath build/adhoc \
+            -exportOptionsPlist ExportOptions_AdHoc.plist \
+            -allowProvisioningUpdates
+
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        env:
+          ADHOC_PROVISIONING_PROFILE: ${{ secrets.ADHOC_PROVISIONING_PROFILE }}
+        with:
+          name: MusePlus-AdHoc-${{ github.run_number }}
+          path: build/adhoc/*.ipa
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

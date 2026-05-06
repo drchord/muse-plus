@@ -15,6 +15,8 @@ final class MuseClient: NSObject {
     let artifactDetected = PassthroughSubject<Bool, Never>()
     // Heart rate in BPM from PPG Green channel; 0 = no valid reading yet.
     let heartRate        = CurrentValueSubject<Double, Never>(0)
+    // Raw (OPTICS7 + OPTICS8) / 2 sample at 64 Hz — Athena only. Feeds HRVPipeline.
+    let opticsRawSample  = PassthroughSubject<Double, Never>()
 
     // MARK: - Internals
     private let manager: IXNMuseManagerIos
@@ -281,6 +283,8 @@ extension MuseClient: IXNMuseDataListener {
         let right = p.getOpticsChannelValue(.OPTICS8)  // 850 nm inner right
         guard left.isFinite, right.isFinite else { return }
         let sample = (left + right) * 0.5
+        // Feed HRV pipeline before queue hop — PassthroughSubject.send is thread-safe.
+        opticsRawSample.send(sample)
         queue.async { [self] in
             ppgBuffer.append(sample)
             if ppgBuffer.count > MuseClient.ppgWindowSize { ppgBuffer.removeFirst() }

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>ad-hoc</string>
+    <key>destination</key>
+    <string>export</string>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>signingCertificate</key>
+    <string>Apple Distribution</string>
+    <key>provisioningProfiles</key>
+    <dict>
+        <!-- Replace value with the name you give the Ad Hoc profile in Apple Developer portal -->
+        <key>com.drchord.museplus</key>
+        <string>MusePlus AdHoc</string>
+    </dict>
+    <key>teamID</key>
+    <string>YZN764NT86</string>
+</dict>
+</plist>

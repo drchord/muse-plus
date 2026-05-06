@@ -30,8 +30,8 @@ enum SoundLayer: String, CaseIterable, Identifiable {
     // Layers that load from bundled M4A files vs DSP-generated
     var isFileBased: Bool {
         switch self {
-        case .brownNoise, .binaural: return false
-        default: return true
+        case .brownNoise, .binaural, .rain, .ocean, .wind: return false
+        default: return true  // thunder, brook, forest, birds remain file-based
         }
     }
     var fileName: String { rawValue.lowercased().replacingOccurrences(of: " ", with: "_").components(separatedBy: "_waves").first ?? rawValue.lowercased() }
@@ -113,8 +113,11 @@ final class SoundscapePlayer: ObservableObject {
     private let engine = AVAudioEngine()
     private var nodes:   [SoundLayer: AVAudioPlayerNode] = [:]
     private var buffers: [SoundLayer: AVAudioPCMBuffer]  = [:]
+    private var eqs:     [SoundLayer: AVAudioUnitEQ]     = [:]
     private let sampleRate: Double = 44100
-    private let bufferSecs: Double = 20   // DSP layers only
+    // 120s: binaural beats at all integer Hz return to phase 0 (integer × 120 = integer cycles).
+    // Brown noise loops every 2 min — infrequent enough to be imperceptible in practice.
+    private let bufferSecs: Double = 120
 
     // Volume ducking state
     private var unduckTimer: DispatchWorkItem?
@@ -124,13 +127,67 @@ final class SoundscapePlayer: ObservableObject {
         let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
         for layer in SoundLayer.allCases {
             let node = AVAudioPlayerNode()
+            let eq   = AVAudioUnitEQ(numberOfBands: 2)
             nodes[layer] = node
+            eqs[layer]   = eq
             engine.attach(node)
-            engine.connect(node, to: engine.mainMixerNode, format: fmt)
+            engine.attach(eq)
+            engine.connect(node, to: eq,                   format: fmt)
+            engine.connect(eq,   to: engine.mainMixerNode, format: fmt)
+            configureEQ(eq, for: layer)
         }
         configureSession()
         try? engine.start()
         observeAudio()
+    }
+
+    private func configureEQ(_ eq: AVAudioUnitEQ, for layer: SoundLayer) {
+        switch layer {
+        case .brownNoise:
+            // High-shelf cut reinforces 1/f² rolloff — 3-pole approximation leaves excess
+            // high-frequency energy that sounds grainy without it.
+            eq.bands[0].filterType = .highShelf
+            eq.bands[0].frequency  = 6000
+            eq.bands[0].gain       = -8
+            eq.bands[0].bypass     = false
+            eq.bands[1].bypass     = true
+        case .binaural:
+            // Low-pass removes aliasing above carrier while preserving the beat envelope.
+            // Carrier is 200 Hz; highest beat is 20 Hz (beta) → max needed is 220 Hz.
+            eq.bands[0].filterType = .lowPass
+            eq.bands[0].frequency  = 500
+            eq.bands[0].bypass     = false
+            eq.bands[1].bypass     = true
+        case .rain:
+            // Parametric boost at 2.5 kHz adds "drop patter" texture to HPF noise.
+            // High-shelf cut removes residual harshness above 8 kHz.
+            eq.bands[0].filterType = .parametric
+            eq.bands[0].frequency  = 2500
+            eq.bands[0].bandwidth  = 1.5
+            eq.bands[0].gain       = 4
+            eq.bands[0].bypass     = false
+            eq.bands[1].filterType = .highShelf
+            eq.bands[1].frequency  = 8000
+            eq.bands[1].gain       = -5
+            eq.bands[1].bypass     = false
+        case .ocean:
+            // Low-shelf cut reduces LF mud from the band-pass synthesis.
+            eq.bands[0].filterType = .lowShelf
+            eq.bands[0].frequency  = 180
+            eq.bands[0].gain       = -4
+            eq.bands[0].bypass     = false
+            eq.bands[1].bypass     = true
+        case .wind:
+            // High-shelf cut softens the LPF synthesis further for distant wind character.
+            eq.bands[0].filterType = .highShelf
+            eq.bands[0].frequency  = 900
+            eq.bands[0].gain       = -6
+            eq.bands[0].bypass     = false
+            eq.bands[1].bypass     = true
+        default:
+            eq.bands[0].bypass = true
+            eq.bands[1].bypass = true
+        }
     }
 
     // MARK: - Public API
@@ -181,22 +238,18 @@ final class SoundscapePlayer: ObservableObject {
         fade(to: 1.0, over: fadeDuration)
     }
 
-    /// Called from depth pipeline. Updates adaptive binaural tier if .binaural is active.
+    /// Called from depth pipeline. Tracks adaptive binaural tier but does NOT restart
+    /// the playing node mid-session — frequency changes cause audible gaps and are more
+    /// disruptive than beneficial during active meditation.
     /// iTPF: individual theta peak in Hz from ITPFTracker (nil → falls back to fixed 6 Hz).
     func updateAdaptiveDepth(_ depthScore: Float, iTPF: Float? = nil) {
-        // Theta tier uses personalized iTPF when reliable; fallback = 6 Hz (Klimesch 1999 mean).
         let thetaHz = iTPF.map { Double($0) } ?? 6.0
-        // 3-tier binaural: shallow=alpha(10Hz), mid=θ peak, deep=θ peak −2 Hz (floored at 4 Hz)
         let newHz: Double = depthScore > 0.70
             ? max(4.0, thetaHz - 2.0)
             : depthScore > 0.45 ? thetaHz : 10.0
+        // Record the tier for next activation but never interrupt a running buffer.
         guard newHz != customBinauralHz else { return }
         customBinauralHz = newHz
-        guard activeLayers.contains(.binaural) else { return }
-        // Rebuild buffer on next tier change (brief ~100ms gap is acceptable)
-        buffers.removeValue(forKey: .binaural)
-        nodes[.binaural]?.stop()
-        startLayer(.binaural)
     }
 
     // MARK: - Internals
@@ -380,11 +433,15 @@ final class SoundscapePlayer: ObservableObject {
               let Lp = buf.floatChannelData?[0],
               let Rp = buf.floatChannelData?[1] else { return buf }
 
-        // Blend tail into head: head[i] = head[i]*t + tail[i]*(1-t)
+        // Equal-power crossfade: sin²+cos²=1 keeps energy constant through the blend.
+        // Linear crossfade has a -3 dB dip at the midpoint — audible as a volume dip in
+        // textured ambience (brown noise, rain). sin/cos eliminates it.
         for i in 0..<xf {
-            let t = Float(i) / Float(xf)
-            Lp[i] = Lp[i] * t + Lp[n - xf + i] * (1.0 - t)
-            Rp[i] = Rp[i] * t + Rp[n - xf + i] * (1.0 - t)
+            let θ       = Float(i) / Float(xf) * Float.pi * 0.5
+            let fadeIn  = sin(θ)   // 0 → 1  (head coming in)
+            let fadeOut = cos(θ)   // 1 → 0  (tail going out)
+            Lp[i] = Lp[i] * fadeIn + Lp[n - xf + i] * fadeOut
+            Rp[i] = Rp[i] * fadeIn + Rp[n - xf + i] * fadeOut
         }
 
         // Return trimmed buffer (drop the tail that was blended into head)
@@ -398,7 +455,7 @@ final class SoundscapePlayer: ObservableObject {
         return trimmed
     }
 
-    // MARK: - DSP buffer factory (brown noise + binaural only)
+    // MARK: - DSP buffer factory
 
     private func makeBuffer(_ layer: SoundLayer, beatHz: Double = 0) -> AVAudioPCMBuffer {
         let n   = AVAudioFrameCount(sampleRate * bufferSecs)
@@ -406,11 +463,122 @@ final class SoundscapePlayer: ObservableObject {
         let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: n)!
         buf.frameLength = n
         switch layer {
-        case .brownNoise: fillBrownNoise(buf)
-        case .binaural:   fillBinaural(buf, beatHz: beatHz)
-        default:          fillBrownNoise(buf)   // fallback if file missing
+        case .brownNoise:
+            fillBrownNoise(buf)
+            // Crossfade blends tail into warmed-up head. Filter warmup ensures head samples
+            // are in steady state so the blend is amplitude-matched at both ends.
+            return applyCrossfadeLoop(buf)
+        case .binaural:
+            fillBinaural(buf, beatHz: beatHz)
+            return buf   // phase-continuous at 120s for all integer-Hz beats
+        case .rain:
+            fillRain(buf)
+            return applyCrossfadeLoop(buf)
+        case .ocean:
+            fillOcean(buf)
+            return applyCrossfadeLoop(buf)
+        case .wind:
+            fillWind(buf)
+            return applyCrossfadeLoop(buf)
+        default:
+            fillBrownNoise(buf)
+            return applyCrossfadeLoop(buf)
         }
-        return buf
+    }
+
+    // MARK: - Rain (DSP)
+    // First-order HPF on white noise (fc ≈ 800 Hz) with decorrelated stereo.
+    // AM at exactly 4 cycles / 120s → phase-continuous at loop boundary (no AM click).
+    // α = τ/(τ+dt), τ=1/(2π·800 Hz), dt=1/44100 Hz → α ≈ 0.898.
+
+    private func fillRain(_ buf: AVAudioPCMBuffer) {
+        let n  = Int(buf.frameLength)
+        let L  = buf.floatChannelData![0]
+        let R  = buf.floatChannelData![1]
+        let αH: Float = 0.898
+        var hL: Float = 0, hR: Float = 0
+        var xL: Float = 0, xR: Float = 0
+        for _ in 0..<2000 {
+            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
+            hL = αH * (hL + wL - xL); xL = wL
+            hR = αH * (hR + wR - xR); xR = wR
+        }
+        for i in 0..<n {
+            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
+            hL = αH * (hL + wL - xL); xL = wL
+            hR = αH * (hR + wR - xR); xR = wR
+            let am = Float(0.80 + 0.20 * sin(2 * .pi * (4.0 / 120.0) * Double(i) / sampleRate))
+            L[i] = hL * am
+            R[i] = hR * am
+        }
+        norm(L, R, n: n, t: 0.70)
+    }
+
+    // MARK: - Ocean (DSP)
+    // Band-pass noise (LP 600 Hz → HP 60 Hz) shaped by two overlapping wave envelopes.
+    // Wave periods use integer-cycle frequencies (12 and 8 cycles / 120s) so the envelope
+    // returns to its t=0 value exactly at the loop boundary — no amplitude click.
+
+    private func fillOcean(_ buf: AVAudioPCMBuffer) {
+        let n  = Int(buf.frameLength)
+        let L  = buf.floatChannelData![0]
+        let R  = buf.floatChannelData![1]
+        let αLP: Float = 0.9181  // LP α = exp(-2π·600/44100)
+        let αHP: Float = 0.9915  // HP α = τ/(τ+dt), τ=1/(2π·60 Hz)
+        var lpL: Float = 0, lpR: Float = 0
+        var hpL: Float = 0, hpR: Float = 0
+        var prevL: Float = 0, prevR: Float = 0
+        for _ in 0..<4000 {
+            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
+            lpL = αLP * lpL + (1 - αLP) * wL
+            lpR = αLP * lpR + (1 - αLP) * wR
+            hpL = αHP * (hpL + lpL - prevL); prevL = lpL
+            hpR = αHP * (hpR + lpR - prevR); prevR = lpR
+        }
+        for i in 0..<n {
+            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
+            lpL = αLP * lpL + (1 - αLP) * wL
+            lpR = αLP * lpR + (1 - αLP) * wR
+            hpL = αHP * (hpL + lpL - prevL); prevL = lpL
+            hpR = αHP * (hpR + lpR - prevR); prevR = lpR
+            let t  = Double(i) / sampleRate
+            // Half-rectified squared sine: natural wave swell shape (quiet trough, crashing crest).
+            let wA = max(0.0, sin(2 * .pi * (12.0 / 120.0) * t))
+            let wB = max(0.0, sin(2 * .pi * ( 8.0 / 120.0) * t + .pi / 2))
+            let envelope = Float(0.25 + 0.50 * wA * wA + 0.25 * wB * wB)
+            L[i] = hpL * envelope
+            R[i] = hpR * envelope
+        }
+        norm(L, R, n: n, t: 0.70)
+    }
+
+    // MARK: - Wind (DSP)
+    // LP-filtered noise (fc ≈ 200 Hz) with two gusting oscillators.
+    // Both use integer-cycle frequencies (2 and 4 cycles / 120s) → phase-continuous loop.
+    // α = exp(-2π·200/44100) ≈ 0.9719.
+
+    private func fillWind(_ buf: AVAudioPCMBuffer) {
+        let n  = Int(buf.frameLength)
+        let L  = buf.floatChannelData![0]
+        let R  = buf.floatChannelData![1]
+        let αLP: Float = 0.9719
+        var lpL: Float = 0, lpR: Float = 0
+        for _ in 0..<4000 {
+            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
+            lpL = αLP * lpL + (1 - αLP) * wL
+            lpR = αLP * lpR + (1 - αLP) * wR
+        }
+        for i in 0..<n {
+            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
+            lpL = αLP * lpL + (1 - αLP) * wL
+            lpR = αLP * lpR + (1 - αLP) * wR
+            let t = Double(i) / sampleRate
+            let gust = Float(0.50 + 0.32 * sin(2 * .pi * (2.0 / 120.0) * t)
+                                   + 0.18 * sin(2 * .pi * (4.0 / 120.0) * t + 1.0))
+            L[i] = lpL * gust
+            R[i] = lpR * gust
+        }
+        norm(L, R, n: n, t: 0.70)
     }
 
     // MARK: - Brown Noise (DSP)
@@ -418,9 +586,17 @@ final class SoundscapePlayer: ObservableObject {
     private func fillBrownNoise(_ buf: AVAudioPCMBuffer) {
         let n = Int(buf.frameLength)
         let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
-        // 3-pole pink approximation for brown (extra LP pole)
         var b0L: Float=0, b1L: Float=0, b2L: Float=0
         var b0R: Float=0, b1R: Float=0, b2R: Float=0
+        // Warmup: drive filter to ergodic steady state before writing output samples.
+        // Without this, the first ~1000 samples are systematically low-amplitude
+        // (filter starting from zero), audible as a volume dip each 120s loop cycle.
+        // 2000 samples >> slowest pole time constant ≈ 877 samples (1/(1-0.99886)).
+        for _ in 0..<2000 {
+            let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
+            b0L = 0.99886*b0L + wL*0.0555179; b1L = 0.99332*b1L + wL*0.0750759; b2L = 0.96900*b2L + wL*0.1538520
+            b0R = 0.99886*b0R + wR*0.0555179; b1R = 0.99332*b1R + wR*0.0750759; b2R = 0.96900*b2R + wR*0.1538520
+        }
         for i in 0..<n {
             let wL = Float.random(in: -1...1), wR = Float.random(in: -1...1)
             b0L = 0.99886*b0L + wL*0.0555179; b1L = 0.99332*b1L + wL*0.0750759; b2L = 0.96900*b2L + wL*0.1538520
@@ -437,16 +613,13 @@ final class SoundscapePlayer: ObservableObject {
         let n = Int(buf.frameLength)
         let L = buf.floatChannelData![0], R = buf.floatChannelData![1]
         let carrier = 200.0
-        // Fade schedule baked into amplitude — user slider works on top unchanged.
         let amp = Double(0.45 * binauralFadeLevel)
-        let fadeSamples = Int(0.5 * sampleRate)
+        // No fade envelope — at 30s both carrier (200 Hz × 30 = 6000 cycles) and beat
+        // (integer Hz × 30 = integer cycles) return to phase 0. Loop is click-free.
         for i in 0..<n {
             let t = Double(i) / sampleRate
-            var env: Double = 1.0
-            if i < fadeSamples  { env = Double(i) / Double(fadeSamples) }
-            if i > n - fadeSamples { env = Double(n - i) / Double(fadeSamples) }
-            L[i] = Float(sin(2 * .pi * carrier            * t) * env * amp)
-            R[i] = Float(sin(2 * .pi * (carrier + beatHz) * t) * env * amp)
+            L[i] = Float(sin(2 * .pi * carrier            * t) * amp)
+            R[i] = Float(sin(2 * .pi * (carrier + beatHz) * t) * amp)
         }
     }
 
