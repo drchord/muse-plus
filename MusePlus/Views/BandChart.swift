@@ -4,21 +4,68 @@ import SwiftUI
 struct BandChart: View {
     let history: [BandSample]
 
+    // MARK: - Lane model
+
+    private struct Lane {
+        let band:     String
+        let greek:    String
+        let lo:       Float
+        let hi:       Float
+        let index:    Int
+        let labelHz:  Int                        // Hz at bottom boundary of this lane
+        let peak:     KeyPath<BandSample, Float> // which peak field to read
+    }
+
+    // Gamma excluded from chart — 30–50 Hz scalp signal is EMG-dominated on consumer
+    // headbands. Delta/theta/alpha/beta cover all clinically meaningful meditation signal.
+    private static let lanes: [Lane] = [
+        Lane(band: "Delta", greek: "δ", lo: 1,  hi: 4,  index: 0, labelHz: 1,  peak: \.deltaPeak),
+        Lane(band: "Theta", greek: "θ", lo: 4,  hi: 8,  index: 1, labelHz: 4,  peak: \.thetaPeak),
+        Lane(band: "Alpha", greek: "α", lo: 8,  hi: 13, index: 2, labelHz: 8,  peak: \.alphaPeak),
+        Lane(band: "Beta",  greek: "β", lo: 13, hi: 30, index: 3, labelHz: 13, peak: \.betaPeak),
+    ]
+
+    // Hz label for the top gridline (top of beta = bottom of excluded gamma)
+    private static let topBoundaryHz = 30
+
+    // Mind Monitor color scheme — keyed by band name, used by chart + header rows
+    static let colors: [String: Color] = [
+        "Delta": Color(red: 1.00, green: 0.22, blue: 0.22),
+        "Theta": Color(red: 0.72, green: 0.28, blue: 1.00),
+        "Alpha": Color(red: 0.18, green: 0.82, blue: 1.00),
+        "Beta":  Color(red: 0.38, green: 0.90, blue: 0.22),
+        "Gamma": Color(red: 1.00, green: 0.58, blue: 0.00),  // header only
+    ]
+
+    // MARK: - Chart data
+
     private struct Pt: Identifiable {
         let id: String
-        let t: Double
-        let v: Double
+        let t:  Double
+        let v:  Double   // lane-normalized coordinate, not Hz
         let band: String
     }
 
+    // Map peak Hz into a stacked-lane coordinate:
+    //   lane 0 → [0, 1)  (delta)
+    //   lane 1 → [1, 2)  (theta)
+    //   lane 2 → [2, 3)  (alpha)
+    //   lane 3 → [3, 4)  (beta)
+    // Returns nil only if hz == 0 (undetected peak — omits the point rather than
+    // drawing a misleading flat line at the lane floor).
+    private static func laneY(_ hz: Float, lane: Lane) -> Double? {
+        guard hz > 0 else { return nil }
+        let clamped = min(max(hz, lane.lo), lane.hi)
+        return Double((clamped - lane.lo) / (lane.hi - lane.lo)) + Double(lane.index)
+    }
+
     private var pts: [Pt] {
-        history.flatMap { s in [
-            Pt(id: "\(s.id)δ", t: s.time, v: Double(s.deltaPeak), band: "Delta"),
-            Pt(id: "\(s.id)θ", t: s.time, v: Double(s.thetaPeak), band: "Theta"),
-            Pt(id: "\(s.id)α", t: s.time, v: Double(s.alphaPeak), band: "Alpha"),
-            Pt(id: "\(s.id)β", t: s.time, v: Double(s.betaPeak),  band: "Beta"),
-            Pt(id: "\(s.id)γ", t: s.time, v: Double(s.gammaPeak), band: "Gamma"),
-        ]}
+        history.flatMap { s in
+            Self.lanes.compactMap { lane -> Pt? in
+                guard let v = Self.laneY(s[keyPath: lane.peak], lane: lane) else { return nil }
+                return Pt(id: "\(s.id)\(lane.greek)", t: s.time, v: v, band: lane.band)
+            }
+        }
     }
 
     private var xDomain: ClosedRange<Double> {
@@ -26,19 +73,12 @@ struct BandChart: View {
         return max(0, last.time - 60)...last.time
     }
 
-    // Mind Monitor color scheme
-    static let colors: [String: Color] = [
-        "Delta": Color(red: 1.00, green: 0.22, blue: 0.22),  // red
-        "Theta": Color(red: 0.72, green: 0.28, blue: 1.00),  // violet-purple
-        "Alpha": Color(red: 0.18, green: 0.82, blue: 1.00),  // cyan
-        "Beta":  Color(red: 0.38, green: 0.90, blue: 0.22),  // lime green
-        "Gamma": Color(red: 1.00, green: 0.58, blue: 0.00),  // orange
-    ]
+    // MARK: - Body
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
 
-            // ── Current values header ─────────────────────────────────
+            // ── Current values header ─────────────────────────────────────
             if let s = history.last {
                 VStack(alignment: .leading, spacing: 3) {
                     valueRow("Delta", greek: "δ", range: "1–4",   hz: s.deltaPeak)
@@ -52,49 +92,71 @@ struct BandChart: View {
                 .padding(.bottom, 10)
             }
 
-            // ── Chart ─────────────────────────────────────────────────
-            Chart(pts) { pt in
-                LineMark(
-                    x: .value("t", pt.t),
-                    y: .value("Hz", pt.v)
-                )
-                .foregroundStyle(by: .value("Band", pt.band))
-                .lineStyle(StrokeStyle(lineWidth: 3))
-                .interpolationMethod(.catmullRom)
+            // ── Chart (δ/θ/α/β lanes, equal vertical space per band) ────
+            Chart {
+                // Alternating lane backgrounds: subtle stripes on lanes 0 (δ) and 2 (α)
+                // so each band's lane is visually distinct without needing to read labels.
+                if let tFirst = history.first?.time, let tLast = history.last?.time {
+                    ForEach([0, 2], id: \.self) { laneIdx in
+                        RectangleMark(
+                            xStart: .value("t", tFirst),
+                            xEnd:   .value("t", tLast),
+                            yStart: .value("Band position", Double(laneIdx)),
+                            yEnd:   .value("Band position", Double(laneIdx) + 1.0)
+                        )
+                        .foregroundStyle(Color.white.opacity(0.04))
+                    }
+                }
+                // Band peak lines
+                ForEach(pts) { pt in
+                    LineMark(
+                        x: .value("t",             pt.t),
+                        y: .value("Band position", pt.v)
+                    )
+                    .foregroundStyle(by: .value("Band", pt.band))
+                    .lineStyle(StrokeStyle(lineWidth: 3))
+                    .interpolationMethod(.catmullRom)
+                }
             }
             .chartForegroundStyleScale(
-                domain: ["Delta", "Theta", "Alpha", "Beta", "Gamma"],
-                range: [
-                    Color(red: 1.00, green: 0.22, blue: 0.22),
-                    Color(red: 0.72, green: 0.28, blue: 1.00),
-                    Color(red: 0.18, green: 0.82, blue: 1.00),
-                    Color(red: 0.38, green: 0.90, blue: 0.22),
-                    Color(red: 1.00, green: 0.58, blue: 0.00),
-                ]
+                domain: Self.lanes.map(\.band),
+                range:  Self.lanes.map { Self.colors[$0.band] ?? .white }
             )
             .chartXScale(domain: xDomain)
-            .chartYScale(domain: 0.5...52.0)
+            .chartYScale(domain: -0.05...4.05)
             .chartYAxis {
-                AxisMarks(position: .trailing, values: [4.0, 8.0, 13.0, 30.0, 50.0]) { value in
+                // One gridline per lane boundary. Label: "δ 1Hz", "θ 4Hz", etc.
+                // At the top boundary (lane 4 = 30 Hz), no band name — just the Hz mark.
+                AxisMarks(position: .trailing, values: [0.0, 1.0, 2.0, 3.0, 4.0]) { value in
                     AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                        .foregroundStyle(Color.white.opacity(0.12))
-                    if let hz = value.as(Double.self) {
-                        AxisValueLabel("\(Int(hz)) Hz")
-                            .foregroundStyle(Color.white.opacity(0.35))
-                            .font(.system(size: 10))
+                        .foregroundStyle(Color.white.opacity(0.18))
+                    if let v = value.as(Double.self) {
+                        let idx = Int(v.rounded())
+                        if idx < Self.lanes.count {
+                            let lane = Self.lanes[idx]
+                            AxisValueLabel("\(lane.greek) \(lane.labelHz)Hz")
+                                .foregroundStyle(Color.white.opacity(0.45))
+                                .font(.system(size: 10))
+                        } else {
+                            AxisValueLabel("\(Self.topBoundaryHz)Hz")
+                                .foregroundStyle(Color.white.opacity(0.25))
+                                .font(.system(size: 10))
+                        }
                     }
                 }
             }
             .chartXAxis(.hidden)
             .chartLegend(.hidden)
             .chartPlotStyle { $0.background(Color.clear) }
-            .frame(height: 250)
+            .frame(height: 220)
             .padding(.horizontal, 6)
             .padding(.bottom, 10)
         }
         .background(Color(white: 0.07))
         .clipShape(RoundedRectangle(cornerRadius: 14))
     }
+
+    // MARK: - Header row
 
     @ViewBuilder
     private func valueRow(_ band: String, greek: String, range: String, hz: Float) -> some View {
