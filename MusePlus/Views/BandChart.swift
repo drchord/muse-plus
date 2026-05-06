@@ -13,11 +13,11 @@ struct BandChart: View {
 
     private var pts: [Pt] {
         history.flatMap { s in [
-            Pt(id: "\(s.id)δ", t: s.time, v: Double(s.delta), band: "Delta"),
-            Pt(id: "\(s.id)θ", t: s.time, v: Double(s.theta), band: "Theta"),
-            Pt(id: "\(s.id)α", t: s.time, v: Double(s.alpha), band: "Alpha"),
-            Pt(id: "\(s.id)β", t: s.time, v: Double(s.beta),  band: "Beta"),
-            Pt(id: "\(s.id)γ", t: s.time, v: Double(s.gamma), band: "Gamma"),
+            Pt(id: "\(s.id)δ", t: s.time, v: Double(s.deltaPeak), band: "Delta"),
+            Pt(id: "\(s.id)θ", t: s.time, v: Double(s.thetaPeak), band: "Theta"),
+            Pt(id: "\(s.id)α", t: s.time, v: Double(s.alphaPeak), band: "Alpha"),
+            Pt(id: "\(s.id)β", t: s.time, v: Double(s.betaPeak),  band: "Beta"),
+            Pt(id: "\(s.id)γ", t: s.time, v: Double(s.gammaPeak), band: "Gamma"),
         ]}
     }
 
@@ -56,7 +56,7 @@ struct BandChart: View {
             Chart(pts) { pt in
                 LineMark(
                     x: .value("t", pt.t),
-                    y: .value("log₁₀ µV²", pt.v)
+                    y: .value("Hz", pt.v)
                 )
                 .foregroundStyle(by: .value("Band", pt.band))
                 .lineStyle(StrokeStyle(lineWidth: 3))
@@ -73,14 +73,16 @@ struct BandChart: View {
                 ]
             )
             .chartXScale(domain: xDomain)
-            .chartYScale(domain: -2.5...1.5)
+            .chartYScale(domain: 0.5...52.0)
             .chartYAxis {
-                AxisMarks(position: .trailing, values: [-2, -1, 0, 1]) {
+                AxisMarks(position: .trailing, values: [4.0, 8.0, 13.0, 30.0, 50.0]) { value in
                     AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
                         .foregroundStyle(Color.white.opacity(0.12))
-                    AxisValueLabel()
-                        .foregroundStyle(Color.white.opacity(0.35))
-                        .font(.system(size: 10))
+                    if let hz = value.as(Double.self) {
+                        AxisValueLabel("\(Int(hz)) Hz")
+                            .foregroundStyle(Color.white.opacity(0.35))
+                            .font(.system(size: 10))
+                    }
                 }
             }
             .chartXAxis(.hidden)

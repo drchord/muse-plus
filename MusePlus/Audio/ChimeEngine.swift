@@ -29,14 +29,14 @@ final class ChimeEngine {
     /// Enter deep state: rich 432 Hz bowl — warm, welcoming, celebratory.
     func playEnterDeep() {
         reverb.wetDryMix = 28
-        scheduleBowl(fundamental: 432, decayRate: 0.8, duration: 4.0, amplitude: 0.32)
+        scheduleBowl(fundamental: 432, decayRate: 0.8, duration: 4.0, amplitude: 0.10, attackDuration: 0.20)
         scheduleDuck(over: 4.5)
     }
 
     /// Exit deep state: 288 Hz (perfect fifth below 432 Hz) — lower, softer acknowledgement.
     func playExitDeep() {
         reverb.wetDryMix = 22
-        scheduleBowl(fundamental: 288, decayRate: 1.4, duration: 2.5, amplitude: 0.24)
+        scheduleBowl(fundamental: 288, decayRate: 1.4, duration: 2.5, amplitude: 0.08, attackDuration: 0.15)
         scheduleDuck(over: 3.0)
     }
 
@@ -138,7 +138,8 @@ final class ChimeEngine {
 
     // MARK: - Bowl synthesis (stereo, per-partial decay, Haas)
 
-    private func scheduleBowl(fundamental: Double, decayRate: Double, duration: Double, amplitude: Double) {
+    private func scheduleBowl(fundamental: Double, decayRate: Double, duration: Double,
+                               amplitude: Double, attackDuration: Double = 0.025) {
         guard let buf = stereoBuffer(duration: duration) else { return }
         let L    = buf.floatChannelData![0]
         let R    = buf.floatChannelData![1]
@@ -151,8 +152,7 @@ final class ChimeEngine {
             (5.404, 0.20, 4.1),   // third partial
             (8.900, 0.08, 7.8),   // fourth partial — nearly gone by 0.5s
         ]
-        // 25ms linear attack to avoid click
-        let attackSamples = Int(0.025 * sampleRate)
+        let attackSamples = Int(attackDuration * sampleRate)
         for i in 0..<n {
             let tL = Double(i) / sampleRate
             let tR = Double(max(0, i - haasSamples)) / sampleRate
