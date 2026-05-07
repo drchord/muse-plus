@@ -688,7 +688,7 @@ private struct DepthGaugeView: View {
 
     private var stateText: String {
         if !isCalibrated {
-            let s = Int((1.0 - probe.depth.calibrationProgress) * DepthScore.calibrationDuration)
+            let s = Int((1.0 - Double(probe.depth.calibrationProgress)) * DepthScore.calibrationDuration)
             return "Calibrating… \(s)s"
         }
         if inDeep { return "Deep state" }
@@ -904,7 +904,7 @@ private struct SettingsSheet: View {
                     } else {
                         let calSecs = Int(DepthScore.calibrationDuration)
                         LabeledContent("Calibrating…",
-                                       value: "\(Int(probe.depth.calibrationProgress * DepthScore.calibrationDuration))s / \(calSecs)s")
+                                       value: "\(Int(Double(probe.depth.calibrationProgress) * DepthScore.calibrationDuration))s / \(calSecs)s")
                     }
                 }
                 Section("Biomarkers") {
