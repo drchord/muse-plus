@@ -39,6 +39,10 @@ struct SessionRecord: Codable, Identifiable {
     var samples:   [SessionSample]
     var episodes:  [DeepEpisode]
     var fitEvents: [Double]   // seconds from start when contact was lost
+    // Calibration baseline stored at session start — nil in sessions before Build 75.
+    // Enables offline analysis of calibration quality without re-running the scorer.
+    var calibrationIndexMean: Float? = nil
+    var calibrationIndexStd:  Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -70,13 +74,15 @@ final class SessionRecorder: ObservableObject {
 
     // MARK: - Lifecycle
 
-    func startSession() {
+    func startSession(calibrationIndexMean: Float? = nil, calibrationIndexStd: Float? = nil) {
         guard !isRecording else { return }
         let now = Date()
         current = SessionRecord(
             id:        ISO8601DateFormatter().string(from: now),
             startDate: now, endDate: nil,
-            samples: [], episodes: [], fitEvents: []
+            samples: [], episodes: [], fitEvents: [],
+            calibrationIndexMean: calibrationIndexMean,
+            calibrationIndexStd:  calibrationIndexStd
         )
         lastDeepState = false
         isRecording   = true

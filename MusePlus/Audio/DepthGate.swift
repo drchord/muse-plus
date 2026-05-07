@@ -32,6 +32,8 @@ final class DepthGate {
     private var consecutiveBelow   = 0
     private var lastEnterChime     = Date.distantPast
     private var lastExitChime      = Date.distantPast
+    // Windows elapsed since contact was lost. Used for hold-then-decay logic.
+    private var contactLossWindows = 0
 
     // Conditioning anchor state — separate from chime timing.
     private var deepStateEnteredAt:       Date = .distantPast
@@ -44,10 +46,23 @@ final class DepthGate {
 
     // Call every time a new DepthResult arrives.
     func update(_ result: DepthResult) {
-        guard result.isCalibrated, contactsGood else {
+        guard result.isCalibrated else {
             smoothedScore = 0.5
             return
         }
+
+        guard contactsGood else {
+            contactLossWindows += 1
+            // Bad contact = unknown state, not declining state.
+            // Hold last known score for 30s (60 windows × 0.5s), then decay slowly.
+            // Prevents gauge snapping to 50 on every TP9/TP10 fluctuation while
+            // still converging to neutral if contact is genuinely lost long-term.
+            if contactLossWindows > 60 {
+                smoothedScore = 0.97 * smoothedScore + 0.03 * 0.5
+            }
+            return
+        }
+        contactLossWindows = 0
 
         smoothedScore = kEmaAlpha * result.score + (1 - kEmaAlpha) * smoothedScore
 
@@ -111,6 +126,7 @@ final class DepthGate {
         deepStateEnteredAt      = .distantPast
         conditioningAnchorFired = false
         lastAnchorDate          = .distantPast
+        contactLossWindows      = 0
         // Intentionally NOT resetting enterThreshold / exitThreshold — persists across sessions.
     }
 }

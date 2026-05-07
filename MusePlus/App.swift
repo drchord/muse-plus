@@ -246,7 +246,14 @@ final class Probe: ObservableObject {
             if result.isCalibrated && !self.calibrationFiredRecording {
                 self.calibrationFiredRecording = true
                 self.recordingStartWork?.cancel()
-                let work = DispatchWorkItem { SessionRecorder.shared.startSession() }
+                let calMean = self.scorer.calibrationIndexMean
+                let calStd  = self.scorer.calibrationIndexStd
+                let work = DispatchWorkItem {
+                    SessionRecorder.shared.startSession(
+                        calibrationIndexMean: calMean,
+                        calibrationIndexStd:  calStd
+                    )
+                }
                 self.recordingStartWork = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + 300, execute: work)
             }
@@ -463,7 +470,7 @@ struct ProbeView: View {
                                showSoundscape: $showSoundscape,
                                showTimer:      $showTimer)
             } else {
-                ConnectView(probe: probe)
+                ConnectView(probe: probe, showSettings: $showSettings)
             }
         }
         .preferredColorScheme(.dark)
@@ -481,9 +488,20 @@ struct ProbeView: View {
 
 private struct ConnectView: View {
     @ObservedObject var probe: Probe
+    @Binding var showSettings: Bool
 
     var body: some View {
         VStack(spacing: 32) {
+            HStack {
+                Spacer()
+                Button { showSettings = true } label: {
+                    Image(systemName: "gear")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
             Spacer()
             Image(systemName: "brain.head.profile")
                 .font(.system(size: 72))
@@ -651,34 +669,40 @@ private struct DepthGaugeView: View {
     @State private var pulse = false
 
     private var score: Float { probe.gate.smoothedScore }
+    // Remap sigmoid [0.5, 1.0] → display [0, 1].
+    // sigmoid(z=0) = 0.5 = "at calibration baseline" → displays 0.
+    private var displayScore: Float { max(0, (score - 0.5) * 2.0) }
     private var isCalibrated: Bool { probe.depth.isCalibrated }
     private var inDeep: Bool { probe.gate.inDeepState }
+    // displayScore at which the gate fires. All state labels/colors are fractions of this
+    // so they scale correctly when enterThreshold adapts across sessions.
+    private var gdt: Float { max(0.01, (probe.gate.enterThreshold - 0.5) * 2.0) }
 
     private var gaugeColor: Color {
         if !isCalibrated { return .white.opacity(0.2) }
         if inDeep { return Color(red: 0.20, green: 0.95, blue: 0.60) }
-        if score > 0.55 { return Color(red: 0.20, green: 0.80, blue: 0.90) }
-        if score > 0.35 { return Color(red: 0.95, green: 0.75, blue: 0.20) }
+        if displayScore > 0.75 * gdt { return Color(red: 0.20, green: 0.80, blue: 0.90) }
+        if displayScore > 0.35 * gdt { return Color(red: 0.95, green: 0.75, blue: 0.20) }
         return Color(red: 0.50, green: 0.50, blue: 0.55)
     }
 
     private var stateText: String {
         if !isCalibrated {
-            let s = Int((1.0 - probe.depth.calibrationProgress) * 60)
+            let s = Int((1.0 - probe.depth.calibrationProgress) * DepthScore.calibrationDuration)
             return "Calibrating… \(s)s"
         }
         if inDeep { return "Deep state" }
-        if score > 0.65 { return "Approaching depth" }
-        if score > 0.50 { return "Deepening…" }
-        if score > 0.35 { return "Settling…" }
+        if displayScore > 0.80 * gdt { return "Approaching depth" }
+        if displayScore > 0.50 * gdt { return "Deepening…" }
+        if displayScore > 0.15 * gdt { return "Settling…" }
         return "Find your breath"
     }
 
     private var trainingHint: String {
         if !isCalibrated { return "Keep the headband still" }
         if inDeep { return "Remain… effortless awareness" }
-        if score > 0.55 { return "Let go of the breath — just observe" }
-        if score > 0.35 { return "Soften attention… anchor gently" }
+        if displayScore > 0.75 * gdt { return "Let go of the breath — just observe" }
+        if displayScore > 0.35 * gdt { return "Soften attention… anchor gently" }
         return "Notice thoughts, return to breath"
     }
 
@@ -693,12 +717,12 @@ private struct DepthGaugeView: View {
                 // Progress arc
                 Circle()
                     .trim(from: 0,
-                          to: isCalibrated ? CGFloat(score) : CGFloat(probe.depth.calibrationProgress))
+                          to: isCalibrated ? CGFloat(displayScore) : CGFloat(probe.depth.calibrationProgress))
                     .stroke(gaugeColor,
                             style: StrokeStyle(lineWidth: 14, lineCap: .round))
                     .frame(width: 240, height: 240)
                     .rotationEffect(.degrees(-90))
-                    .animation(.easeInOut(duration: 0.6), value: score)
+                    .animation(.easeInOut(duration: 0.6), value: displayScore)
                     .scaleEffect(inDeep && pulse ? 1.03 : 1.0)
                     .animation(
                         inDeep ? .easeInOut(duration: 1.8).repeatForever(autoreverses: true) : .default,
@@ -707,11 +731,11 @@ private struct DepthGaugeView: View {
                 // Center content
                 VStack(spacing: 4) {
                     if isCalibrated {
-                        Text("\(Int(score * 100))")
+                        Text("\(Int(displayScore * 100))")
                             .font(.system(size: 64, weight: .thin, design: .rounded))
                             .foregroundStyle(gaugeColor)
                             .monospacedDigit()
-                            .animation(.easeInOut(duration: 0.4), value: score)
+                            .animation(.easeInOut(duration: 0.4), value: displayScore)
                         Text("depth")
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.30))
@@ -867,10 +891,20 @@ private struct SettingsSheet: View {
                     if probe.depth.isCalibrated {
                         LabeledContent("Score",    value: String(format: "%.2f", probe.depth.score))
                         LabeledContent("Smoothed", value: String(format: "%.2f", probe.gate.smoothedScore))
+                        LabeledContent("Display",  value: String(format: "%.0f%%", max(0, (probe.gate.smoothedScore - 0.5) * 200)))
                         LabeledContent("State",    value: probe.gate.inDeepState ? "Deep" : "Shallow")
+                        if probe.scorer.calibrationIndexMean != 0 {
+                            LabeledContent("Cal. Baseline Mean",
+                                           value: String(format: "%.3f", probe.scorer.calibrationIndexMean))
+                            LabeledContent("Cal. Baseline Std",
+                                           value: String(format: "%.3f", probe.scorer.calibrationIndexStd))
+                            Text("Std < 0.10: unusually stable or artifacted. Std > 0.35: high variability — recalibrate.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     } else {
+                        let calSecs = Int(DepthScore.calibrationDuration)
                         LabeledContent("Calibrating…",
-                                       value: "\(Int(probe.depth.calibrationProgress * 60))s / 60s")
+                                       value: "\(Int(probe.depth.calibrationProgress * DepthScore.calibrationDuration))s / \(calSecs)s")
                     }
                 }
                 Section("Biomarkers") {
@@ -916,8 +950,10 @@ private struct SettingsSheet: View {
                     }
                     let thresh = UserDefaults.standard.float(forKey: "adaptiveDeepThreshold")
                     LabeledContent("Adaptive Deep Threshold",
-                                   value: thresh >= 0.40 ? String(format: "%.2f", thresh) : "Pending (need 5+ sessions with deep state)")
-                    Text("Personalizes to your 75th-percentile session mean depth (qualifying sessions only). Adapts in both directions — lower for beginners, higher for advanced meditators. Default 0.65.")
+                                   value: thresh >= 0.40
+                                       ? String(format: "%.0f%% display depth", (thresh - 0.5) * 200)
+                                       : "Pending (need 5+ sessions with deep state)")
+                    Text("Gate fires when display depth exceeds this value. Personalizes to your 75th-percentile session mean (qualifying sessions only). Default 30%.")
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("β Wander Alert", isOn: Binding(
                         get: { probe.betaCueEnabled },
