@@ -82,6 +82,19 @@ final class MuseClient: NSObject {
         muse.register(self as IXNMuseDataListener?, type: .ppg)
         muse.register(self as IXNMuseDataListener?, type: .optics)
         muse.register(self as IXNMuseDataListener?, type: .accelerometer)
+        // B77: SDK Muse Elements packets — used for cross-validation against our pipeline.
+        // Emitted at 10 Hz per Interaxon docs. Lightweight; no impact on existing handlers.
+        muse.register(self as IXNMuseDataListener?, type: .alphaAbsolute)
+        muse.register(self as IXNMuseDataListener?, type: .betaAbsolute)
+        muse.register(self as IXNMuseDataListener?, type: .thetaAbsolute)
+        muse.register(self as IXNMuseDataListener?, type: .deltaAbsolute)
+        muse.register(self as IXNMuseDataListener?, type: .gammaAbsolute)
+        muse.register(self as IXNMuseDataListener?, type: .alphaRelative)
+        muse.register(self as IXNMuseDataListener?, type: .betaRelative)
+        muse.register(self as IXNMuseDataListener?, type: .thetaRelative)
+        muse.register(self as IXNMuseDataListener?, type: .alphaScore)
+        muse.register(self as IXNMuseDataListener?, type: .betaScore)
+        muse.register(self as IXNMuseDataListener?, type: .thetaScore)
         if !preservePreset {
             presetAppliedFor   = nil
             connectedMuseModel = nil
@@ -182,6 +195,13 @@ extension MuseClient: IXNMuseDataListener {
         case .ppg:              handlePpg(p)           // heart rate — legacy Muse S/2
         case .optics:           handleOptics(p)        // heart rate + fNIRS — Athena only
         case .accelerometer:    handleAccelerometer(p) // motion artifact
+        // B77: SDK Elements — feed values to ElementsTracker. Per-channel array;
+        // ElementsTracker averages across channels. NaN values dropped per Muse docs
+        // ("transmitting nothing rather than NaN-filled packets" varies by SDK version).
+        case .alphaAbsolute, .betaAbsolute, .thetaAbsolute, .deltaAbsolute, .gammaAbsolute,
+             .alphaRelative, .betaRelative, .thetaRelative,
+             .alphaScore, .betaScore, .thetaScore:
+            ElementsTracker.shared.ingest(p.values(), type: p.packetType())
         default:                break
         }
     }

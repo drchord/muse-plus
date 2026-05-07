@@ -24,6 +24,18 @@ struct SessionSample: Codable {
     // Build 76 — HRV via AMPD on Optics7/8 (Athena only)
     var rmssd:      Float? = nil  // Root mean square of successive RR differences (ms)
     var lfhfRatio:  Float? = nil  // Sympatho-vagal balance: LF (0.04-0.15 Hz) / HF (0.15-0.40 Hz)
+    // Build 77 — full pipeline state preservation. All Optional for back-compat.
+    var meditationIndex:          Float? = nil  // raw frontal-mean idx (uncorrected)
+    var meditationIndexCorrected: Float? = nil  // aperiodic-corrected idx (B77 scoring input)
+    var depthZ:                   Float? = nil  // z-score post-clip [-3, +8]
+    var ecdfDisplay:              Float? = nil  // personal ECDF rank [0, 1]
+    var alphaRel:                 Float? = nil  // SDK relative alpha [0, 1]
+    var thetaRel:                 Float? = nil
+    var betaRel:                  Float? = nil
+    var alphaScoreSDK:            Float? = nil  // SDK Elements session score [0, 1]
+    var thetaScoreSDK:            Float? = nil
+    var betaScoreSDK:             Float? = nil
+    var phase:                    String? = nil  // "warmup" (first 300s) or "main"
 }
 
 struct DeepEpisode: Codable {
@@ -40,9 +52,12 @@ struct SessionRecord: Codable, Identifiable {
     var episodes:  [DeepEpisode]
     var fitEvents: [Double]   // seconds from start when contact was lost
     // Calibration baseline stored at session start — nil in sessions before Build 75.
-    // Enables offline analysis of calibration quality without re-running the scorer.
     var calibrationIndexMean: Float? = nil
     var calibrationIndexStd:  Float? = nil
+    // Build 77 — subjective tap-to-mark ground truth from user during session.
+    var marks: [Mark]? = nil
+    // Build version that wrote this record. Helps the ECDF rebootstrap exclude legacy data.
+    var buildTag: String? = nil  // e.g. "B77+"
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -82,21 +97,38 @@ final class SessionRecorder: ObservableObject {
             startDate: now, endDate: nil,
             samples: [], episodes: [], fitEvents: [],
             calibrationIndexMean: calibrationIndexMean,
-            calibrationIndexStd:  calibrationIndexStd
+            calibrationIndexStd:  calibrationIndexStd,
+            marks: [],
+            buildTag: "B77+"
         )
         lastDeepState = false
         isRecording   = true
     }
 
+    // Synchronous save — file is on disk before this returns.
+    // Order: stop accepting new samples → close any open episode → feed personal ECDF
+    // → atomic write to disk → refresh saved-sessions list. Any new addSample() call
+    // racing with endSession is dropped via the isRecording guard.
     @discardableResult
     func endSession() -> URL? {
         guard isRecording, var rec = current else { return nil }
+        // Stop accepting new samples FIRST so any concurrent addSample() returns immediately.
+        // (The isRecording guard at the top of addSample makes this race-safe.)
+        isRecording   = false
         rec.endDate = Date()
         if lastDeepState && !rec.episodes.isEmpty {
             let t = rec.endDate!.timeIntervalSince(rec.startDate)
             rec.episodes[rec.episodes.count - 1].exitTime = t
         }
-        isRecording   = false
+        // Feed corrected z values from main-phase samples to PersonalZDistribution.
+        // Warmup phase excluded — first 300s often noisy as user settles in.
+        let mainZs = rec.samples.compactMap { s -> Float? in
+            guard s.phase != "warmup", let z = s.depthZ, z.isFinite else { return nil }
+            return z
+        }
+        if !mainZs.isEmpty {
+            PersonalZDistribution.shared.ingestSession(zSamples: mainZs)
+        }
         current       = nil
         lastDeepState = false
         return save(rec)
@@ -108,7 +140,13 @@ final class SessionRecorder: ObservableObject {
                    delta: Float, gamma: Float, depth: Float, inDeep: Bool,
                    heartRateBPM: Float? = nil, faa: Float? = nil,
                    aperiodicSlopeMean: Float? = nil, iTPFFrontal: Float? = nil,
-                   rmssd: Float? = nil, lfhfRatio: Float? = nil) {
+                   rmssd: Float? = nil, lfhfRatio: Float? = nil,
+                   meditationIndex: Float? = nil,
+                   meditationIndexCorrected: Float? = nil,
+                   depthZ: Float? = nil, ecdfDisplay: Float? = nil,
+                   alphaRel: Float? = nil, thetaRel: Float? = nil, betaRel: Float? = nil,
+                   alphaScoreSDK: Float? = nil, thetaScoreSDK: Float? = nil,
+                   betaScoreSDK: Float? = nil, phase: String? = nil) {
         guard isRecording, var rec = current else { return }
         let t = Date().timeIntervalSince(rec.startDate)
         var sample = SessionSample(
@@ -119,6 +157,17 @@ final class SessionRecorder: ObservableObject {
         )
         sample.rmssd     = rmssd
         sample.lfhfRatio = lfhfRatio
+        sample.meditationIndex          = meditationIndex
+        sample.meditationIndexCorrected = meditationIndexCorrected
+        sample.depthZ        = depthZ
+        sample.ecdfDisplay   = ecdfDisplay
+        sample.alphaRel      = alphaRel
+        sample.thetaRel      = thetaRel
+        sample.betaRel       = betaRel
+        sample.alphaScoreSDK = alphaScoreSDK
+        sample.thetaScoreSDK = thetaScoreSDK
+        sample.betaScoreSDK  = betaScoreSDK
+        sample.phase         = phase
         rec.samples.append(sample)
         if inDeep && !lastDeepState {
             rec.episodes.append(DeepEpisode(enterTime: t, exitTime: nil))
@@ -127,6 +176,13 @@ final class SessionRecorder: ObservableObject {
         }
         lastDeepState = inDeep
         current       = rec
+    }
+
+    func addMark(_ mark: Mark) {
+        guard isRecording, var rec = current else { return }
+        if rec.marks == nil { rec.marks = [] }
+        rec.marks?.append(mark)
+        current = rec
     }
 
     func addFitEvent() {
@@ -162,10 +218,19 @@ final class SessionRecorder: ObservableObject {
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
         enc.outputFormatting     = .prettyPrinted
-        guard let data = try? enc.encode(rec) else { return nil }
-        try? data.write(to: url)
-        loadSavedSessions()
-        return url
+
+        do {
+            let data = try enc.encode(rec)
+            // Atomic write: writes to a temp file then renames into place. Crash-safe —
+            // either the old file remains intact or the new file is fully written.
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            loadSavedSessions()
+            print("[SessionRecorder] saved \(data.count) B to \(name)")
+            return url
+        } catch {
+            print("[SessionRecorder] SAVE FAILED for \(name): \(error)")
+            return nil
+        }
     }
 
     private func sessionsDir() -> URL {

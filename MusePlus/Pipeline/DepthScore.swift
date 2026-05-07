@@ -47,11 +47,34 @@ final class DepthScore {
         calibrationBetaStd     = 0.30
     }
 
-    func process(_ powers: [BandPowers]) {
+    func process(_ powers: [BandPowers], correctedPowers: [BandPowers]? = nil) {
         let frontal = powers.filter { DepthScore.frontalChannels.contains($0.channel) }
         guard !frontal.isEmpty else { return }
 
-        let idx = frontal.map(\.meditationIndex).reduce(0, +) / Float(frontal.count)
+        // Raw uncorrected index (legacy / diagnostic).
+        let idxRaw = frontal.map(\.meditationIndex).reduce(0, +) / Float(frontal.count)
+
+        // Aperiodic-corrected index when available (B77+). Falls back to raw if R²<0.85
+        // gate upstream returned nil (correctedPowers == nil) or chi unavailable.
+        // Donoghue 2020: 1/f-corrected band power isolates true oscillatory contribution
+        // above the broadband aperiodic floor.
+        let idxCorrected: Float
+        if let cp = correctedPowers {
+            let cf = cp.filter { DepthScore.frontalChannels.contains($0.channel) }
+            idxCorrected = cf.isEmpty ? idxRaw
+                : cf.map(\.meditationIndex).reduce(0, +) / Float(cf.count)
+        } else {
+            idxCorrected = idxRaw
+        }
+
+        // Aperiodic correction toggle — ON by default. The correction's global shift in
+        // idx (≈chi * log10((α_f*θ_f)/β_f²) ≈ -1.2 with chi=-1.5) cancels in the z-score
+        // since calibration baseline shifts by the same amount. But: chi may change with
+        // depth, amplifying within-session z gap. Personal ECDF renormalizes this in the
+        // modern track (after 3 sessions). For users whose first B77 session saturates,
+        // toggle this OFF in Settings to scoring against raw idx.
+        let useCorrection = UserDefaults.standard.object(forKey: "aperiodicCorrectionEnabled") as? Bool ?? true
+        let idx = useCorrection ? idxCorrected : idxRaw
 
         let af7Alpha = powers.first(where: { $0.channel == 1 })?.alpha ?? 0
         let af8Alpha = powers.first(where: { $0.channel == 2 })?.alpha ?? 0
@@ -60,19 +83,18 @@ final class DepthScore {
         let progress = calibrationProgress
 
         if !isCalibrated {
-            // Always accumulate all samples for fallback.
             calibrationAllSamples.append(idx)
-            // Discard first half of the calibration window (first 30s of 60s).
-            // Time-based: robust at any band-powers delivery rate, unlike count-based.
-            // Alpha/theta stabilise within ~30s of eyes-closed rest (Oken et al. 2006);
-            // early samples carry elevated beta from headband adjustment, biasing z positive.
+            // Discard first 30s of 60s calibration. Alpha/theta stabilise within ~30s of
+            // eyes-closed rest (Oken et al. 2006); early samples carry elevated beta from
+            // headband adjustment, biasing z positive.
             if progress >= 0.5 {
                 calibrationSamples.append(idx)
                 let frontalBeta = frontal.map(\.beta).reduce(0, +) / Float(frontal.count)
                 calibrationBetaSamplesInternal.append(frontalBeta)
             }
-            onResult?(DepthResult(score: 0.5, isCalibrated: false,
-                                  calibrationProgress: progress, faa: faa))
+            onResult?(DepthResult(score: 0.5, z: 0, meditationIndex: idxRaw,
+                                  meditationIndexCorrected: idxCorrected,
+                                  isCalibrated: false, calibrationProgress: progress, faa: faa))
             return
         }
 
@@ -80,16 +102,16 @@ final class DepthScore {
             finalizeBaseline()
         }
 
-        // Floor z at -3: prevents noise artifacts mapping to near-zero score.
-        // No upper clip: sigmoid is asymptotically bounded at 1.0; removing the +3 clip
-        // restores resolution for the 38% of real-session samples that were saturating
-        // at sigmoid(3)=0.9526, making the entire upper range visually indistinguishable.
-        // baselineStd floored to 0.01 as safety net only — real floor in finalizeBaseline().
-        let z = max(-3.0, (idx - baselineMean) / max(baselineStd, 0.01))
-        let score = sigmoid(z)
+        // Z-clip [-3, +8]. Lower clip prevents noise artifacts from over-suppressing.
+        // Upper +8 restored in B77 — was removed in B75 but caused unbounded sigmoid
+        // saturation. +8 is well above any plausible physiological signal (B76 p99=7.81).
+        // Personal ECDF saturates near +7 anyway so clip at +8 is functionally invisible.
+        let z = max(-3.0, min(8.0, (idx - baselineMean) / max(baselineStd, 0.01)))
+        let score = sigmoid(z)  // legacy field; ECDF display uses z directly via PersonalZDistribution
 
-        onResult?(DepthResult(score: score, isCalibrated: true,
-                              calibrationProgress: 1.0, faa: faa))
+        onResult?(DepthResult(score: score, z: z, meditationIndex: idxRaw,
+                              meditationIndexCorrected: idxCorrected,
+                              isCalibrated: true, calibrationProgress: 1.0, faa: faa))
     }
 
     private func finalizeBaseline() {

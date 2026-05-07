@@ -14,10 +14,14 @@ final class EEGPipeline {
     private var activeChannelCount = 0
 
     // Band powers for all active channels. Consumers filter by channel index.
-    var onBandPowers: (([BandPowers]) -> Void)?
+    // B77: signature now passes corrected powers as second argument; nil when R²<0.85.
+    var onBandPowers: (([BandPowers], [BandPowers]?) -> Void)?
 
     // Aperiodic slope: mean chi across canonical EEG1-4 (nil when R² < 0.85).
     var onAperiodicUpdate: ((Float?) -> Void)?
+
+    // Full aperiodic fit (chi + offset + R²) — nil when R²<0.85. Used by AperiodicCorrection.
+    var onAperiodicFitUpdate: ((AperiodicResult?) -> Void)?
 
     // Individual theta peak frequency in Hz (nil until reliability gate: ≥3 sessions, ≥10 min clean).
     var onITPFUpdate: ((Float?) -> Void)?
@@ -29,6 +33,12 @@ final class EEGPipeline {
     private var suppressWindows = 0
 
     let iTPFTracker = ITPFTracker()
+
+    // Cached last good aperiodic fit. IRASA on noisy windows (artifacts, motion) frequently
+    // fails the R²≥0.85 gate. Aperiodic parameters change slowly (timescale of minutes) so
+    // a fit from 2-5 seconds ago is still valid for the current band-power correction.
+    // Cache invalidated only on session reset to avoid stale values across sessions.
+    private var lastGoodAperiodicFit: AperiodicResult? = nil
 
     init() {
         let n = EEGPipeline.windowSize
@@ -70,19 +80,41 @@ final class EEGPipeline {
             allPSDs.append(psd)
         }
 
-        onBandPowers?(allPowers)
-
-        // IRASA: canonical channels 0-3 only (EEG1-4)
-        let chiValues = (0..<min(4, allPSDs.count)).compactMap { ch -> Float? in
+        // IRASA: canonical channels 0-3 only (EEG1-4). Compute fits, gather mean fit
+        // params for aperiodic correction (mean chi/offset across channels passing R² gate).
+        var fitChis = [Float]()
+        var fitOffsets = [Float]()
+        var fitR2s = [Float]()
+        for ch in 0..<min(4, allPSDs.count) {
             guard let r = AperiodicSlope.fit(psd: allPSDs[ch],
                                               sampleRate: EEGPipeline.sampleRate,
                                               windowSize: EEGPipeline.windowSize),
-                  r.r2 >= AperiodicSlope.r2Threshold else { return nil }
-            return r.chi
+                  r.r2 >= AperiodicSlope.r2Threshold else { continue }
+            fitChis.append(r.chi)
+            fitOffsets.append(r.offset)
+            fitR2s.append(r.r2)
         }
-        let meanChi: Float? = chiValues.isEmpty ? nil
-            : chiValues.reduce(0, +) / Float(chiValues.count)
+        let meanChi: Float? = fitChis.isEmpty ? nil
+            : fitChis.reduce(0, +) / Float(fitChis.count)
+        let meanFit: AperiodicResult? = fitChis.isEmpty ? nil : AperiodicResult(
+            chi:    fitChis.reduce(0, +)    / Float(fitChis.count),
+            offset: fitOffsets.reduce(0, +) / Float(fitOffsets.count),
+            r2:     fitR2s.reduce(0, +)     / Float(fitR2s.count)
+        )
+        // Update cache when current window passed R² gate.
+        if let mf = meanFit { lastGoodAperiodicFit = mf }
+
         onAperiodicUpdate?(meanChi)
+        onAperiodicFitUpdate?(meanFit)
+
+        // Aperiodic-corrected band powers via Donoghue/Voytek/Knight 2020 specparam
+        // approach (1/f subtracted at each band's geometric-mean frequency).
+        // Falls back to last good fit when current window failed R² gate; nil only when
+        // session has not yet produced any good fit (first ~5s after connect/calibration).
+        let correctionFit = meanFit ?? lastGoodAperiodicFit
+        let correctedPowers: [BandPowers]? = (correctionFit == nil) ? nil :
+            AperiodicCorrection.correct(allPowers, aperiodic: correctionFit)
+        onBandPowers?(allPowers, correctedPowers)
 
         // iTPF: frontal channels index 1 (AF7) and 2 (AF8)
         if allPSDs.count > 2 {
@@ -98,6 +130,7 @@ final class EEGPipeline {
     // Called on session end — persists Kalman state and adapts process noise.
     func endSession() {
         iTPFTracker.endSession()
+        lastGoodAperiodicFit = nil  // don't carry stale fit across sessions
     }
 
     // MARK: - FFT

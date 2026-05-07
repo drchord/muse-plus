@@ -20,56 +20,99 @@ private let kAnchorDelay: TimeInterval  = 20.0
 // avoids flooding within a single multi-entry session (max ~4 anchors per 20-min session).
 private let kAnchorCooldown: TimeInterval = 300.0
 
+// Anchor crossing threshold: re-fires when display ECDF rank crosses INTO the top 10%
+// of personal history. Allows multiple Pavlovian-conditioning trials per session for users
+// who maintain deep state continuously (rather than the B76 degenerate single-fire behavior
+// where 100% inDeep produced exactly one anchor for the entire 56-min session).
+private let kAnchorEcdfThreshold: Float = 0.90
+
+// B77: "going deeper" gentle chime — fires when within-deep ECDF display rises by
+// kDeepeningDelta or more over kDeepeningWindow seconds. Cooldown kDeepeningCooldown
+// prevents over-firing during sustained ascents.
+//
+// Why rate-based instead of threshold-based: for a user pegged near 1.0 ECDF the entire
+// session, no absolute threshold can distinguish "going deeper" from "already deep."
+// Tracking rate-of-change over a 30s window detects relative ascents within the deep band.
+//
+// Threshold value 0.08: empirically a meaningful display jump (~8 percentile points).
+// Larger would miss subtle deepenings; smaller would fire on noise.
+private let kDeepeningWindow: Int     = 60     // 60 windows × 0.5s = 30s rolling
+private let kDeepeningDelta: Float    = 0.08
+private let kDeepeningCooldown: TimeInterval = 60.0
+
 final class DepthGate {
     private(set) var inDeepState   = false
-    private(set) var smoothedScore: Float = 0.5
+    private(set) var smoothedScore: Float = 0.5      // legacy sigmoid-space; still used by some UI
+    private(set) var smoothedDisplay: Float = 0.0    // B77: ECDF display, [0, 1]
 
-    // Adaptive thresholds: default population values; overwritten by Probe after 5+ sessions.
-    var enterThreshold: Float = 0.65
+    // Adaptive thresholds in ECDF space (B77+). Default 0.70 = enter when in top 30% of
+    // personal history; 0.50 = exit when at or below personal median.
+    // Bounds [0.50, 0.85]: lower extends sensitivity for new users; upper challenges advanced.
+    var enterThresholdEcdf: Float = 0.70
+    var exitThresholdEcdf:  Float = 0.50
+
+    // Legacy sigmoid-space mirrors used by some persisted UserDefaults paths and adaptive
+    // analytics. Keep synced via setEcdfThresholds() so all code reads consistent values.
+    var enterThreshold: Float = 0.70
     var exitThreshold:  Float = 0.50
 
     private var consecutiveAbove   = 0
     private var consecutiveBelow   = 0
     private var lastEnterChime     = Date.distantPast
     private var lastExitChime      = Date.distantPast
-    // Windows elapsed since contact was lost. Used for hold-then-decay logic.
     private var contactLossWindows = 0
 
-    // Conditioning anchor state — separate from chime timing.
-    private var deepStateEnteredAt:       Date = .distantPast
-    private var conditioningAnchorFired          = false
-    private var lastAnchorDate:           Date = .distantPast
+    // Anchor state — re-fires on entering top-10% of personal ECDF (vs B76 single-fire-per-episode).
+    private var deepStateEnteredAt:    Date = .distantPast
+    private var lastAnchorDate:        Date = .distantPast
+    private var lastAnchorAboveTop:    Bool = false  // for crossing detection
+
+    // Deepening cue rolling-window state. Pre-allocated 60-slot ring buffer for the past
+    // 30s of smoothedDisplay values; current minus oldest = 30s rate.
+    private var deepeningRing      = [Float](repeating: 0, count: kDeepeningWindow)
+    private var deepeningRingHead  = 0
+    private var deepeningRingFilled = 0
+    private var lastDeepeningCue:  Date = .distantPast
 
     private let chime = ChimeEngine.shared
+    private let zDist = PersonalZDistribution.shared
 
-    var contactsGood: Bool = true   // set by Probe on every fit-check update
+    var contactsGood: Bool = true
 
-    // Call every time a new DepthResult arrives.
+    func setEcdfThresholds(enter: Float, exit: Float) {
+        enterThresholdEcdf = max(0.50, min(0.85, enter))
+        exitThresholdEcdf  = max(0.40, min(enterThresholdEcdf - 0.10, exit))
+        enterThreshold = enterThresholdEcdf
+        exitThreshold  = exitThresholdEcdf
+    }
+
     func update(_ result: DepthResult) {
         guard result.isCalibrated else {
-            smoothedScore = 0.5
+            smoothedScore   = 0.5
+            smoothedDisplay = 0.0
             return
         }
 
         guard contactsGood else {
             contactLossWindows += 1
-            // Bad contact = unknown state, not declining state.
-            // Hold last known score for 30s (60 windows × 0.5s), then decay slowly.
-            // Prevents gauge snapping to 50 on every TP9/TP10 fluctuation while
-            // still converging to neutral if contact is genuinely lost long-term.
+            // Bad contact = unknown state. Hold 30s (60 windows × 0.5s), then slow decay.
             if contactLossWindows > 60 {
-                smoothedScore = 0.97 * smoothedScore + 0.03 * 0.5
+                smoothedScore   = 0.97 * smoothedScore   + 0.03 * 0.5
+                smoothedDisplay = 0.97 * smoothedDisplay + 0.03 * 0.5
             }
             return
         }
         contactLossWindows = 0
 
-        smoothedScore = kEmaAlpha * result.score + (1 - kEmaAlpha) * smoothedScore
+        // EMA on raw sigmoid score (legacy) and ECDF display (B77+).
+        smoothedScore   = kEmaAlpha * result.score          + (1 - kEmaAlpha) * smoothedScore
+        let displayNow  = zDist.ecdf(result.z)
+        smoothedDisplay = kEmaAlpha * displayNow            + (1 - kEmaAlpha) * smoothedDisplay
 
         let now = Date()
 
         if !inDeepState {
-            if smoothedScore >= enterThreshold {
+            if smoothedDisplay >= enterThresholdEcdf {
                 consecutiveAbove += 1
                 consecutiveBelow  = 0
             } else {
@@ -78,28 +121,46 @@ final class DepthGate {
 
             if consecutiveAbove >= kEnterSustained,
                now.timeIntervalSince(lastEnterChime) >= kCooldown {
-                inDeepState           = true
-                consecutiveAbove      = 0
-                lastEnterChime        = now
-                deepStateEnteredAt    = now
-                conditioningAnchorFired = false
+                inDeepState        = true
+                consecutiveAbove   = 0
+                lastEnterChime     = now
+                deepStateEnteredAt = now
+                lastAnchorAboveTop = false
                 chime.playEnterDeep()
             }
-
         } else {
-            // Conditioning anchor: fires kAnchorDelay after entering deep, once per episode,
-            // with kAnchorCooldown between any two anchors. Plays a 7 Hz binaural theta tone
-            // that acts as a Pavlovian state anchor — the brain learns to associate the sound
-            // with this exact state, speeding induction in future sessions.
-            if !conditioningAnchorFired,
+            // Anchor re-fire on crossing into top-10% personal ECDF, with kAnchorCooldown
+            // between any two firings. Up to ~12 anchors per hour-long session, contingent
+            // on real depth excursions.
+            let aboveTop = smoothedDisplay >= kAnchorEcdfThreshold
+            let crossed  = aboveTop && !lastAnchorAboveTop
+            if crossed,
                now.timeIntervalSince(deepStateEnteredAt) >= kAnchorDelay,
-               now.timeIntervalSince(lastAnchorDate) >= kAnchorCooldown {
-                conditioningAnchorFired = true
-                lastAnchorDate          = now
+               now.timeIntervalSince(lastAnchorDate)     >= kAnchorCooldown {
+                lastAnchorDate = now
                 chime.playConditioningAnchor()
             }
+            lastAnchorAboveTop = aboveTop
 
-            if smoothedScore < exitThreshold {
+            // Deepening cue: 30s rolling window rate-of-change. Captures "going deeper"
+            // even when the user is already pegged in deep — addresses B76's "no
+            // increment chimes" feedback. Ring buffer: write current, compute rate from
+            // oldest before write, then advance head.
+            let oldestIdx = (deepeningRingHead + 1) % kDeepeningWindow
+            let oldestVal = deepeningRing[oldestIdx]
+            deepeningRing[deepeningRingHead] = smoothedDisplay
+            deepeningRingHead = oldestIdx
+            deepeningRingFilled = min(deepeningRingFilled + 1, kDeepeningWindow)
+            if deepeningRingFilled >= kDeepeningWindow {
+                let rise = smoothedDisplay - oldestVal
+                if rise >= kDeepeningDelta,
+                   now.timeIntervalSince(lastDeepeningCue) >= kDeepeningCooldown {
+                    lastDeepeningCue = now
+                    chime.playDeepening()
+                }
+            }
+
+            if smoothedDisplay < exitThresholdEcdf {
                 consecutiveBelow += 1
                 consecutiveAbove  = 0
             } else {
@@ -117,16 +178,21 @@ final class DepthGate {
     }
 
     func reset() {
-        inDeepState             = false
-        smoothedScore           = 0.5
-        consecutiveAbove        = 0
-        consecutiveBelow        = 0
-        lastEnterChime          = .distantPast
-        lastExitChime           = .distantPast
-        deepStateEnteredAt      = .distantPast
-        conditioningAnchorFired = false
-        lastAnchorDate          = .distantPast
-        contactLossWindows      = 0
-        // Intentionally NOT resetting enterThreshold / exitThreshold — persists across sessions.
+        inDeepState        = false
+        smoothedScore      = 0.5
+        smoothedDisplay    = 0.0
+        consecutiveAbove   = 0
+        consecutiveBelow   = 0
+        lastEnterChime     = .distantPast
+        lastExitChime      = .distantPast
+        deepStateEnteredAt = .distantPast
+        lastAnchorDate     = .distantPast
+        lastAnchorAboveTop = false
+        contactLossWindows = 0
+        deepeningRing      = [Float](repeating: 0, count: kDeepeningWindow)
+        deepeningRingHead  = 0
+        deepeningRingFilled = 0
+        lastDeepeningCue   = .distantPast
+        // Thresholds persist across sessions.
     }
 }

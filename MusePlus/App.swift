@@ -34,7 +34,14 @@ final class Probe: ObservableObject {
     @Published var frontBeta:  Float = 0
     @Published var frontDelta: Float = 0
     @Published var frontGamma: Float = 0
-    @Published var depth: DepthResult = DepthResult(score: 0.5, isCalibrated: false, calibrationProgress: 0, faa: 0)
+    @Published var depth: DepthResult = DepthResult(score: 0.5, z: 0, meditationIndex: 0,
+                                                     meditationIndexCorrected: 0,
+                                                     isCalibrated: false,
+                                                     calibrationProgress: 0, faa: 0)
+    // B77: subjective tap-to-mark collector. Cleared on session start.
+    @Published var marks = MarkCollector()
+    // B77: SDK Elements tracker for cross-validation against our pipeline.
+    @ObservedObject var elements = ElementsTracker.shared
     @Published var bandUpdateCount: Int = 0
     @Published var bandHistory: [BandSample] = []
     @Published var heartRate: Double = 0
@@ -54,10 +61,14 @@ final class Probe: ObservableObject {
     private var reconnectAttempts = 0
     // Session summary shown after disconnect if session was recorded.
     @Published var sessionSummary: SessionRecord? = nil
-    // Deferred recording: fires 300s after calibration completes (not after connect).
-    private var recordingStartWork: DispatchWorkItem?
-    // True once the 300s recording work item has been scheduled this connection.
+    // B76 had a 300s recording delay after calibration; B77 records from calibration end and
+    // tags first 300s as "warmup" instead. No data loss; analysis can still filter warmup.
+    private var recordingStartWork: DispatchWorkItem?  // legacy field; kept to avoid wider refactor
     private var calibrationFiredRecording = false
+    // Wall-clock time when SessionRecorder.startSession was called this connection.
+    private var recordingStartedAt: Date? = nil
+    // Read-only access for views that need session-relative timestamps for tap-to-mark.
+    var recordingStartedAtForUI: Date? { recordingStartedAt }
     // Last time the beta-wander cue fired — 30s minimum gap.
     private var lastBetaCueDate = Date.distantPast
 
@@ -92,15 +103,17 @@ final class Probe: ObservableObject {
                     self?.bandHistory  = []
                     self?.reconnectAttempts = 0
                     self?.sessionSummary = nil
-                    // Recording scheduled in scorer.onResult after calibration + 300s grace.
+                    // Recording starts at calibration completion (B77: no 300s delay; warmup tag).
                     self?.calibrationFiredRecording = false
                     self?.recordingStartWork?.cancel()
+                    self?.recordingStartedAt = nil
                     self?.lastBetaCueDate = .distantPast
                 case .disconnected:
                     UIApplication.shared.isIdleTimerDisabled = false
                     self?.calibrationFiredRecording = false
                     self?.recordingStartWork?.cancel()
                     self?.recordingStartWork = nil
+                    self?.recordingStartedAt = nil
                     let recUrl = SessionRecorder.shared.endSession()
                     self?.pipeline.endSession()
                     self?.hrv.reset()
@@ -170,7 +183,7 @@ final class Probe: ObservableObject {
             }
             .store(in: &bag)
 
-        pipeline.onBandPowers = { [weak self] powers in
+        pipeline.onBandPowers = { [weak self] powers, correctedPowers in
             guard let self else { return }
             let frontal = powers.filter { [1, 2].contains($0.channel) }
             if !frontal.isEmpty {
@@ -206,7 +219,7 @@ final class Probe: ObservableObject {
                 self.bandHistory.append(sample)
                 if self.bandHistory.count > 120 { self.bandHistory.removeFirst() }
             }
-            self.scorer.process(powers)
+            self.scorer.process(powers, correctedPowers: correctedPowers)
             // Beta wander alert: fires when frontal beta is >1.5 SD above resting baseline
             // AND depth is shallow (<0.3). Trains awareness of mind-wandering without jarring
             // the session — uses additive log threshold since frontBeta is in log10 µV².
@@ -221,7 +234,13 @@ final class Probe: ObservableObject {
                     }
                 }
             }
-            // Record after scorer.process so depth reflects current frame
+            // Record after scorer.process so depth reflects current frame.
+            // B77: warmup phase = first 300s post-calibration. Tagged but no longer skipped.
+            let phase: String? = {
+                guard let started = self.recordingStartedAt else { return nil }
+                return Date().timeIntervalSince(started) < 300 ? "warmup" : "main"
+            }()
+            let elem = self.elements.values
             SessionRecorder.shared.addSample(
                 alpha: self.frontAlpha, theta: self.frontTheta,
                 beta:  self.frontBeta,  delta: self.frontDelta,
@@ -232,7 +251,18 @@ final class Probe: ObservableObject {
                 aperiodicSlopeMean: self.aperiodicSlope,
                 iTPFFrontal: self.iTPFFrontal,
                 rmssd: self.rmssd,
-                lfhfRatio: self.lfhfRatio
+                lfhfRatio: self.lfhfRatio,
+                meditationIndex:          self.depth.meditationIndex,
+                meditationIndexCorrected: self.depth.meditationIndexCorrected,
+                depthZ:        self.depth.z,
+                ecdfDisplay:   self.gate.smoothedDisplay,
+                alphaRel:      elem.alphaRelative.isFinite ? elem.alphaRelative : nil,
+                thetaRel:      elem.thetaRelative.isFinite ? elem.thetaRelative : nil,
+                betaRel:       elem.betaRelative.isFinite  ? elem.betaRelative  : nil,
+                alphaScoreSDK: elem.alphaScore.isFinite    ? elem.alphaScore    : nil,
+                thetaScoreSDK: elem.thetaScore.isFinite    ? elem.thetaScore    : nil,
+                betaScoreSDK:  elem.betaScore.isFinite     ? elem.betaScore     : nil,
+                phase:         phase
             )
         }
 
@@ -241,27 +271,27 @@ final class Probe: ObservableObject {
             self.depth = result
             self.gate.update(result)
             SoundscapePlayer.shared.updateAdaptiveDepth(result.score, iTPF: self.iTPFFrontal)
-            // First calibration completion this connection — schedule recording 300s from now.
-            // 300s grace period: brain noisy in early meditation minutes; only record settled state.
+            // B77: record from calibration end (no 300s delay). First 300s tagged "warmup"
+            // in addSample so analysis can still filter, but data is preserved.
             if result.isCalibrated && !self.calibrationFiredRecording {
                 self.calibrationFiredRecording = true
                 self.recordingStartWork?.cancel()
-                let calMean = self.scorer.calibrationIndexMean
-                let calStd  = self.scorer.calibrationIndexStd
-                let work = DispatchWorkItem {
-                    SessionRecorder.shared.startSession(
-                        calibrationIndexMean: calMean,
-                        calibrationIndexStd:  calStd
-                    )
-                }
-                self.recordingStartWork = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 300, execute: work)
+                self.recordingStartedAt = Date()
+                self.marks.reset()
+                ElementsTracker.shared.reset()
+                SessionRecorder.shared.startSession(
+                    calibrationIndexMean: self.scorer.calibrationIndexMean,
+                    calibrationIndexStd:  self.scorer.calibrationIndexStd
+                )
             }
         }
 
         pipeline.onAperiodicUpdate = { [weak self] chi in
             DispatchQueue.main.async { self?.aperiodicSlope = chi }
         }
+
+        // onAperiodicFitUpdate: full fit (chi+offset+R²) used internally by EEGPipeline
+        // to drive AperiodicCorrection. Probe doesn't need to consume it directly.
 
         pipeline.onITPFUpdate = { [weak self] iTPF in
             DispatchQueue.main.async { self?.iTPFFrontal = iTPF }
@@ -330,11 +360,15 @@ final class Probe: ObservableObject {
             client.connect(to: m)
             scorer.startCalibration()
             gate.reset()
-            // Restore previously computed adaptive threshold (computed after prior sessions).
-            let saved = UserDefaults.standard.float(forKey: "adaptiveDeepThreshold")
-            if saved >= 0.40 {
-                gate.enterThreshold = saved
-                gate.exitThreshold  = max(0.28, saved - 0.12)
+            // B77: restore ECDF-space adaptive thresholds. Old "adaptiveDeepThreshold" key
+            // stored sigmoid-space value; ignored after migration. New keys:
+            // adaptiveEnterEcdf / adaptiveExitEcdf in [0.50, 0.85] / [0.40, 0.75].
+            let savedEnter = UserDefaults.standard.float(forKey: "adaptiveEnterEcdf")
+            let savedExit  = UserDefaults.standard.float(forKey: "adaptiveExitEcdf")
+            if savedEnter >= 0.50 && savedExit >= 0.40 {
+                gate.setEcdfThresholds(enter: savedEnter, exit: savedExit)
+            } else {
+                gate.setEcdfThresholds(enter: 0.70, exit: 0.50)  // defaults
             }
         }
     }
@@ -368,14 +402,29 @@ final class Probe: ObservableObject {
                 if let lat = rec.episodes.first?.enterTime { latencies.append(lat) }
             }
 
-            // 1. Adaptive threshold (≥5 qualifying sessions required for statistical stability)
-            var newThreshold: Float? = nil
+            // 1. Adaptive ECDF-space threshold. Computes 75th pct of per-session mean ECDF
+            // displays. With ECDF normalization the cross-session distribution is roughly
+            // uniform, so 75th-pct of session means falls in [0.55, 0.80] range; enforce
+            // [0.50, 0.85] to keep meaningful gate behavior.
+            // Loads ecdfDisplay (B77+) when present; falls back to (depth-0.5)*2 for old
+            // sessions so users with mixed history still get adaptation.
+            var newEnterEcdf: Float? = nil
             if sessionMeans.count >= 5 {
-                let sorted = sessionMeans.sorted()
-                let p75    = sorted[min(Int(Double(sorted.count) * 0.75), sorted.count - 1)]
-                // [0.40, 0.85]: lower bound helps beginners see feedback; upper bound challenges advanced.
-                // Adapts BIDIRECTIONALLY — first session to compute this may lower OR raise the default.
-                newThreshold = max(0.40, min(0.85, p75))
+                var ecdfMeans: [Float] = []
+                for url in allUrls.prefix(30) {
+                    guard let data = try? Data(contentsOf: url),
+                          let rec = try? dec.decode(SessionRecord.self, from: data),
+                          !rec.episodes.isEmpty else { continue }
+                    let ecdfs = rec.samples.compactMap { $0.ecdfDisplay
+                        ?? max(0, ($0.depth - 0.5) * 2.0) }
+                    guard !ecdfs.isEmpty else { continue }
+                    ecdfMeans.append(ecdfs.reduce(0, +) / Float(ecdfs.count))
+                }
+                if ecdfMeans.count >= 5 {
+                    let sorted = ecdfMeans.sorted()
+                    let p75 = sorted[min(Int(Double(sorted.count) * 0.75), sorted.count - 1)]
+                    newEnterEcdf = max(0.50, min(0.85, p75))
+                }
             }
 
             // 2. Historical induction latency: exclude current session (latencies[0]) for fair comparison.
@@ -390,10 +439,11 @@ final class Probe: ObservableObject {
             let streak = Self.computeStreak(from: allUrls)
 
             DispatchQueue.main.async {
-                if let t = newThreshold {
-                    self.gate.enterThreshold = t
-                    self.gate.exitThreshold  = max(0.28, t - 0.12)
-                    UserDefaults.standard.set(t, forKey: "adaptiveDeepThreshold")
+                if let t = newEnterEcdf {
+                    let ex = max(0.40, t - 0.20)
+                    self.gate.setEcdfThresholds(enter: t, exit: ex)
+                    UserDefaults.standard.set(t,  forKey: "adaptiveEnterEcdf")
+                    UserDefaults.standard.set(ex, forKey: "adaptiveExitEcdf")
                 }
                 if let avg = avgLatency {
                     UserDefaults.standard.set(avg, forKey: "avgInductionLatency")
@@ -601,12 +651,29 @@ private struct MeditationView: View {
             .padding(.top, 12)
             .padding(.bottom, 8)
 
+            // B77: live SDK Elements diagnostic strip — exposes the components hidden behind
+            // the unified depth score. Mellow/Concentration discontinued in 2016 because
+            // unified scores were inaccurate; component visibility prevents that failure mode.
+            if probe.depth.isCalibrated {
+                ElementsStripView(probe: probe)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 4)
+            }
+
             Spacer(minLength: 0)
 
             // Hero depth gauge
             DepthGaugeView(probe: probe)
 
             Spacer(minLength: 8)
+
+            // B77: subjective tap-to-mark — user is the only ground truth. Marks compared
+            // against gauge in session summary; <70% agreement triggers recalibration prompt.
+            if probe.depth.isCalibrated && SessionRecorder.shared.isRecording {
+                MarksRowView(probe: probe)
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 6)
+            }
 
             // FAA bar (after calibration)
             if probe.depth.isCalibrated && probe.depth.faa != 0 {
@@ -668,15 +735,15 @@ private struct DepthGaugeView: View {
     @ObservedObject var probe: Probe
     @State private var pulse = false
 
-    private var score: Float { probe.gate.smoothedScore }
-    // Remap sigmoid [0.5, 1.0] → display [0, 1].
-    // sigmoid(z=0) = 0.5 = "at calibration baseline" → displays 0.
-    private var displayScore: Float { max(0, (score - 0.5) * 2.0) }
+    // B77: display = personal ECDF rank of current z. Replaces (sigmoid_score - 0.5) * 2.
+    // Uses the EMA-smoothed ECDF computed in DepthGate so the gauge needle is
+    // consistent with the gate's enter/exit logic (both operate on smoothedDisplay).
+    private var displayScore: Float { probe.gate.smoothedDisplay }
     private var isCalibrated: Bool { probe.depth.isCalibrated }
     private var inDeep: Bool { probe.gate.inDeepState }
-    // displayScore at which the gate fires. All state labels/colors are fractions of this
-    // so they scale correctly when enterThreshold adapts across sessions.
-    private var gdt: Float { max(0.01, (probe.gate.enterThreshold - 0.5) * 2.0) }
+    // Gate threshold in display space — same domain as displayScore now (no remapping).
+    // All state labels/colors are fractions of gdt so they adapt with personalization.
+    private var gdt: Float { max(0.01, probe.gate.enterThresholdEcdf) }
 
     private var gaugeColor: Color {
         if !isCalibrated { return .white.opacity(0.2) }
@@ -808,6 +875,87 @@ private struct FAABarView: View {
     }
 }
 
+// MARK: - B77: Live SDK Elements diagnostic strip
+
+private struct ElementsStripView: View {
+    @ObservedObject var probe: Probe
+    @ObservedObject var elements = ElementsTracker.shared
+
+    private func chip(_ label: String, _ value: Float, _ color: Color) -> some View {
+        VStack(spacing: 1) {
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.white.opacity(0.30))
+            Text(value.isFinite ? String(format: "%.2f", value) : "—")
+                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                .foregroundStyle(color.opacity(value.isFinite ? 0.85 : 0.25))
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    var body: some View {
+        let v = elements.values
+        HStack(spacing: 4) {
+            chip("α_rel", v.alphaRelative, Color(red: 0.30, green: 0.85, blue: 0.55))
+            chip("θ_rel", v.thetaRelative, Color(red: 0.30, green: 0.65, blue: 0.95))
+            chip("β_rel", v.betaRelative,  Color(red: 0.95, green: 0.55, blue: 0.20))
+            chip("α_sdk", v.alphaScore,    Color(red: 0.30, green: 0.85, blue: 0.55))
+            chip("θ_sdk", v.thetaScore,    Color(red: 0.30, green: 0.65, blue: 0.95))
+            chip("β_sdk", v.betaScore,     Color(red: 0.95, green: 0.55, blue: 0.20))
+            if let r = probe.rmssd {
+                chip("RMSSD", r, .white)
+            }
+        }
+    }
+}
+
+// MARK: - B77: Subjective tap-to-mark row
+
+private struct MarksRowView: View {
+    @ObservedObject var probe: Probe
+    @State private var lastTapped: MarkType? = nil
+
+    private func tap(_ type: MarkType) {
+        let t = Date().timeIntervalSince(probe.recordingStartedAtForUI ?? Date())
+        let display = probe.gate.smoothedDisplay
+        let z: Float? = probe.depth.isCalibrated ? probe.depth.z : nil
+        let mark = Mark(time: t, type: type, displayScore: display, depthZ: z)
+        probe.marks.add(time: t, type: type, display: display, z: z)
+        SessionRecorder.shared.addMark(mark)
+        lastTapped = type
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if lastTapped == type { lastTapped = nil }
+        }
+    }
+
+    private func btn(_ label: String, _ symbol: String, _ type: MarkType, _ color: Color) -> some View {
+        Button { tap(type) } label: {
+            HStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 11))
+                Text(label).font(.caption2.weight(.medium))
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .background(color.opacity(lastTapped == type ? 0.40 : 0.12))
+            .clipShape(Capsule())
+            .foregroundStyle(color.opacity(0.90))
+            .scaleEffect(lastTapped == type ? 1.08 : 1.0)
+            .animation(.easeOut(duration: 0.2), value: lastTapped)
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            btn("Deepest",    "arrow.down.circle", .deepest,
+                Color(red: 0.20, green: 0.85, blue: 0.55))
+            btn("Transition", "arrow.left.and.right.circle", .transition,
+                Color(red: 0.85, green: 0.75, blue: 0.20))
+            btn("Shallowest", "arrow.up.circle", .shallowest,
+                Color(red: 0.95, green: 0.55, blue: 0.30))
+        }
+    }
+}
+
 // MARK: - Signal chips
 
 private struct SignalChipsView: View {
@@ -889,10 +1037,17 @@ private struct SettingsSheet: View {
                 }
                 Section("Depth") {
                     if probe.depth.isCalibrated {
-                        LabeledContent("Score",    value: String(format: "%.2f", probe.depth.score))
-                        LabeledContent("Smoothed", value: String(format: "%.2f", probe.gate.smoothedScore))
-                        LabeledContent("Display",  value: String(format: "%.0f%%", max(0, (probe.gate.smoothedScore - 0.5) * 200)))
-                        LabeledContent("State",    value: probe.gate.inDeepState ? "Deep" : "Shallow")
+                        LabeledContent("Score (sigmoid)",    value: String(format: "%.2f", probe.depth.score))
+                        LabeledContent("z-score",            value: String(format: "%.2f", probe.depth.z))
+                        LabeledContent("idx (raw)",          value: String(format: "%.3f", probe.depth.meditationIndex))
+                        LabeledContent("idx (corrected)",    value: String(format: "%.3f", probe.depth.meditationIndexCorrected))
+                        LabeledContent("Display (ECDF)",     value: String(format: "%.0f%%", probe.gate.smoothedDisplay * 100))
+                        LabeledContent("State",              value: probe.gate.inDeepState ? "Deep" : "Shallow")
+                        let zd = PersonalZDistribution.shared
+                        LabeledContent("Personal z range",
+                                       value: String(format: "[%.2f, %.2f]", zd.p5, zd.p95))
+                        LabeledContent("Sessions in dist.",
+                                       value: "\(zd.sessionCount) (\(zd.trackName))")
                         if probe.scorer.calibrationIndexMean != 0 {
                             LabeledContent("Cal. Baseline Mean",
                                            value: String(format: "%.3f", probe.scorer.calibrationIndexMean))
@@ -916,6 +1071,28 @@ private struct SettingsSheet: View {
                                    value: probe.rmssd.map { String(format: "%.0f ms", $0) } ?? "— (needs 5 min)")
                     LabeledContent("LF/HF Ratio",
                                    value: probe.lfhfRatio.map { String(format: "%.2f", $0) } ?? "—")
+                    if let r = probe.rmssd, r > 90 {
+                        Text("RMSSD > 90 ms is high — verify Optics signal quality during deep states. If contact dots are red/orange while deep, the BPM detection may be miscounting.")
+                            .font(.caption).foregroundStyle(.orange.opacity(0.8))
+                    }
+                }
+                // B77: SDK Muse Elements — cross-validation against our pipeline.
+                Section("SDK Elements (Muse-validated)") {
+                    let v = probe.elements.values
+                    LabeledContent("α absolute", value: v.alphaAbsolute.isFinite ? String(format: "%.3f", v.alphaAbsolute) : "—")
+                    LabeledContent("θ absolute", value: v.thetaAbsolute.isFinite ? String(format: "%.3f", v.thetaAbsolute) : "—")
+                    LabeledContent("β absolute", value: v.betaAbsolute.isFinite  ? String(format: "%.3f", v.betaAbsolute)  : "—")
+                    LabeledContent("α relative", value: v.alphaRelative.isFinite ? String(format: "%.3f", v.alphaRelative) : "—")
+                    LabeledContent("θ relative", value: v.thetaRelative.isFinite ? String(format: "%.3f", v.thetaRelative) : "—")
+                    LabeledContent("β relative", value: v.betaRelative.isFinite  ? String(format: "%.3f", v.betaRelative)  : "—")
+                    LabeledContent("α score (SDK)", value: v.alphaScore.isFinite ? String(format: "%.2f", v.alphaScore) : "—")
+                    LabeledContent("θ score (SDK)", value: v.thetaScore.isFinite ? String(format: "%.2f", v.thetaScore) : "—")
+                    LabeledContent("β score (SDK)", value: v.betaScore.isFinite  ? String(format: "%.2f", v.betaScore)  : "—")
+                    if let muse = v.museStyleDepth {
+                        LabeledContent("Muse-style depth", value: String(format: "%.2f", muse))
+                    }
+                    Text("SDK session scores use Interaxon's Elements algorithm: linear p10→p90 mapping over recent rolling history. Cross-check against our personal-ECDF gauge. Large divergence indicates pipeline bug.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Chimes — preview") {
                     HStack(spacing: 10) {
@@ -929,6 +1106,7 @@ private struct SettingsSheet: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     ChimePreviewRow(label: "Enter Deep",     detail: "432 Hz",          color: .green)  { ChimeEngine.shared.playEnterDeep() }
+                    ChimePreviewRow(label: "Going Deeper",   detail: "528 Hz · +0.08 ECDF / 30s", color: .mint)   { ChimeEngine.shared.playDeepening() }
                     ChimePreviewRow(label: "Exit Deep",      detail: "288 Hz",          color: .cyan)   { ChimeEngine.shared.playExitDeep() }
                     ChimePreviewRow(label: "Anchor Tone",    detail: "7 Hz θ binaural", color: .indigo) { ChimeEngine.shared.playConditioningAnchor() }
                     ChimePreviewRow(label: "β Wander",       detail: "1 kHz tick",      color: .yellow) { ChimeEngine.shared.playBetaCue() }
@@ -948,12 +1126,24 @@ private struct SettingsSheet: View {
                         Button("Reset Fade to 100%") { sound.resetBinauralFade() }
                             .foregroundStyle(.orange)
                     }
-                    let thresh = UserDefaults.standard.float(forKey: "adaptiveDeepThreshold")
-                    LabeledContent("Adaptive Deep Threshold",
-                                   value: thresh >= 0.40
-                                       ? String(format: "%.0f%% display depth", (thresh - 0.5) * 200)
-                                       : "Pending (need 5+ sessions with deep state)")
-                    Text("Gate fires when display depth exceeds this value. Personalizes to your 75th-percentile session mean (qualifying sessions only). Default 30%.")
+                    let savedEnter = UserDefaults.standard.float(forKey: "adaptiveEnterEcdf")
+                    LabeledContent("Adaptive Deep Threshold (ECDF)",
+                                   value: savedEnter >= 0.50
+                                       ? String(format: "%.0f%%", savedEnter * 100)
+                                       : String(format: "Default %.0f%%", probe.gate.enterThresholdEcdf * 100))
+                    Text("Gate fires when ECDF display crosses this percentile of your personal history. B77+: defaults to top 30% (0.70). Personalizes to 75th-pct of session mean displays after 5+ sessions.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Reset Personal ECDF to Bootstrap") {
+                        PersonalZDistribution.shared.resetToBootstrap()
+                    }
+                    .foregroundStyle(.orange)
+                    Text("Wipes B77+ session distribution; restores B76 bootstrap LUT. Use only if personalization has gone bad.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle("Aperiodic Correction (FOOOF)", isOn: Binding(
+                        get: { UserDefaults.standard.object(forKey: "aperiodicCorrectionEnabled") as? Bool ?? true },
+                        set: { UserDefaults.standard.set($0, forKey: "aperiodicCorrectionEnabled") }
+                    ))
+                    Text("Donoghue 2020: subtracts 1/f aperiodic component from band power before scoring. Cleaner oscillatory signal but may shift z distribution. Disable if first B77 session saturates and try again — modern ECDF activates at 3 sessions to renormalize.")
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("β Wander Alert", isOn: Binding(
                         get: { probe.betaCueEnabled },
@@ -1249,7 +1439,7 @@ private struct RecordingControlView: View {
             Button("Start Manual Recording") { rec.startSession() }
                 .foregroundStyle(.blue)
         }
-        Text("Auto-starts 5 min after calibration completes · saved to Files → MusePlus → MuseSessions")
+        Text("Auto-starts when calibration completes · first 300s tagged as warmup · saved to Files → MusePlus → MuseSessions")
             .font(.caption).foregroundStyle(.secondary)
     }
 }
@@ -1339,6 +1529,29 @@ private struct SessionSummarySheet: View {
                 if streak > 0 {
                     Section("Practice") {
                         LabeledContent("Streak", value: "\(streak) day\(streak == 1 ? "" : "s")")
+                    }
+                }
+                // B77: subjective marks agreement. <70% triggers recalibration suggestion.
+                if let marks = record.marks, !marks.isEmpty {
+                    let scores = record.samples.compactMap(\.ecdfDisplay)
+                    let agreement = MarkAgreement.compute(marks: marks, sessionScores: scores)
+                    Section("Marks Agreement") {
+                        LabeledContent("Marks logged", value: "\(marks.count)")
+                        if agreement.deepestCount > 0 {
+                            LabeledContent("Deepest in top-25%",
+                                           value: "\(agreement.deepestInTop25)/\(agreement.deepestCount)")
+                        }
+                        if agreement.shallowestCount > 0 {
+                            LabeledContent("Shallowest in bottom-25%",
+                                           value: "\(agreement.shallowestInBottom25)/\(agreement.shallowestCount)")
+                        }
+                        let pct = Int((agreement.agreementPct * 100).rounded())
+                        LabeledContent("Agreement", value: "\(pct)%")
+                            .foregroundStyle(pct >= 70 ? .green : .orange)
+                        if pct < 70 {
+                            Text("Gauge disagrees with subjective experience on >30% of marks. Consider resetting the personal ECDF (Settings → Training) and recalibrating with a longer eyes-closed pre-meditation period.")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
                     }
                 }
                 Section("Insight") {

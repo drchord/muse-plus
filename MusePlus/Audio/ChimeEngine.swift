@@ -64,6 +64,16 @@ final class ChimeEngine {
         scheduleDuck(over: 3.0)
     }
 
+    /// Deepening cue (B77): single soft 528 Hz bowl — gentle "going deeper" mark.
+    /// Fires when within-deep ECDF display rises by ≥ 0.08 over a 30s rolling window.
+    /// Quieter and shorter than enter-deep so it doesn't pull the user out of state.
+    /// 528 Hz chosen to match the contact-restored bowl tonality (familiar, calming).
+    func playDeepening() {
+        reverb.wetDryMix = 24
+        scheduleBowl(fundamental: 528, decayRate: 1.6, duration: 2.2, amplitude: 0.06, attackDuration: 0.25)
+        scheduleDuck(over: 2.5)
+    }
+
     /// Conditioning anchor: 7 Hz binaural theta tone (200 Hz L / 207 Hz R).
     /// Fires 20s into sustained deep state once per episode. The brain learns to associate
     /// this tone with the deep state — Pavlovian conditioning for faster future induction.

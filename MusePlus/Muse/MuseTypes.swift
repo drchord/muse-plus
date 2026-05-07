@@ -42,7 +42,10 @@ struct BandPowers {
 }
 
 struct DepthResult {
-    let score: Float               // 0.0 (alert) – 1.0 (deep meditation)
+    let score: Float               // 0.0 (alert) – 1.0 (deep meditation), legacy sigmoid output
+    let z: Float                   // raw z-score (post-clip at +8). Drives ECDF display in B77+.
+    let meditationIndex: Float     // raw frontal-mean idx (uncorrected) — preserved for comparison
+    let meditationIndexCorrected: Float  // aperiodic-corrected idx; equals raw when chi unavailable
     let isCalibrated: Bool
     let calibrationProgress: Float // 0–1 during calibration
     let faa: Float                 // Frontal Alpha Asymmetry: af8α - af7α, positive = positive affect
