@@ -14,6 +14,11 @@ struct FitCheckSnapshot: Equatable {
     static let zero = FitCheckSnapshot(tp9: false, af7: false, af8: false, tp10: false)
 
     var allGood: Bool { tp9 && af7 && af8 && tp10 }
+    // Frontal-only contact: TP9/TP10 (ear electrodes) flicker constantly on Athena even
+    // with proper headband fit. Depth score uses only AF7/AF8 (frontal channels), so
+    // gauge/gate gating should also use frontal-only — strict allGood was causing the
+    // gauge to enter contact-loss decay mode for the entire session in B77.
+    var frontalGood: Bool { af7 && af8 }
 }
 
 // MARK: - Gate 2

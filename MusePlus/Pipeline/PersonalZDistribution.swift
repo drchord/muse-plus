@@ -36,14 +36,34 @@ final class PersonalZDistribution {
     private static let modernCountKey = "personalZModernSessionCount"
     private static let trackKey      = "personalZTrack"  // "bootstrap" | "modern"
 
-    // Switchover threshold: number of B77+ sessions before modern track becomes authoritative.
-    // 3 sessions × ~3500 corrected samples each ≈ 10k samples — sufficient for stable percentile
-    // estimation per nonparametric statistics (Hyndman & Fan 1996).
-    private static let modernActivationCount = 3
+    // Switchover threshold: B77+ sessions before modern track becomes authoritative.
+    // Set to 1 because the bootstrap LUT was built from B76 RAW idx (uncorrected),
+    // but B77 uses aperiodic-corrected idx by default. The two distributions are
+    // categorically different — bootstrap p50=3.20 vs B77 z typically ~0. Bootstrap
+    // would force first session to display near 0% the entire time. Activating modern
+    // at session 1 means the first session establishes the personal distribution and
+    // session 2+ display against it. EMA-blend in ingestSession adapts gradually.
+    private static let modernActivationCount = 1
 
     private var breakpoints: [Float]
     private(set) var sessionCount: Int = 0
     private(set) var trackName: String = "bootstrap"
+
+    // Within-session rolling ring for cold-start. When sessionCount == 0 (no personal
+    // data yet) the bootstrap LUT was built from B76 RAW idx and is categorically wrong
+    // for B77 corrected idx — gauge would read ~0% the whole first session. The ring
+    // provides within-session percentile ranking from second 1 of the first session.
+    // Capacity 600 = 5 minutes at 2 Hz. Updated in lockstep with ecdf() calls.
+    private static let coldStartRingCapacity = 600
+    private var coldStartRing      = [Float](repeating: 0, count: coldStartRingCapacity)
+    private var coldStartRingHead  = 0
+    private var coldStartRingFilled = 0
+    private static let coldStartMinSamples = 30  // need ~15s of data before within-session ECDF is meaningful
+
+    func resetSessionRing() {
+        coldStartRingHead = 0
+        coldStartRingFilled = 0
+    }
 
     private init() {
         let defaults = UserDefaults.standard
@@ -67,13 +87,30 @@ final class PersonalZDistribution {
     }
 
     // ECDF lookup. Returns [0, 1].
-    // For z below breakpoints[0]: returns 0.
-    // For z above breakpoints[20]: returns 1.
-    // Linear interpolation in between.
+    // For users with personal data (sessionCount >= 1): linear interp on personal LUT.
+    // For first session (sessionCount == 0): within-session percentile rank using the
+    // rolling ring — this prevents the bootstrap-mismatch problem where B77 corrected z
+    // values fall outside the B76-raw bootstrap range.
     func ecdf(_ z: Float) -> Float {
+        // Always feed the ring so cold-start has data even if personal LUT is in use.
+        if z.isFinite {
+            coldStartRing[coldStartRingHead] = z
+            coldStartRingHead = (coldStartRingHead + 1) % Self.coldStartRingCapacity
+            coldStartRingFilled = min(coldStartRingFilled + 1, Self.coldStartRingCapacity)
+        }
+
+        // Cold-start path: within-session percentile rank.
+        if sessionCount == 0 && coldStartRingFilled >= Self.coldStartMinSamples {
+            var below = 0
+            for i in 0..<coldStartRingFilled {
+                if coldStartRing[i] <= z { below += 1 }
+            }
+            return Float(below) / Float(coldStartRingFilled)
+        }
+
+        // Normal path: personal LUT lookup.
         if z <= breakpoints[0] { return 0 }
         if z >= breakpoints[20] { return 1 }
-        // Binary search would help on larger LUTs; 21 entries → linear is fine.
         for i in 1...20 {
             if z <= breakpoints[i] {
                 let span = breakpoints[i] - breakpoints[i-1]

@@ -98,6 +98,7 @@ final class Probe: ObservableObject {
                 switch state {
                 case .connected:
                     UIApplication.shared.isIdleTimerDisabled = true
+                    self?.isConnecting = false
                     self?.sessionStart = Date()
                     self?.sampleIndex  = 0
                     self?.bandHistory  = []
@@ -110,6 +111,7 @@ final class Probe: ObservableObject {
                     self?.lastBetaCueDate = .distantPast
                 case .disconnected:
                     UIApplication.shared.isIdleTimerDisabled = false
+                    self?.isConnecting = false
                     self?.calibrationFiredRecording = false
                     self?.recordingStartWork?.cancel()
                     self?.recordingStartWork = nil
@@ -149,7 +151,10 @@ final class Probe: ObservableObject {
                 guard let self else { return }
                 let wasGood = self.fit.allGood
                 self.fit = snap
-                self.gate.contactsGood = snap.allGood
+                // B77.1: gauge/gate gate on FRONTAL contacts (AF7+AF8) only.
+                // TP9/TP10 (ear) flicker on Athena even with good fit; using allGood
+                // pinned the gauge in contact-loss decay mode for the entire session.
+                self.gate.contactsGood = snap.frontalGood
                 // Gate contact chimes behind calibration: during 60s settle-in the headband
                 // frequently fluctuates between good/bad contact. Chiming before calibration
                 // completes is noisy and unhelpful — user can see contact state via dots.
@@ -279,6 +284,7 @@ final class Probe: ObservableObject {
                 self.recordingStartedAt = Date()
                 self.marks.reset()
                 ElementsTracker.shared.reset()
+                PersonalZDistribution.shared.resetSessionRing()
                 SessionRecorder.shared.startSession(
                     calibrationIndexMean: self.scorer.calibrationIndexMean,
                     calibrationIndexStd:  self.scorer.calibrationIndexStd
@@ -355,7 +361,22 @@ final class Probe: ObservableObject {
                                        samples: [], episodes: [], fitEvents: [])
     }
 
+    // True from the moment connectFirst() is called until connectionState reaches
+    // .connected or .disconnected. Prevents the connect button from spamming the SDK
+    // with multiple connect() calls if the user double-taps during the BLE handshake.
+    @Published var isConnecting: Bool = false
+
     func connectFirst() {
+        // Idempotent guard: don't re-issue connect if one is already in flight.
+        guard !isConnecting, connection != "Connected" else { return }
+        isConnecting = true
+        // Try up to 3 times with 200ms gap — getMuses() can briefly return empty during
+        // re-scan even when a Muse is on screen. Retry covers that gap without UI hint
+        // that anything went wrong.
+        attemptConnect(retriesLeft: 3)
+    }
+
+    private func attemptConnect(retriesLeft: Int) {
         if let m = IXNMuseManagerIos.sharedManager().getMuses().first {
             client.connect(to: m)
             scorer.startCalibration()
@@ -368,8 +389,17 @@ final class Probe: ObservableObject {
             if savedEnter >= 0.50 && savedExit >= 0.40 {
                 gate.setEcdfThresholds(enter: savedEnter, exit: savedExit)
             } else {
-                gate.setEcdfThresholds(enter: 0.70, exit: 0.50)  // defaults
+                gate.setEcdfThresholds(enter: 0.70, exit: 0.50)
             }
+        } else if retriesLeft > 0 {
+            // No muse in SDK list right now — wait 200ms and retry. Connection state
+            // remains "isConnecting" the whole time so the UI shows feedback.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.attemptConnect(retriesLeft: retriesLeft - 1)
+            }
+        } else {
+            // All retries exhausted — clear connecting flag so user can tap again.
+            isConnecting = false
         }
     }
 
@@ -576,28 +606,59 @@ private struct ConnectView: View {
             } else {
                 VStack(spacing: 12) {
                     ForEach(probe.muses, id: \.self) { name in
-                        Button(action: { probe.connectFirst() }) {
-                            HStack {
-                                Image(systemName: "dot.radiowaves.left.and.right")
-                                Text(name)
-                                    .fontWeight(.medium)
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.4))
-                            }
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 14)
-                            .background(Color.white.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
-                        }
-                        .foregroundStyle(.white)
+                        ConnectMuseButton(name: name, probe: probe)
                     }
                 }
                 .padding(.horizontal, 28)
             }
             Spacer()
         }
+    }
+}
+
+// MARK: - Connect-muse button with visual feedback
+
+private struct ConnectMuseButton: View {
+    let name: String
+    @ObservedObject var probe: Probe
+    @State private var pressed = false
+
+    var body: some View {
+        Button {
+            // Immediate visual feedback so the user knows the tap registered. The
+            // SDK connection handshake takes 500-2000ms and was previously silent.
+            pressed = true
+            probe.connectFirst()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { pressed = false }
+        } label: {
+            HStack {
+                if probe.isConnecting {
+                    ProgressView().tint(.white).scaleEffect(0.7)
+                        .frame(width: 18)
+                } else {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                }
+                Text(name)
+                    .fontWeight(.medium)
+                Spacer()
+                if probe.isConnecting {
+                    Text("Connecting…").font(.caption).foregroundStyle(.white.opacity(0.5))
+                } else {
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .background(Color.white.opacity(pressed ? 0.20 : (probe.isConnecting ? 0.04 : 0.08)))
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .scaleEffect(pressed ? 0.97 : 1.0)
+            .animation(.easeOut(duration: 0.15), value: pressed)
+            .animation(.easeOut(duration: 0.2),  value: probe.isConnecting)
+        }
+        .foregroundStyle(.white)
+        .disabled(probe.isConnecting)
     }
 }
 
@@ -1048,6 +1109,10 @@ private struct SettingsSheet: View {
                                        value: String(format: "[%.2f, %.2f]", zd.p5, zd.p95))
                         LabeledContent("Sessions in dist.",
                                        value: "\(zd.sessionCount) (\(zd.trackName))")
+                        if zd.sessionCount == 0 {
+                            Text("Cold-start: gauge uses within-session percentile rank (rolling 5min window) until first session is saved. Personal cross-session LUT activates at session 2.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         if probe.scorer.calibrationIndexMean != 0 {
                             LabeledContent("Cal. Baseline Mean",
                                            value: String(format: "%.3f", probe.scorer.calibrationIndexMean))

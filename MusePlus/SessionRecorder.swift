@@ -120,14 +120,16 @@ final class SessionRecorder: ObservableObject {
             let t = rec.endDate!.timeIntervalSince(rec.startDate)
             rec.episodes[rec.episodes.count - 1].exitTime = t
         }
-        // Feed corrected z values from main-phase samples to PersonalZDistribution.
-        // Warmup phase excluded — first 300s often noisy as user settles in.
-        let mainZs = rec.samples.compactMap { s -> Float? in
-            guard s.phase != "warmup", let z = s.depthZ, z.isFinite else { return nil }
+        // Feed all valid z values to PersonalZDistribution. B77.0 had this filter to
+        // phase=="main" only, but short sessions are entirely warmup-tagged → no LUT
+        // update → cold-start persists indefinitely. The phase tag remains for analysis
+        // filtering, just not for LUT bootstrapping.
+        let allZs = rec.samples.compactMap { s -> Float? in
+            guard let z = s.depthZ, z.isFinite else { return nil }
             return z
         }
-        if !mainZs.isEmpty {
-            PersonalZDistribution.shared.ingestSession(zSamples: mainZs)
+        if !allZs.isEmpty {
+            PersonalZDistribution.shared.ingestSession(zSamples: allZs)
         }
         current       = nil
         lastDeepState = false
