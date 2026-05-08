@@ -99,6 +99,71 @@ final class ChimeEngine {
         scheduleDuck(over: 2.5)
     }
 
+    // MARK: - Session end gong (D)
+
+    /// Session end gong: single sustained 84 Hz gong with 8-second fade-out.
+    /// Plays over a fading soundscape (Agent B / stopAll handles the fade).
+    /// No depth-gate check — always fires at session completion.
+    /// Called from: timer expiry (SessionTimer.onExpire), manual end, disconnect-grace success.
+    func playGong() {
+        reverb.wetDryMix = 35
+        scheduleGong(fundamental: 84, decayRate: 0.18, duration: 8.0, amplitude: 0.75)
+        scheduleDuck(over: 8.0)
+    }
+
+    // MARK: - Alert chimes (B80: AlertCoordinator hooks)
+
+    /// Session paused (BLE drop / interruption): two sharp descending tones — urgent, not alarming.
+    /// 880 Hz → 660 Hz descending interval. Short (1.0s each) with minimal reverb.
+    func playPauseChime() {
+        reverb.wetDryMix = 8
+        scheduleBowl(fundamental: 880, decayRate: 3.0, duration: 1.0, amplitude: 0.35)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            self?.reverb.wetDryMix = 8
+            self?.scheduleBowl(fundamental: 660, decayRate: 3.0, duration: 1.0, amplitude: 0.28)
+        }
+        scheduleDuck(over: 2.0)
+    }
+
+    /// Session resumed: two ascending tones (inverse of pause) — reassuring resolution.
+    /// 660 Hz → 880 Hz ascending. Mirrors pause chime for clear pairing.
+    func playResumeChime() {
+        reverb.wetDryMix = 18
+        scheduleBowl(fundamental: 660, decayRate: 1.8, duration: 1.5, amplitude: 0.22)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            self?.reverb.wetDryMix = 18
+            self?.scheduleBowl(fundamental: 880, decayRate: 1.8, duration: 1.8, amplitude: 0.28)
+        }
+        scheduleDuck(over: 3.0)
+    }
+
+    /// Session ended successfully: three long descending gong strikes — completion, finality.
+    /// Uses playTimerEnd pattern but quieter (amplitude 0.5/0.35/0.22) for non-timer context.
+    func playSuccessChime() {
+        reverb.wetDryMix = 32
+        scheduleGong(fundamental: 84, decayRate: 0.20, duration: 6.0, amplitude: 0.50)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            self?.scheduleGong(fundamental: 84, decayRate: 0.20, duration: 6.0, amplitude: 0.35)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            self?.scheduleGong(fundamental: 84, decayRate: 0.20, duration: 6.0, amplitude: 0.22)
+        }
+        scheduleDuck(over: 11.0)
+    }
+
+    /// Session ended with failure (BLE timeout): rapid 5-pulse alert pattern — attention-grabbing.
+    /// 800 Hz dry pings, 120ms apart. No duck (user needs maximum alertness).
+    func playFailureChime() {
+        reverb.wetDryMix = 2
+        for i in 0..<5 {
+            let delay = Double(i) * 0.14
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.reverb.wetDryMix = 2
+                self?.scheduleBowl(fundamental: 800, decayRate: 5.0, duration: 0.4, amplitude: 0.40)
+            }
+        }
+    }
+
     /// Timer end: three descending gong strikes.
     func playTimerEnd() {
         reverb.wetDryMix = 35

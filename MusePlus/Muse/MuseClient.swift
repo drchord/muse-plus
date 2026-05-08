@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import OSLog
 
 final class MuseClient: NSObject {
 
@@ -45,6 +46,29 @@ final class MuseClient: NSObject {
     // 5s minimum between successive quality-triggered artifact events is sufficient — artifacts
     // suppress 4 windows × 0.5s = 2s, so a new trigger is only needed if problem persists.
     private var lastQualitySuppression: TimeInterval = 0
+    // B80 (B6): set after first successful .connected. Triggers defensive re-registration
+    // on subsequent .connected events since some SDK versions lose listeners after reconnect.
+    private var wasConnectedBefore = false
+
+    // MARK: - EEG packet telemetry (write on SDK callback thread; read from any thread)
+    // lastEegPacketTime: updated on every .notchFilteredEeg / .eeg packet. Used post-disconnect
+    // to determine whether EEG stalled while the BLE connection appeared up.
+    static var lastEegPacketTime: Date = .distantPast
+    // Ring buffer of recent EEG packet timestamps for rolling 30-s count.
+    // Access must be serialised — use the eegStatsLock.
+    private var eegPacketTimestamps: [Date] = []
+    private let eegStatsLock = NSLock()
+
+    // Returns (count of packets received in last 30s, seconds since the most recent packet).
+    // Safe to call from any thread.
+    func eegPacketRollingStats() -> (count30s: Int, lastPacketAge: TimeInterval) {
+        eegStatsLock.lock()
+        defer { eegStatsLock.unlock() }
+        let cutoff = Date().addingTimeInterval(-30)
+        let recent = eegPacketTimestamps.filter { $0 > cutoff }
+        let age    = Date().timeIntervalSince(MuseClient.lastEegPacketTime)
+        return (recent.count, age)
+    }
 
     override init() {
         self.manager = IXNMuseManagerIos.sharedManager()
@@ -72,6 +96,29 @@ final class MuseClient: NSObject {
         disconnectInternal()
         connectedMuse = muse
         muse.unregisterAllListeners()
+        registerAllListeners(on: muse)
+        if !preservePreset {
+            presetAppliedFor   = nil
+            connectedMuseModel = nil
+            wasConnectedBefore = false  // B80 (B6): fresh user-initiated session
+        }
+        muse.runAsynchronously()
+    }
+
+    // B80 (B6): Idempotent listener registration. Called from connect() on initial connect
+    // AND re-called from IXNMuseConnectionListener.receive() on subsequent .connected events
+    // when wasConnectedBefore is set. Some Muse SDK versions lose listener state after
+    // a disconnect/reconnect cycle — re-registering defensively costs nothing.
+    //
+    // B4 NOTE — CBCentralManager state restoration:
+    //   IXNMuseManagerIos fully abstracts CBCentralManager. The SDK does NOT expose the
+    //   CBCentralManager instance, nor does it accept a CBCentralManagerOptionRestoreIdentifierKey.
+    //   CoreBluetooth state restoration (centralManager(_:willRestoreState:)) therefore CANNOT be
+    //   implemented at the app layer. The `bluetooth-central` UIBackgroundMode in Info.plist is
+    //   still required and valuable: it keeps the BLE radio alive while the app is suspended,
+    //   and the SDK's own CBCentralManager likely uses it internally. If InterAxon ever exposes
+    //   a restoration identifier API we can hook in here.
+    private func registerAllListeners(on muse: IXNMuse) {
         muse.register(self as IXNMuseConnectionListener?)
         muse.register(self as IXNMuseDataListener?, type: .notchFilteredEeg)
         muse.register(self as IXNMuseDataListener?, type: .hsiPrecision)
@@ -95,11 +142,6 @@ final class MuseClient: NSObject {
         muse.register(self as IXNMuseDataListener?, type: .alphaScore)
         muse.register(self as IXNMuseDataListener?, type: .betaScore)
         muse.register(self as IXNMuseDataListener?, type: .thetaScore)
-        if !preservePreset {
-            presetAppliedFor   = nil
-            connectedMuseModel = nil
-        }
-        muse.runAsynchronously()
     }
 
     func disconnect() {
@@ -126,6 +168,9 @@ final class MuseClient: NSObject {
         // disconnect/reconnect loop that delays EEG flow past the calibration window.
         lastNotchEegTs = 0       // reset: .eeg fallback active until .notchFilteredEeg confirms
         lastQualitySuppression = 0
+        // wasConnectedBefore intentionally NOT reset here — it tracks whether ANY .connected
+        // event has fired for this IXNMuse object so reconnect re-registers listeners.
+        // It resets on user-initiated connect (see connect(to:preservePreset:) call path).
     }
 
     // Choose the right preset for the connected hardware. Called once per session
@@ -165,13 +210,28 @@ extension MuseClient: IXNMuseListener {
 extension MuseClient: IXNMuseConnectionListener {
     func receive(_ packet: IXNMuseConnectionPacket, muse: IXNMuse?) {
         let state = packet.currentConnectionState
+        Telemetry.connection.notice("state=\(state.rawValue, privacy: .public)")
         DispatchQueue.main.async { self.connectionState.send(state) }
         // On first .connected of this session, query model and apply correct preset.
         // Subsequent .connected (after preset change disconnect/reconnect) skips,
         // because presetAppliedFor is now set.
-        if state == .connected, let m = muse, presetAppliedFor == nil {
-            // setPreset must run on main thread (matches connect() pattern)
-            DispatchQueue.main.async { [weak self] in self?.applyPresetForModel(m) }
+        if state == .connected, let m = muse {
+            if presetAppliedFor == nil {
+                // First connect this session: apply hardware preset.
+                // setPreset must run on main thread (matches connect() pattern)
+                DispatchQueue.main.async { [weak self] in self?.applyPresetForModel(m) }
+            } else if wasConnectedBefore {
+                // B80 (B6): subsequent .connected after reconnect — re-register listeners
+                // defensively. Some SDK versions silently drop listener state on reconnect.
+                // unregisterAllListeners first to avoid duplicate callbacks.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    m.unregisterAllListeners()
+                    self.registerAllListeners(on: m)
+                    Telemetry.connection.notice("re-registered listeners after reconnect")
+                }
+            }
+            wasConnectedBefore = true
         }
     }
 }
@@ -237,6 +297,15 @@ extension MuseClient: IXNMuseDataListener {
         // computeWindow() removes DC mean before FFT, so ADC offset does not corrupt band powers.
         // Artifact suppression is handled by SDK blink/jaw detection + handleIsGood (rate-limited).
         let pkt = EEGPacket(timestamp: Date().timeIntervalSinceReferenceDate, channels: channels)
+        // Update rolling telemetry — no per-packet log (too noisy at 256 Hz).
+        let now = Date()
+        MuseClient.lastEegPacketTime = now
+        eegStatsLock.lock()
+        eegPacketTimestamps.append(now)
+        if eegPacketTimestamps.count > 256 * 30 { // cap ring at 30s × 256Hz worst-case
+            eegPacketTimestamps.removeFirst(eegPacketTimestamps.count - 256 * 30)
+        }
+        eegStatsLock.unlock()
         DispatchQueue.main.async { self.eegPacket.send(pkt) }
     }
 

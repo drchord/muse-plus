@@ -4,5 +4,21 @@
 <dict>
 	<key>UIFileSharingEnabled</key>
 	<true/>
+	<!-- B80: Background modes for BLE persistence + audio playback while screen locked.
+	     These are the authoritative source when building directly from Xcode without xcodegen.
+	     project.yml also declares these (the canonical source for xcodegen builds).
+	     bluetooth-central: keeps CBCentralManager alive while app is suspended.
+	     audio: allows AVAudioSession .playback category audio while screen locked. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>audio</string>
+	</array>
+	<!-- B80: BGProcessingTask identifier for crash-safe NDJSON fsync while app suspended.
+	     Registered by SessionRecorder.registerBackgroundTasks() in MusePlusApp.init(). -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.drchord.museplus.session-flush</string>
+	</array>
 </dict>
 </plist>

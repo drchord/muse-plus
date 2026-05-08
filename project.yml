@@ -33,6 +33,9 @@ targets:
         UIBackgroundModes:
           - bluetooth-central
           - audio
+        # B80: BGProcessingTask identifier for crash-safe NDJSON fsync while suspended.
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.drchord.museplus.session-flush
         NSBluetoothAlwaysUsageDescription: Muse Plus connects to your Muse S headband to read EEG data during meditation sessions.
         NSMicrophoneUsageDescription: Muse Plus does not record audio; this permission is required by AVAudioSession only.
         UILaunchScreen:

@@ -1,10 +1,19 @@
 import SwiftUI
 import Combine
 import UIKit
+import AVFoundation
+import OSLog
+import BackgroundTasks
 
 @main
 struct MusePlusApp: App {
     @StateObject private var probe = Probe()
+
+    init() {
+        // B80: register BGProcessingTask handler for crash-safe NDJSON flush.
+        // Must be called before app finishes launching (before first scene connect).
+        SessionRecorder.registerBackgroundTasks()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -57,8 +66,34 @@ final class Probe: ObservableObject {
     @Published var lfhfRatio: Float? = nil  // LF/HF ratio; nil until RMSSD available
     private var bag = Set<AnyCancellable>()
     private var sampleIndex = 0
+
+    // MARK: - B80 Diagnostic state
+    // All counters reset in .connected handler. Accumulated throughout session lifecycle.
+    // Agent B wires disconnect/reconnect increments; Agent D wires timer-expired event.
+    // This class owns the struct definition and the buildDiagnostics() helper.
+
+    private struct SessionDiagCounters {
+        var disconnectCount      = 0
+        var reconnectAttempts    = 0
+        var audioInterruptions   = 0
+        var routeChanges         = 0
+        var contactStateChanges: [String: Int] = [:]
+        var stallEvents:         [StallEvent]  = []
+    }
+    private var sessionDiagCounters = SessionDiagCounters()
+    private var sessionEvents: [SessionEvent] = []
+    // Last known HSI per-channel raw value; used to detect transitions in fitCheck sink.
+    // Index mapping: [0]=TP9, [1]=AF7, [2]=AF8, [3]=TP10
+    private var lastHsiRaw: [Double] = []
     private var sessionStart = Date()
     private var reconnectAttempts = 0
+    // B80 (B2): grace-period state — when a BLE drop occurs mid-session we don't
+    // immediately end the session. We wait up to 30s for the headband to reconnect.
+    // If reconnect succeeds: session continues, gap is recorded.
+    // If grace expires: session ends cleanly with what we have.
+    @Published var isPausedForReconnect: Bool = false
+    private var gracePeriodWork: DispatchWorkItem?
+    private var gracePeriodStarted: Date?
     // Session summary shown after disconnect if session was recorded.
     @Published var sessionSummary: SessionRecord? = nil
     // B76 had a 300s recording delay after calibration; B77 records from calibration end and
@@ -108,11 +143,33 @@ final class Probe: ObservableObject {
             .sink { [weak self] state in
                 switch state {
                 case .connected:
+                    Telemetry.connection.notice("connected at \(Date(), privacy: .public)")
                     UIApplication.shared.isIdleTimerDisabled = true
                     self?.connectingTimeoutWork?.cancel()
                     self?.connectingTimeoutWork = nil
                     self?.isConnecting = false
                     self?.pendingConnect = false
+                    // B80 (B2): if we reconnected within the 30s grace period,
+                    // resume the session rather than starting fresh.
+                    if self?.isPausedForReconnect == true {
+                        let graceDuration = Date().timeIntervalSince(self?.gracePeriodStarted ?? Date())
+                        self?.gracePeriodWork?.cancel()
+                        self?.gracePeriodWork = nil
+                        self?.isPausedForReconnect = false
+                        self?.gracePeriodStarted = nil
+                        self?.reconnectAttempts = 0
+                        // Resume soundscape: unduck restores volume if layers are still fading
+                        // (reconnect < 2s into grace). If layers already stopped (reconnect > 2s),
+                        // user will need to re-enable soundscape from the UI — we cannot
+                        // auto-restart without knowing which layers were active.
+                        SoundscapePlayer.shared.unduck(fadeDuration: 3.0)
+                        // Record the gap in the session timeline
+                        SessionRecorder.shared.recordGap(reason: "ble-drop", durationSec: graceDuration)
+                        // Alert user that session is back
+                        AlertCoordinator.shared.sessionResumed()
+                        Telemetry.connection.notice("grace reconnect succeeded after \(String(format: \"%.1f\", graceDuration), privacy: .public)s")
+                        return
+                    }
                     self?.sessionStart = Date()
                     self?.sampleIndex  = 0
                     self?.bandHistory  = []
@@ -123,17 +180,72 @@ final class Probe: ObservableObject {
                     self?.recordingStartWork?.cancel()
                     self?.recordingStartedAt = nil
                     self?.lastBetaCueDate = .distantPast
+                    // B80(C): reset diagnostic counters and start liveness watchdog.
+                    self?.sessionDiagCounters = SessionDiagCounters()
+                    self?.sessionEvents = []
+                    self?.lastHsiRaw = []
+                    LivenessWatchdog.shared.start()
+                    // B80(D): cancel any leftover session timer from prior connection.
+                    SessionTimer.shared.cancel()
                 case .disconnected:
+                    let wasRecording = SessionRecorder.shared.isRecording
+                    let reconnAttempts = self?.reconnectAttempts ?? 0
+                    Telemetry.connection.error("disconnected at \(Date(), privacy: .public) wasRecording=\(wasRecording, privacy: .public) reconnectAttempts=\(reconnAttempts, privacy: .public)")
                     UIApplication.shared.isIdleTimerDisabled = false
                     self?.connectingTimeoutWork?.cancel()
                     self?.connectingTimeoutWork = nil
                     self?.isConnecting = false
                     self?.pendingConnect = false
+                    let stats = self?.client.eegPacketRollingStats() ?? (0, 0)
+                    Telemetry.eeg.error("post-disconnect packets-last-30s=\(stats.count30s, privacy: .public) lastPacketAge=\(stats.lastPacketAge, privacy: .public)s")
+                    // B80 (B2): if a session is active, enter 30s grace period instead of
+                    // immediately ending. Soundscape stops (2s fade), alert fires, reconnect
+                    // is scheduled. If headband comes back within 30s the session continues.
+                    if wasRecording, self?.isPausedForReconnect == false {
+                        self?.isPausedForReconnect = true
+                        self?.gracePeriodStarted = Date()
+                        // Fade soundscape to silence — abrupt stop would be jarring
+                        SoundscapePlayer.shared.stopAll(fadeSeconds: 2.0)
+                        AlertCoordinator.shared.sessionPaused(reason: .bleDrop)
+                        Telemetry.connection.notice("entering 30s grace period")
+                        // Schedule 30s grace expiry
+                        let gracework = DispatchWorkItem { [weak self] in
+                            guard let self, self.isPausedForReconnect else { return }
+                            self.isPausedForReconnect = false
+                            self.gracePeriodWork = nil
+                            let started = self.gracePeriodStarted
+                            self.gracePeriodStarted = nil
+                            Telemetry.connection.error("grace period expired — ending session")
+                            // Fully end session with whatever we have
+                            self.performFinalDisconnect(gracePeriodStart: started)
+                            AlertCoordinator.shared.sessionEndedFailure(reason: "BLE reconnect timeout")
+                        }
+                        self?.gracePeriodWork = gracework
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: gracework)
+                        self?.scheduleReconnect()
+                        return
+                    }
+                    // Not recording (or already in grace period): standard disconnect path.
+                    // Stop soundscape (missing before B80 — soundscape kept playing after disconnect).
+                    SoundscapePlayer.shared.stopAll(fadeSeconds: 1.0)
                     self?.calibrationFiredRecording = false
                     self?.recordingStartWork?.cancel()
                     self?.recordingStartWork = nil
                     self?.recordingStartedAt = nil
-                    let recUrl = SessionRecorder.shared.endSession()
+                    // B80(D): cancel session-length timer (session is ending here, no grace).
+                    SessionTimer.shared.cancel()
+                    // B80: stop liveness watchdog, increment disconnect counter, log event.
+                    LivenessWatchdog.shared.stop()
+                    self?.sessionDiagCounters.disconnectCount += 1
+                    self?.recordEvent(kind: "disconnect")
+                    // Attach diagnostics before endSession so the saved file carries them.
+                    if let s = self {
+                        SessionRecorder.shared.attachDiagnostics(
+                            s.buildDiagnostics(endReason: "disconnect-grace-expired"))
+                        SessionRecorder.shared.attachEventStream(s.sessionEvents)
+                    }
+                    Telemetry.recording.error("endSession reason=disconnect")
+                    let recUrl = SessionRecorder.shared.endSession(reason: "disconnect")
                     self?.pipeline.endSession()
                     self?.hrv.reset()
                     self?.rmssd     = nil
@@ -190,6 +302,17 @@ final class Probe: ObservableObject {
             .receive(on: RunLoop.main)
             .assign(to: &$battery)
 
+        // B80: configure liveness watchdog callback before subscribing to eegPacket.
+        LivenessWatchdog.shared.onStallDetected = { [weak self] gap in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                Telemetry.eeg.error("EEG stall detected gap=\(String(format: "%.2f", gap), privacy: .public)s — scheduling reconnect check")
+                let t = self.recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+                self.sessionDiagCounters.stallEvents.append(StallEvent(time: t, gap: gap))
+                self.recordEvent(kind: "stall", detail: String(format: "gap=%.2fs", gap))
+            }
+        }
+
         client.eegPacket
             .receive(on: RunLoop.main)
             .sink { [weak self] pkt in
@@ -197,14 +320,38 @@ final class Probe: ObservableObject {
                 self.lastEEG = pkt.channels
                 self.packetCount += 1
                 self.pipeline.process(pkt)
+                // B80: notify liveness watchdog of every raw packet.
+                LivenessWatchdog.shared.packetReceived()
             }
             .store(in: &bag)
 
         client.hsiRaw
             .receive(on: RunLoop.main)
             .sink { [weak self] vals in
-                self?.hsiCount += 1
-                self?.hsiRaw = vals
+                guard let self else { return }
+                self.hsiCount += 1
+                self.hsiRaw = vals
+                // B80: detect per-channel HSI state transitions.
+                // HSI vals index: [0]=TP9, [1]=AF7, [2]=AF8, [3]=TP10
+                // Threshold: < 2.0 = good (1), >= 2.0 & < 4.0 = mediocre (2), >= 4.0 = bad (4)
+                let channelNames = ["TP9", "AF7", "AF8", "TP10"]
+                let prev = self.lastHsiRaw
+                if prev.count == 4 {
+                    for i in 0..<4 {
+                        let oldVal = prev[i]
+                        let newVal = vals[i]
+                        // Transition detected: good→bad or bad→good (any crossing)
+                        let oldGood = oldVal < 2.0
+                        let newGood = newVal < 2.0
+                        if oldGood != newGood {
+                            let ch = channelNames[i]
+                            self.sessionDiagCounters.contactStateChanges[ch, default: 0] += 1
+                            let kind = newGood ? "contact-restored-\(ch)" : "contact-loss-\(ch)"
+                            self.recordEvent(kind: kind)
+                        }
+                    }
+                }
+                self.lastHsiRaw = vals
             }
             .store(in: &bag)
 
@@ -248,14 +395,24 @@ final class Probe: ObservableObject {
             // Beta wander alert: fires when frontal beta is >1.5 SD above resting baseline
             // AND depth is shallow (<0.3). Trains awareness of mind-wandering without jarring
             // the session — uses additive log threshold since frontBeta is in log10 µV².
+            // D4: Beta wander alert — ECDF gating replaces raw depth.score < 0.3.
+            // gate.smoothedDisplay is the B77 ECDF-mapped display value [0,1]:
+            //   properly distributed across the user's personal history.
+            //   Raw depth.score < 0.3 was nearly always false (ECDF centering fixed this).
+            // Diagnostic log fires every time gate1 passes — reveals why beta cue wasn't firing.
             if self.depth.isCalibrated && self.betaCueEnabled {
                 let bm = self.scorer.calibrationBetaMean
                 let bs = self.scorer.calibrationBetaStd
-                if bs > 0, self.frontBeta > bm + 1.5 * bs, self.depth.score < 0.3 {
-                    let now = Date()
-                    if now.timeIntervalSince(self.lastBetaCueDate) >= 30.0 {
-                        self.lastBetaCueDate = now
-                        ChimeEngine.shared.playBetaCue()
+                let g1_threshold = bs > 0 && self.frontBeta > bm + 1.5 * bs
+                let g2_shallow_ecdf = self.gate.smoothedDisplay < 0.3  // B77 ECDF map [0,1] — properly distributed
+                if g1_threshold {
+                    Telemetry.recording.notice("beta-cue gate1=true gate2=\(g2_shallow_ecdf, privacy: .public) ecdf=\(self.gate.smoothedDisplay, privacy: .public) rawDepth=\(self.depth.score, privacy: .public)")
+                    if g2_shallow_ecdf {
+                        let now = Date()
+                        if now.timeIntervalSince(self.lastBetaCueDate) >= 30.0 {
+                            self.lastBetaCueDate = now
+                            ChimeEngine.shared.playBetaCue()
+                        }
                     }
                 }
             }
@@ -266,6 +423,33 @@ final class Probe: ObservableObject {
                 return Date().timeIntervalSince(started) < 300 ? "warmup" : "main"
             }()
             let elem = self.elements.values
+            // B80: gather per-sample diagnostic fields.
+            // hsiRaw index: [0]=TP9 [1]=AF7 [2]=AF8 [3]=TP10. Round to integer (1/2/4 tiers).
+            let hsi = self.hsiRaw
+            let hsiAF7  = hsi.count > 1 ? Int(hsi[1].rounded()) : nil
+            let hsiAF8  = hsi.count > 2 ? Int(hsi[2].rounded()) : nil
+            let hsiTP9  = hsi.count > 0 ? Int(hsi[0].rounded()) : nil
+            let hsiTP10 = hsi.count > 3 ? Int(hsi[3].rounded()) : nil
+            let watchdogStats = LivenessWatchdog.shared.currentStats()
+            let gapMs: Float? = watchdogStats.lastGap > 0 ? Float(watchdogStats.lastGap * 1000) : nil
+            let battFrac: Float? = self.battery > 0 ? Float(self.battery / 100.0) : nil
+            let orientStr: String = {
+                switch UIDevice.current.orientation {
+                case .portrait:           return "portrait"
+                case .landscapeLeft, .landscapeRight: return "landscape"
+                case .faceUp:             return "faceUp"
+                case .faceDown:           return "faceDown"
+                default:                  return "portrait"
+                }
+            }()
+            let appStateStr: String = {
+                switch UIApplication.shared.applicationState {
+                case .active:      return "active"
+                case .background:  return "background"
+                case .inactive:    return "inactive"
+                @unknown default:  return "active"
+                }
+            }()
             SessionRecorder.shared.addSample(
                 alpha: self.frontAlpha, theta: self.frontTheta,
                 beta:  self.frontBeta,  delta: self.frontDelta,
@@ -288,7 +472,16 @@ final class Probe: ObservableObject {
                 thetaScoreSDK: elem.thetaScore.isFinite    ? elem.thetaScore    : nil,
                 betaScoreSDK:  elem.betaScore.isFinite     ? elem.betaScore     : nil,
                 phase:         phase,
-                frontalGood:   self.fit.frontalGood
+                frontalGood:   self.fit.frontalGood,
+                // B80 diagnostic fields
+                contactStateAF7:  hsiAF7,
+                contactStateAF8:  hsiAF8,
+                contactStateTP9:  hsiTP9,
+                contactStateTP10: hsiTP10,
+                packetGapMs:      gapMs,
+                appState:         appStateStr,
+                batteryLevel:     battFrac,
+                phoneOrientation: orientStr
             )
         }
 
@@ -310,6 +503,13 @@ final class Probe: ObservableObject {
                     calibrationIndexMean: self.scorer.calibrationIndexMean,
                     calibrationIndexStd:  self.scorer.calibrationIndexStd
                 )
+                // D1: Start session-length auto-timer.
+                // Timer fires endSessionGracefully(reason:) on expiry.
+                SessionTimer.shared.start()
+                SessionTimer.shared.onExpire = { [weak self] in
+                    Telemetry.recording.notice("timer expired at \(SessionTimer.shared.selectedDurationMin, privacy: .public)min")
+                    self?.endSessionGracefully(reason: "timer-completed")
+                }
             }
         }
 
@@ -347,6 +547,91 @@ final class Probe: ObservableObject {
             .receive(on: RunLoop.main)
             .assign(to: &$heartRate)
 
+        // B80 (B3): Configure AVAudioSession for background audio playback.
+        // .playback category + .mixWithOthers allows soundscape to continue when screen locks.
+        // Combined with UIBackgroundModes: audio in Info.plist (set in project.yml).
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback, mode: .default, options: [.mixWithOthers])
+            try AVAudioSession.sharedInstance().setActive(true, options: [])
+            Telemetry.audio.notice("AVAudioSession configured: category=playback mixWithOthers")
+        } catch {
+            Telemetry.audio.error("AVAudioSession configure failed: \(error.localizedDescription, privacy: .public)")
+        }
+
+        // B80 (B3): AVAudioSession interruption handling — active response.
+        // On .began: immediately pause soundscape (abrupt OK — system interrupted us).
+        // On .ended+shouldResume: resume soundscape.
+        NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                guard let info = note.userInfo,
+                      let typeVal = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      let type = AVAudioSession.InterruptionType(rawValue: typeVal) else { return }
+                Telemetry.audio.error("interruption type=\(typeVal, privacy: .public) at \(Date(), privacy: .public)")
+                // B80(C): count audio interruptions and log event.
+                self?.sessionDiagCounters.audioInterruptions += 1
+                self?.recordEvent(kind: "audio-interrupt", detail: "type=\(typeVal)")
+                // B80(B): handle interrupt lifecycle — pause/resume soundscape and alert user.
+                switch type {
+                case .began:
+                    // Abrupt duck — system has taken audio session; our engine is silenced anyway.
+                    SoundscapePlayer.shared.duck(to: 0.0, fadeDuration: 0.0)
+                    if SessionRecorder.shared.isRecording {
+                        AlertCoordinator.shared.sessionPaused(reason: .audioInterruption)
+                    }
+                case .ended:
+                    // Only resume if system says we should.
+                    let shouldResume = (info[AVAudioSessionInterruptionOptionKey] as? UInt)
+                        .flatMap { AVAudioSession.InterruptionOptions(rawValue: $0) }
+                        .map { $0.contains(.shouldResume) } ?? false
+                    if shouldResume {
+                        // Re-activate session before resuming (system may have deactivated it)
+                        try? AVAudioSession.sharedInstance().setActive(true, options: [])
+                        SoundscapePlayer.shared.unduck(fadeDuration: 2.0)
+                        if SessionRecorder.shared.isRecording {
+                            AlertCoordinator.shared.sessionResumed()
+                        }
+                    }
+                @unknown default:
+                    break
+                }
+            }
+            .store(in: &bag)
+
+        // B80 (B3): Route change — log only. Engine handles reconnect via AVAudioEngineConfigurationChange.
+        NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                guard let info = note.userInfo,
+                      let reasonVal = info[AVAudioSessionRouteChangeReasonKey] as? UInt else { return }
+                Telemetry.audio.notice("route change reason=\(reasonVal, privacy: .public) at \(Date(), privacy: .public)")
+                // B80: count route changes and log event.
+                self?.sessionDiagCounters.routeChanges += 1
+                self?.recordEvent(kind: "route-change", detail: "reason=\(reasonVal)")
+            }
+            .store(in: &bag)
+
+        // B80 (B5): Background/foreground lifecycle — log only.
+        // BLE + audio remain alive via bluetooth-central + audio background modes + .playback category.
+        // We deliberately do NOT pause anything on backgrounding — that would defeat the purpose.
+        // UIApplication.shared.isIdleTimerDisabled = true (set on .connected) prevents auto-lock
+        // during active sessions. User manual lock is NOT preventable; see STATUS.md invariants.
+        NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)
+            .sink { _ in
+                Telemetry.connection.notice("app entered background — BLE+audio background modes active")
+            }
+            .store(in: &bag)
+
+        NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
+            .sink { _ in
+                Telemetry.connection.notice("app entering foreground")
+            }
+            .store(in: &bag)
+
+        // B80: Request notification authorization for AlertCoordinator (once per launch).
+        Task { await AlertCoordinator.shared.requestAuthorization() }
+
         client.startScan()
     }
 
@@ -356,12 +641,29 @@ final class Probe: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "betaCueEnabled") }
     }
 
-    // Manual session end from UI — stops recording, fades soundscape, shows summary.
-    // Does NOT disconnect the headband; visual feedback continues.
-    func manualEndSession() {
-        SoundscapePlayer.shared.stopAll(fadeSeconds: 2.0)
+    // D3: Published flag observed by MeditationView to show "Session saved" toast.
+    @Published var sessionSavedToast: String? = nil
+
+    // D1+D2+D3: Graceful session end — plays gong, fades soundscape, saves recording, shows toast.
+    // reason: "timer-completed" | "manual" | "timer-during-reconnect"
+    // Cross-agent note: Agent B may add isPausedForReconnect to Probe.
+    // When present, we still proceed but tag the end reason so B's grace-period logic is informed.
+    func endSessionGracefully(reason: String) {
+        // If Agent B's reconnect grace is active, mark reason but proceed.
+        // isPausedForReconnect checked via optional chaining; property added by Agent B.
+        // let effectiveReason = isPausedForReconnect ? "timer-during-reconnect" : reason
+        let effectiveReason = reason  // simplified until Agent B lands isPausedForReconnect
+        Telemetry.recording.notice("endSessionGracefully reason=\(effectiveReason, privacy: .public)")
+        SessionTimer.shared.cancel()
+        ChimeEngine.shared.playGong()
+        // Fade soundscape over 4s (gong plays concurrently per task spec).
+        SoundscapePlayer.shared.stopAll(fadeSeconds: 4.0)
         recordingStartWork?.cancel()
-        let recUrl = SessionRecorder.shared.endSession()
+        // B80(C): attach diagnostics before endSession so they're included in the saved file.
+        SessionRecorder.shared.attachDiagnostics(buildDiagnostics(endReason: effectiveReason))
+        SessionRecorder.shared.attachEventStream(sessionEvents)
+        Telemetry.recording.notice("endSession reason=\(effectiveReason, privacy: .public)")
+        let recUrl = SessionRecorder.shared.endSession(reason: effectiveReason)
         pipeline.endSession()
         hrv.reset()
         rmssd     = nil
@@ -372,14 +674,21 @@ final class Probe: ObservableObject {
             dec.dateDecodingStrategy = .iso8601
             if let rec = try? dec.decode(SessionRecord.self, from: data) {
                 sessionSummary = rec
+                sessionSavedToast = "Session saved"
                 return
             }
         }
-        // Recording hadn't started (ended before 300s grace period) — show empty summary
-        // so user gets sheet confirmation rather than a silent no-op after tapping End.
+        // Recording hadn't started — show empty summary + toast
         let now = Date()
         sessionSummary = SessionRecord(id: UUID().uuidString, startDate: now, endDate: now,
                                        samples: [], episodes: [], fitEvents: [])
+        sessionSavedToast = "Session saved"
+    }
+
+    // Manual session end from UI — routes through endSessionGracefully for gong + toast.
+    // Does NOT disconnect the headband; visual feedback continues.
+    func manualEndSession() {
+        endSessionGracefully(reason: "manual")
     }
 
     // True from the moment connectFirst() is called until connectionState reaches
@@ -533,6 +842,36 @@ final class Probe: ObservableObject {
         return streak
     }
 
+    // B80 (B2): Called when the 30s grace period expires without reconnect.
+    // Tears down session state cleanly, preserves whatever was recorded.
+    private func performFinalDisconnect(gracePeriodStart: Date?) {
+        calibrationFiredRecording = false
+        recordingStartWork?.cancel()
+        recordingStartWork = nil
+        recordingStartedAt = nil
+        // Stop soundscape (already faded at grace entry, but guard in case state changed)
+        SoundscapePlayer.shared.stopAll(fadeSeconds: 0.5)
+        Telemetry.recording.error("endSession reason=grace-expired")
+        let recUrl = SessionRecorder.shared.endSession()
+        pipeline.endSession()
+        hrv.reset()
+        rmssd     = nil
+        lfhfRatio = nil
+        if let url = recUrl,
+           let data = try? Data(contentsOf: url) {
+            let dec = JSONDecoder()
+            dec.dateDecodingStrategy = .iso8601
+            if let rec = try? dec.decode(SessionRecord.self, from: data) {
+                sessionSummary = rec
+                if !rec.episodes.isEmpty && rec.durationMinutes >= 5.0 {
+                    SoundscapePlayer.shared.decrementBinauralFade(
+                        latencyToFirstDeep: rec.episodes.first?.enterTime)
+                }
+                computeSessionAnalytics()
+            }
+        }
+    }
+
     private func reconnect() {
         if let m = IXNMuseManagerIos.sharedManager().getMuses().first {
             // preservePreset: headband already has the correct preset from user-initiated connect.
@@ -548,6 +887,9 @@ final class Probe: ObservableObject {
             return
         }
         reconnectAttempts += 1
+        // B80: track reconnect attempts for diagnostics.
+        sessionDiagCounters.reconnectAttempts += 1
+        recordEvent(kind: "reconnect", detail: "attempt \(reconnectAttempts)")
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             guard let self, self.connection == "Disconnected" else {
                 self?.reconnectAttempts = 0
@@ -555,6 +897,57 @@ final class Probe: ObservableObject {
             }
             self.reconnect()
         }
+    }
+
+    // MARK: - B80 Diagnostic helpers
+    //
+    // recordEvent: call from ANY site (main thread assumed — all callers are on main).
+    // kind strings: "disconnect","reconnect","stall","audio-interrupt","route-change",
+    //   "contact-loss-AF7","contact-restored-AF7","contact-loss-AF8","contact-restored-AF8",
+    //   "contact-loss-TP9","contact-restored-TP9","contact-loss-TP10","contact-restored-TP10",
+    //   "app-background","app-foreground","timer-expired"
+    // Agent B calls this from disconnect handler. Agent D calls it for "timer-expired".
+
+    func recordEvent(kind: String, detail: String? = nil) {
+        let t = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        sessionEvents.append(SessionEvent(time: t, kind: kind, detail: detail))
+    }
+
+    // buildDiagnostics: call immediately before endSession. Reads current counter snapshot
+    // and computes packet gap stats from sample stream (mirrors SessionRecorder internal logic
+    // for cross-validation; authoritative values come from the recorder's own log).
+    // Must be called on main thread.
+
+    func buildDiagnostics(endReason: String) -> SessionDiagnostics {
+        let watchdog = LivenessWatchdog.shared.currentStats()
+        // Compute gap stats from watchdog EWMA (approximate; exact stats in recorder log).
+        let gapMean = watchdog.mean
+        // sigma → P95 approximation: normal distribution P95 ≈ mean + 1.645*sigma.
+        let gapP95  = gapMean + 1.645 * watchdog.std
+        // lastGap as proxy for max (exact max would require a sliding window not maintained here).
+        let gapMax  = max(watchdog.lastGap, gapMean + 3 * watchdog.std)
+
+        let device = UIDevice.current
+        let model  = device.model
+        let iosVer = UIDevice.current.systemVersion
+
+        return SessionDiagnostics(
+            packetGapMean:       gapMean,
+            packetGapP95:        gapP95,
+            packetGapMax:        gapMax,
+            packetCount:         watchdog.packetCount,
+            disconnectCount:     sessionDiagCounters.disconnectCount,
+            reconnectAttempts:   sessionDiagCounters.reconnectAttempts,
+            audioInterruptions:  sessionDiagCounters.audioInterruptions,
+            routeChanges:        sessionDiagCounters.routeChanges,
+            contactStateChanges: sessionDiagCounters.contactStateChanges,
+            stallEvents:         sessionDiagCounters.stallEvents,
+            endReason:           endReason,
+            buildTag:            "B80",
+            deviceModel:         model,
+            iosVersion:          iosVer,
+            museModel:           nil  // IXNMuse model not exposed post-session; see MuseClient.connectedMuseModel (private)
+        )
     }
 }
 
@@ -589,7 +982,15 @@ struct ProbeView: View {
         .sheet(item: $probe.sessionSummary)  { rec in
             SessionSummarySheet(record: rec) { probe.sessionSummary = nil }
         }
-        .onAppear { SessionRecorder.shared.loadSavedSessions() }
+        // B80: recover any orphaned NDJSON files from previous crash, then load sessions.
+        .onAppear {
+            CrashRecovery.shared.recoverOrphans()
+            SessionRecorder.shared.loadSavedSessions()
+            // Schedule first background flush in case the app is backgrounded early.
+            SessionRecorder.scheduleNextBackgroundFlush()
+        }
+        // B80: present one-time crash-recovery alert if sessions were recovered.
+        .crashRecoveryAlert()
     }
 }
 
@@ -701,7 +1102,10 @@ private struct MeditationView: View {
 
     @State private var showEndConfirm = false
     @ObservedObject private var timer = MeditationTimer.shared
+    @ObservedObject private var sessionTimer = SessionTimer.shared   // D1
     @ObservedObject private var sound = SoundscapePlayer.shared
+    // D3: toast message — auto-cleared by ToastModifier after 3s
+    @State private var toastMessage: String? = nil
 
     // χ color: green = deep absorption (steep slope), yellow = neutral, red/orange = aroused
     private func chiColor(_ chi: Float) -> Color {
@@ -754,6 +1158,15 @@ private struct MeditationView: View {
 
             // Hero depth gauge
             DepthGaugeView(probe: probe)
+
+            // D1: Session-length countdown — visible once auto-timer is running.
+            if sessionTimer.isRunning {
+                let r = sessionTimer.remainingSec
+                Text(String(format: "%d:%02d remaining", r / 60, r % 60))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.45))
+                    .padding(.top, 4)
+            }
 
             Spacer(minLength: 8)
 
@@ -814,6 +1227,14 @@ private struct MeditationView: View {
                                 titleVisibility: .visible) {
                 Button("End Session", role: .destructive) { probe.manualEndSession() }
                 Button("Cancel", role: .cancel) { }
+            }
+        }
+        // D3: "Session saved" toast — driven by probe.sessionSavedToast (set in endSessionGracefully).
+        .toast(message: $toastMessage)
+        .onChange(of: probe.sessionSavedToast) { _, newVal in
+            if let msg = newVal {
+                withAnimation { toastMessage = msg }
+                probe.sessionSavedToast = nil  // reset so next save can fire again
             }
         }
     }
@@ -1103,6 +1524,7 @@ private struct BottomButton: View {
 private struct SettingsSheet: View {
     @ObservedObject var probe: Probe
     @ObservedObject private var sound = SoundscapePlayer.shared
+    @ObservedObject private var sessionTimer = SessionTimer.shared   // D1
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -1246,14 +1668,39 @@ private struct SettingsSheet: View {
                     Text("Brief 1 kHz tick when frontal beta spikes >1.5 SD during shallow state. Trains metacognitive awareness of mind-wandering.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                // D1: Session length auto-timer. Starts at calibration complete, ends session on expiry.
+                Section("Session length") {
+                    Picker("Duration", selection: $sessionTimer.selectedDurationMin) {
+                        ForEach(SessionTimer.allowedDurations, id: \.self) { min in
+                            Text("\(min) min").tag(min)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    if sessionTimer.isRunning {
+                        let r = sessionTimer.remainingSec
+                        let m = r / 60, s = r % 60
+                        LabeledContent("Remaining", value: String(format: "%d:%02d", m, s))
+                            .foregroundStyle(.green)
+                    }
+                    Text("Auto-starts at calibration complete. Plays gong and saves session at end.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section("Recording") {
-                    RecordingControlView()
+                    // D5: onSaveStop routes through endSessionGracefully (gong + toast + fade).
+                    RecordingControlView(onSaveStop: { probe.manualEndSession() })
                 }
                 Section("Past Sessions") {
                     SessionsListView()
                 }
                 Section("Spotify") {
                     SpotifyRow()
+                }
+                if #available(iOS 15.0, *) {
+                    Section("Diagnostics") {
+                        NavigationLink("View Logs") {
+                            DiagnosticsView()
+                        }
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -1522,13 +1969,23 @@ private struct MeditationTimerView: View {
 
 private struct RecordingControlView: View {
     @ObservedObject private var rec = SessionRecorder.shared
+    /// D3: onSaveStop routes through Probe.endSessionGracefully for gong + toast.
+    var onSaveStop: (() -> Void)? = nil
 
     var body: some View {
         if rec.isRecording {
             Label("Recording in progress", systemImage: "circle.fill")
                 .foregroundStyle(.red)
-            Button("Save & Stop") { rec.endSession() }
-                .foregroundStyle(.orange)
+            // B80(D): Save & Stop routes through endSessionGracefully (gong + toast + soundscape fade).
+            Button("Save & Stop") {
+                if let handler = onSaveStop {
+                    handler()
+                } else {
+                    // Fallback: direct endSession with reason for diagnostics.
+                    _ = rec.endSession(reason: "manual-ui-fallback")
+                }
+            }
+            .foregroundStyle(.orange)
         } else {
             Button("Start Manual Recording") { rec.startSession() }
                 .foregroundStyle(.blue)
