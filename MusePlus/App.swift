@@ -73,10 +73,21 @@ final class Probe: ObservableObject {
     private var lastBetaCueDate = Date.distantPast
 
     func start() {
+        // B77.2: cache IXNMuse objects so connectFirst() can connect without re-polling
+        // getMuses(). Also drives pendingConnect: if list was empty when user tapped,
+        // this sink fires doConnect() the moment museListChanged() delivers a Muse.
         client.discoveredMuses
-            .map { $0.compactMap { $0.getName() } }
             .receive(on: RunLoop.main)
-            .assign(to: &$muses)
+            .sink { [weak self] museList in
+                guard let self else { return }
+                self.discoveredMuseObjects = museList
+                self.muses = museList.compactMap { $0.getName() }
+                if self.pendingConnect, let m = museList.first {
+                    self.pendingConnect = false
+                    self.doConnect(to: m)
+                }
+            }
+            .store(in: &bag)
 
         client.connectionState
             .map { s -> String in
@@ -98,7 +109,10 @@ final class Probe: ObservableObject {
                 switch state {
                 case .connected:
                     UIApplication.shared.isIdleTimerDisabled = true
+                    self?.connectingTimeoutWork?.cancel()
+                    self?.connectingTimeoutWork = nil
                     self?.isConnecting = false
+                    self?.pendingConnect = false
                     self?.sessionStart = Date()
                     self?.sampleIndex  = 0
                     self?.bandHistory  = []
@@ -111,7 +125,10 @@ final class Probe: ObservableObject {
                     self?.lastBetaCueDate = .distantPast
                 case .disconnected:
                     UIApplication.shared.isIdleTimerDisabled = false
+                    self?.connectingTimeoutWork?.cancel()
+                    self?.connectingTimeoutWork = nil
                     self?.isConnecting = false
+                    self?.pendingConnect = false
                     self?.calibrationFiredRecording = false
                     self?.recordingStartWork?.cancel()
                     self?.recordingStartWork = nil
@@ -155,6 +172,9 @@ final class Probe: ObservableObject {
                 // TP9/TP10 (ear) flicker on Athena even with good fit; using allGood
                 // pinned the gauge in contact-loss decay mode for the entire session.
                 self.gate.contactsGood = snap.frontalGood
+                // B77.2: propagate frontal contact quality to EEGPipeline so the
+                // aperiodic fit cache isn't updated from bad-contact windows.
+                self.pipeline.frontalContactGood = snap.frontalGood
                 // Gate contact chimes behind calibration: during 60s settle-in the headband
                 // frequently fluctuates between good/bad contact. Chiming before calibration
                 // completes is noisy and unhelpful — user can see contact state via dots.
@@ -267,7 +287,8 @@ final class Probe: ObservableObject {
                 alphaScoreSDK: elem.alphaScore.isFinite    ? elem.alphaScore    : nil,
                 thetaScoreSDK: elem.thetaScore.isFinite    ? elem.thetaScore    : nil,
                 betaScoreSDK:  elem.betaScore.isFinite     ? elem.betaScore     : nil,
-                phase:         phase
+                phase:         phase,
+                frontalGood:   self.fit.frontalGood
             )
         }
 
@@ -365,41 +386,49 @@ final class Probe: ObservableObject {
     // .connected or .disconnected. Prevents the connect button from spamming the SDK
     // with multiple connect() calls if the user double-taps during the BLE handshake.
     @Published var isConnecting: Bool = false
+    // B77.2: cached IXNMuse objects from the last museListChanged() callback.
+    // Avoids re-calling getMuses() at connect time (which can briefly return empty
+    // even when a Muse was just displayed in the UI).
+    private var discoveredMuseObjects: [IXNMuse] = []
+    // B77.2: set when connectFirst() fires before a Muse has appeared in the scan list.
+    // The discoveredMuses sink calls doConnect() when museListChanged() delivers one.
+    private var pendingConnect = false
+    // B77.2: 15s watchdog — clears isConnecting if BLE handshake never fires .connected
+    // or .disconnected. Prevents the button staying permanently in spinner state if the
+    // SDK silently fails (e.g., headband out of range after getMuses() returned it).
+    private var connectingTimeoutWork: DispatchWorkItem?
 
     func connectFirst() {
-        // Idempotent guard: don't re-issue connect if one is already in flight.
         guard !isConnecting, connection != "Connected" else { return }
         isConnecting = true
-        // Try up to 3 times with 200ms gap — getMuses() can briefly return empty during
-        // re-scan even when a Muse is on screen. Retry covers that gap without UI hint
-        // that anything went wrong.
-        attemptConnect(retriesLeft: 3)
+        let work = DispatchWorkItem { [weak self] in
+            self?.isConnecting = false
+            self?.pendingConnect = false
+            self?.connectingTimeoutWork = nil
+        }
+        connectingTimeoutWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
+        if let m = discoveredMuseObjects.first {
+            // Muse already in cached list — connect without polling getMuses().
+            doConnect(to: m)
+        } else {
+            // List currently empty (scan still in progress). Flag set; the discoveredMuses
+            // sink will call doConnect() the moment museListChanged() delivers a Muse.
+            pendingConnect = true
+        }
     }
 
-    private func attemptConnect(retriesLeft: Int) {
-        if let m = IXNMuseManagerIos.sharedManager().getMuses().first {
-            client.connect(to: m)
-            scorer.startCalibration()
-            gate.reset()
-            // B77: restore ECDF-space adaptive thresholds. Old "adaptiveDeepThreshold" key
-            // stored sigmoid-space value; ignored after migration. New keys:
-            // adaptiveEnterEcdf / adaptiveExitEcdf in [0.50, 0.85] / [0.40, 0.75].
-            let savedEnter = UserDefaults.standard.float(forKey: "adaptiveEnterEcdf")
-            let savedExit  = UserDefaults.standard.float(forKey: "adaptiveExitEcdf")
-            if savedEnter >= 0.50 && savedExit >= 0.40 {
-                gate.setEcdfThresholds(enter: savedEnter, exit: savedExit)
-            } else {
-                gate.setEcdfThresholds(enter: 0.70, exit: 0.50)
-            }
-        } else if retriesLeft > 0 {
-            // No muse in SDK list right now — wait 200ms and retry. Connection state
-            // remains "isConnecting" the whole time so the UI shows feedback.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                self?.attemptConnect(retriesLeft: retriesLeft - 1)
-            }
+    private func doConnect(to muse: IXNMuse) {
+        client.connect(to: muse)
+        scorer.startCalibration()
+        gate.reset()
+        // B77: restore ECDF-space adaptive thresholds.
+        let savedEnter = UserDefaults.standard.float(forKey: "adaptiveEnterEcdf")
+        let savedExit  = UserDefaults.standard.float(forKey: "adaptiveExitEcdf")
+        if savedEnter >= 0.50 && savedExit >= 0.40 {
+            gate.setEcdfThresholds(enter: savedEnter, exit: savedExit)
         } else {
-            // All retries exhausted — clear connecting flag so user can tap again.
-            isConnecting = false
+            gate.setEcdfThresholds(enter: 0.70, exit: 0.50)
         }
     }
 

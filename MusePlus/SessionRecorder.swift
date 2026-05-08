@@ -36,6 +36,9 @@ struct SessionSample: Codable {
     var thetaScoreSDK:            Float? = nil
     var betaScoreSDK:             Float? = nil
     var phase:                    String? = nil  // "warmup" (first 300s) or "main"
+    // Build 77.2 — AF7+AF8 contact quality at sample time; nil in pre-B77.2 sessions.
+    // Distinguishes genuine depth state from contact-loss decay in offline analysis.
+    var frontalGood:              Bool? = nil
 }
 
 struct DeepEpisode: Codable {
@@ -148,7 +151,8 @@ final class SessionRecorder: ObservableObject {
                    depthZ: Float? = nil, ecdfDisplay: Float? = nil,
                    alphaRel: Float? = nil, thetaRel: Float? = nil, betaRel: Float? = nil,
                    alphaScoreSDK: Float? = nil, thetaScoreSDK: Float? = nil,
-                   betaScoreSDK: Float? = nil, phase: String? = nil) {
+                   betaScoreSDK: Float? = nil, phase: String? = nil,
+                   frontalGood: Bool? = nil) {
         guard isRecording, var rec = current else { return }
         let t = Date().timeIntervalSince(rec.startDate)
         var sample = SessionSample(
@@ -170,6 +174,7 @@ final class SessionRecorder: ObservableObject {
         sample.thetaScoreSDK = thetaScoreSDK
         sample.betaScoreSDK  = betaScoreSDK
         sample.phase         = phase
+        sample.frontalGood   = frontalGood
         rec.samples.append(sample)
         if inDeep && !lastDeepState {
             rec.episodes.append(DeepEpisode(enterTime: t, exitTime: nil))

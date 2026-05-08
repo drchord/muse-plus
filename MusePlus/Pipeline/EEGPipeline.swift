@@ -40,6 +40,11 @@ final class EEGPipeline {
     // Cache invalidated only on session reset to avoid stale values across sessions.
     private var lastGoodAperiodicFit: AperiodicResult? = nil
 
+    // Set from App.swift fitCheck sink. Bad frontal contact → noisy PSD even if R² passes
+    // by chance. Double-gating prevents caching an artifact-driven fit that could corrupt
+    // correction for the next several windows until a new good fit arrives.
+    var frontalContactGood: Bool = true
+
     init() {
         let n = EEGPipeline.windowSize
         log2n    = vDSP_Length(log2(Float(n)))
@@ -101,8 +106,10 @@ final class EEGPipeline {
             offset: fitOffsets.reduce(0, +) / Float(fitOffsets.count),
             r2:     fitR2s.reduce(0, +)     / Float(fitR2s.count)
         )
-        // Update cache when current window passed R² gate.
-        if let mf = meanFit { lastGoodAperiodicFit = mf }
+        // Update cache only when R² gate passed AND frontal contacts are good.
+        // R² alone can pass on a bad-contact window by chance (flat noisy PSD ≈ straight line).
+        // Frontal contact provides an independent quality signal from the Muse HSI.
+        if let mf = meanFit, frontalContactGood { lastGoodAperiodicFit = mf }
 
         onAperiodicUpdate?(meanChi)
         onAperiodicFitUpdate?(meanFit)

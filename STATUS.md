@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-07 (B77 ready to push)
+**Last updated:** 2026-05-08 (B77.2 coded — awaiting push approval)
 
 ## Build State
 
@@ -14,7 +14,8 @@
 | **74** | Soundscape overhaul + HRV + Ad Hoc CI | ✅ TestFlight | Last stable before depth fixes |
 | 75 | Depth scoring overhaul (calibration discard, MAD baseline) | ✅ TestFlight | Saturation persisted — sigmoid display crushed all dynamic range |
 | 76 | Stored calibration metadata for analysis | ✅ TestFlight | Same display saturation as B75; data analysis confirmed root cause |
-| **77** | ECDF display + aperiodic correction + SDK Elements + tap-to-mark + going-deeper chime | ⚙️ **Building** | **Comprehensive overhaul — see B77 section below** |
+| 77 | ECDF display + aperiodic correction + SDK Elements + tap-to-mark + going-deeper chime | ✅ TestFlight | B77 + B77.1 shipped |
+| **77.2** | isConnecting 15s watchdog, frontalGood per-sample, aperiodic cache gated on contact | 🟡 **Coded — awaiting push** | B77.2 improvements from audit |
 
 ---
 
