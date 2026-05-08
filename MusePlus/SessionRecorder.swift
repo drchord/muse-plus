@@ -333,7 +333,7 @@ final class SessionRecorder: ObservableObject {
                 let sorted = gaps.sorted()
                 let p95    = sorted[min(Int(Double(sorted.count) * 0.95), sorted.count - 1)]
                 let maxGap = sorted.last ?? 0
-                Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) duration=\(String(format: \"%.1f\", times.last ?? 0), privacy: .public)s gap_mean=\(String(format: \"%.3f\", mean), privacy: .public)s gap_p95=\(String(format: \"%.3f\", p95), privacy: .public)s gap_max=\(String(format: \"%.3f\", maxGap), privacy: .public)s")
+                Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) duration=\(String(format: "%.1f", times.last ?? 0), privacy: .public)s gap_mean=\(String(format: "%.3f", mean), privacy: .public)s gap_p95=\(String(format: "%.3f", p95), privacy: .public)s gap_max=\(String(format: "%.3f", maxGap), privacy: .public)s")
             } else {
                 Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) (too few to compute gaps)")
             }

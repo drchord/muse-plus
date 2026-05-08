@@ -167,7 +167,7 @@ final class Probe: ObservableObject {
                         SessionRecorder.shared.recordGap(reason: "ble-drop", durationSec: graceDuration)
                         // Alert user that session is back
                         AlertCoordinator.shared.sessionResumed()
-                        Telemetry.connection.notice("grace reconnect succeeded after \(String(format: \"%.1f\", graceDuration), privacy: .public)s")
+                        Telemetry.connection.notice("grace reconnect succeeded after \(String(format: "%.1f", graceDuration), privacy: .public)s")
                         return
                     }
                     self?.sessionStart = Date()
