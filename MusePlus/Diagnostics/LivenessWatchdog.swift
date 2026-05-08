@@ -148,7 +148,7 @@ final class LivenessWatchdog {
         }
         lastStallFiredAt = Date()
 
-        Telemetry.eeg.error("EEG liveness stall: gap=\(String(format: "%.2f", elapsed), privacy: .public)s tau=\(String(format: "%.4f", ewmaTau), privacy: .public)s sigma=\(String(format: "%.4f", ewmaSigma), privacy: .public)s threshold=\(String(format: "%.2f", threshold), privacy: .public)s packets=\(packetCount, privacy: .public)")
+        Telemetry.eeg.error("EEG liveness stall: gap=\(String(format: "%.2f", elapsed), privacy: .public)s tau=\(String(format: "%.4f", self.ewmaTau), privacy: .public)s sigma=\(String(format: "%.4f", self.ewmaSigma), privacy: .public)s threshold=\(String(format: "%.2f", threshold), privacy: .public)s packets=\(self.packetCount, privacy: .public)")
 
         onStallDetected?(elapsed)
     }

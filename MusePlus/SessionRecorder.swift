@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import BackgroundTasks
+import UIKit
 
 // MARK: - Data structures
 
@@ -510,7 +511,7 @@ final class SessionRecorder: ObservableObject {
         FileManager.default.createFile(
             atPath: url.path,
             contents: nil,
-            attributes: [.protectionKey: FileProtectionType.completeFileProtectionUnlessOpen]
+            attributes: [.protectionKey: FileProtectionType.completeUnlessOpen]
         )
 
         guard let handle = try? FileHandle(forWritingTo: url) else {

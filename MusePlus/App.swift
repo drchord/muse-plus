@@ -196,7 +196,7 @@ final class Probe: ObservableObject {
                     self?.connectingTimeoutWork = nil
                     self?.isConnecting = false
                     self?.pendingConnect = false
-                    let stats = self?.client.eegPacketRollingStats() ?? (0, 0)
+                    let stats: (count30s: Int, lastPacketAge: TimeInterval) = self?.client.eegPacketRollingStats() ?? (count30s: 0, lastPacketAge: 0)
                     Telemetry.eeg.error("post-disconnect packets-last-30s=\(stats.count30s, privacy: .public) lastPacketAge=\(stats.lastPacketAge, privacy: .public)s")
                     // B80 (B2): if a session is active, enter 30s grace period instead of
                     // immediately ending. Soundscape stops (2s fade), alert fires, reconnect
