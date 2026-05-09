@@ -130,3 +130,45 @@
 | 2026-04-29 | 19–30 | EEGPipeline FFT, DepthScore, DepthGate, UI wiring |
 | 2026-04-30 | 31–36 | Spotify PKCE, soundscapes, chime synthesis |
 | 2026-05-01 | 37–44 | Audio crash fix (explicit format), timer, session recording, auto-reconnect, signal quality |
+
+---
+
+## 2026-05-09 — Sparky — ~6h — B82 → B83
+
+**Focus.** B82 user-reported issues (no gong, TP9/TP10 yellow/green flicker, no countdown timer). Drove B83 as "instrumentation overhaul + audibility fix + everything-deferred-shipped" via 5-round audit-and-fix loop on user demand.
+
+**Decided.**
+- Synthesized gong fundamental at 84 Hz was below iPhone built-in speaker rolloff (~200 Hz). Raised to 432 Hz across playGong/playSuccessChime/playTimerEnd. Added EndGongPlayer for file-based playback (AVAudioPlayer); BowlAudioGenerator synthesizes Documents/Sounds/.wav at first launch. Bundle .m4a takes priority if user adds Pixabay tibetan-bowl files.
+- B80 instrumentation was broken: per-sample contactState* fields all `undefined`, eventStream array empty (only one recordEvent site existed). B83 ships 5 new NDJSON _type records (event, audioState, gongLifecycle, mainStall, uiState, denoiseStats) + 7 SessionRecorder.append* helpers. Single source of truth = NDJSON.
+- Timer HUD redesigned: 28pt rounded mono digits, opacity 0.85, MM:SS + elapsed/total. Presets [60,75,90] → [5,10,15,20,25,30,45,60,75,90,120].
+- HSI hysteresis: 4-of-5 sliding majority on rounded tier suppresses single-sample chip flicker. Probe.lastValidHsi retainer fixes the race that left B82 contactState fields nil.
+- EEGDenoiser 3-stage cascade (1077 LOC): db4 SWT + Riemannian Potato + rASR-lite. Sidecar mode — measurement-only via EEGWindowBuffer. Live-signal replacement deferred to B84 pending tap-mark validation. True log-Euclidean running mean (Arsigny 2006) via mat4LogSymm/mat4ExpSymm — NOT the Euclidean approximation that earlier commit used. Citation corrected: Barachant, Andreev & Congedo 2013 (NOT Barachant & Bonnet — agent fabricated authors initially).
+- Pre-session fit-stability banner (B81 carryover): 5-second consecutive-allGood gate during calibration. Driven by pipeline.onBandPowers (~2 Hz steady), NOT by fit sink (CurrentValueSubject only fires on CHANGE — round-3 had this wrong).
+- Per-session A/B/C/F grade in SessionDiagnostics. Computed from FIT-event rate not HSI-tier flips (round-3 corrected the metric conflation).
+- museModel populated via MuseClient.museModelString (was hardcoded nil).
+- 5 XCTest files (522 LOC).
+- BowlAudioGenerator at app init writes ~14ms of file I/O — visible only on first launch.
+
+**Audit loop history.** User explicitly demanded loop until I could honestly say everything fixed. Five rounds:
+1. Initial commit `515304d` — instrumentation + audibility + HUD
+2. Self-audit found 15 items → `a0116e3` closes deferred items
+3. Round-2 audit → `b50191d` Riemannian log-Euclidean upgrade, citation fix, fit-banner build, museModel exposure, fireDiagnosticsSnapshot at gong, Mirror→direct, dual-write doc, grade metric correction
+4. Round-3 audit → `a6826d9` fit-stability tick freeze fix (was reading wrong sink), chimeVolume cast bug, doc cleanups
+5. Round-4 audit → `32e1070` gongLifecycle source-string lying on synth fallback
+6. Final round → admitted residual unknowns (compile risk, mat4LogSymm failure rate, bowl audio quality on device, MainThreadStall stack limitation)
+
+CI: run 25607452412 FAILED on `BowlAudioGenerator.swift:99` AVAudioFormat optional unwrap + iOS 17 onChange syntax. Hotfix `9a82d6e` pushed. CI run 25607522383 GREEN in 113s. Build counter 83 in TestFlight processing.
+
+**Left off at.** B83 CI green, TestFlight processing IPA. Awaiting device install + 16-item validation checklist in STATUS.md. Critical first checks: bowl audible on built-in speaker (no earbuds), gongLifecycle scheduled→started→completed in NDJSON, audioState.chimeVolumeSetting reflects actual setting (≥0.7 expected — confirmed user did not adjust).
+
+**Next session needs.** Sugato runs a B83 session. Sends NDJSON. I analyze:
+1. gongLifecycle path complete?
+2. audioState shows builtInSpeaker output + chimeVolumeSetting reading?
+3. denoiseStats records present + alphaPowerRatio in [0.95, 1.05] for clean alpha intervals?
+4. mainStall count = 0 in healthy session (or non-zero quantifies "freezing" claim)?
+5. SessionDiagnostics.contactQualityGrade matches user's perceived headband stability?
+6. fitEventsPerMin matches B82 baseline (~9.3/min) or improved post-banner?
+
+If denoiser shows benefit on tap-marks: B84 wires live-signal replacement. If not: revert filter, investigate why.
+
+**Honest residual uncertainty.** mat4LogSymm failure rate not telemetered. Bowl audio quality not ear-tested. MainThreadStall captures post-recovery stack not blocking-stack (documented). EEGDenoiser tests written by agent against pre-round-3 surface — possible mismatch CI didn't catch (only one error surfaced; tests might silently skip).
