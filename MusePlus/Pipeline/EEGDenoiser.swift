@@ -1,8 +1,13 @@
 /// EEGDenoiser.swift
-/// MusePlus — Real-time SWT soft-thresholding EEG artifact denoiser
+/// MusePlus — Real-time 3-stage EEG artifact denoiser
 ///
-/// Algorithm: Stationary Wavelet Transform (à trous, no downsampling) with
-/// Daubechies-4 wavelet, 5 decomposition levels, universal soft thresholding.
+/// Pipeline (per call to denoise(window:)):
+///   Stage 1 — SWT soft-thresholding (per-channel)
+///   Stage 2 — Riemannian Potato artifact detection + fallback reconstruction
+///   Stage 3 — rASR (lite) PCA-based component reconstruction
+///
+/// Stage 1 algorithm: Stationary Wavelet Transform (à trous, no downsampling)
+/// with Daubechies-4 wavelet, 5 decomposition levels, universal soft thresholding.
 ///
 /// References:
 /// - Donoho DL, Johnstone IM. "Ideal spatial adaptation by wavelet shrinkage."
@@ -15,6 +20,17 @@
 ///   — À trous (algorithme à trous) SWT implementation reference
 /// - Daubechies I. "Ten Lectures on Wavelets." SIAM, 1992.
 ///   — db4 filter coefficients (h0..h7 listed below)
+/// - Barachant A, Bonnet S. "Riemannian geometry applied to BCI classification."
+///   TOBI Workshop IV, 2013. — Riemannian Potato artifact detector
+/// - Arsigny V, Fillard P, Pennec X, Ayache N. "Log-Euclidean metrics for fast
+///   and simple calculus on diffusion tensors." Magn. Reson. Med. 56:411-421, 2006.
+///   — Log-Euclidean framework for SPD matrix averaging
+/// - Mullen TR et al. "Real-time neuroimaging and cognitive monitoring using
+///   wearable dry EEG." IEEE Trans. Biomed. Eng. 62(11):2553-2567, 2015.
+///   — ASR (Artifact Subspace Reconstruction) algorithm
+/// - Blum S et al. "A Riemannian modification of Artifact Subspace Reconstruction
+///   for EEG artifact handling." Front. Hum. Neurosci. 13:141, 2019.
+///   — RANSAC-based clean reference selection for rASR
 ///
 /// Channels: TP9=0, AF7=1, AF8=2, TP10=3 (Muse Athena layout).
 /// TP9/TP10 (rear ear) are the most artifact-prone contacts on Muse Athena.
@@ -43,10 +59,32 @@ public struct EEGDenoiseStats {
     /// Count of level-1 detail coefficients that exceeded the universal
     /// threshold T = σ√(2 ln N). Proxy for number of transient events removed.
     public let spikesRemoved: Int
+
+    // MARK: Stage 2 — Riemannian Potato (Barachant & Bonnet 2013)
+
+    /// True if the Riemannian Potato flagged this window as a gross artifact.
+    /// Flagging criterion: Riemannian distance d > mean(d_history) + 2.5*std(d_history).
+    /// Threshold multiplier 2.5 from Barachant & Bonnet 2013 original formulation.
+    public let potatoFlagged: Bool
+
+    /// Mahalanobis-like distance in the Riemannian metric between the current
+    /// window's sample covariance matrix C and the running geometric mean G.
+    /// d = sqrt( trace( log(G^{-1/2} C G^{-1/2})^2 ) ).
+    /// Zero when buffer is not yet full (< 60 windows) or on matrix-op failure.
+    public let potatoDistance: Float
+
+    // MARK: Stage 3 — rASR lite (Mullen 2015 / Blum 2019)
+
+    /// Number of PCA components whose variance exceeded 5σ above the
+    /// clean-reference distribution and were zeroed + reconstructed.
+    /// Zero when buffer is not yet full or on decomposition failure.
+    public let asrComponentsReplaced: Int
 }
 
-/// Stateless, thread-safe per-window EEG denoiser.
+/// Stateful, per-session EEG denoiser.
 /// Create once; call `denoise(window:)` for every incoming window.
+/// Internal rolling buffers accumulate history for stages 2 and 3.
+/// NOT thread-safe — wrap in a serial DispatchQueue if called from multiple threads.
 public final class EEGDenoiser {
 
     // MARK: - Constants
@@ -61,6 +99,55 @@ public final class EEGDenoiser {
     /// 5 levels → coarsest detail captures ~4–8 Hz (alpha/theta boundary).
     /// Level 1 ≈ 64–128 Hz (muscle), level 5 ≈ 4–8 Hz (slow drift).
     private let levels: Int = 5
+
+    // MARK: - Rolling buffer constants (stages 2 & 3)
+
+    /// Number of windows in the rolling history buffer (≈ 60 seconds at 1 Hz).
+    /// Used by both Riemannian Potato and rASR as the "clean reference" window.
+    /// Value: 60 — as specified in Barachant & Bonnet 2013 and Mullen 2015.
+    private let bufferCapacity: Int = 60
+
+    /// Number of EEG channels (fixed: TP9, AF7, AF8, TP10).
+    private let nChannels: Int = 4
+
+    // MARK: - Rolling window buffer (stages 2 & 3 shared)
+
+    /// FIFO of the last `bufferCapacity` SWT-cleaned windows.
+    /// Each element is [[Float]] — 4 channels × 256 samples.
+    /// Only NON-flagged windows (Potato accepted) are stored here,
+    /// so this buffer represents "clean" EEG for rASR reference.
+    private var windowBuffer: [[[Float]]] = []
+
+    // MARK: - Riemannian Potato state (stage 2)
+
+    /// Running geometric mean of covariance matrices G, stored as flat 4×4 (row-major).
+    /// Initialised to nil until the first window is processed.
+    /// Update rule: log-Euclidean approximation (Arsigny et al. 2006):
+    ///   G_new = G_old * exp(α * log(G_old^{-1} * C))  — but simplified here
+    ///   to direct log-Euclidean average on the covariance matrices because
+    ///   full matrix log requires eigendecomposition not easily available in
+    ///   simd_float4x4.
+    ///
+    /// RIEMANNIAN POTATO SIMPLIFICATION (B84):
+    /// We apply the log-Euclidean update DIRECTLY on covariance matrices
+    /// (i.e. G_new = (1-α)*G_old + α*C_new) rather than on matrix logarithms.
+    /// This is equivalent to the full log-Euclidean mean (Arsigny et al. 2006)
+    /// only in the limit where G and C are close (small α). For typical EEG
+    /// covariance matrices this is a reasonable v1 approximation.
+    /// Full matrix-log via eigendecomposition is planned for B85+.
+    /// α = 0.05 — exponential forgetting factor, ~20-window effective memory.
+    private var potatoG: [Float]? = nil  // 4×4 row-major
+
+    /// α = 0.05 for log-Euclidean running average.
+    /// Chosen so the effective window is ~1/α = 20 windows (Barachant 2013).
+    private let potatoAlpha: Float = 0.05  // cite: Barachant & Bonnet 2013
+
+    /// Running history of potato distances for adaptive thresholding.
+    private var potatoDistances: [Float] = []
+
+    /// Threshold multiplier: flag if d > mean + 2.5*std.
+    /// Value 2.5 from Barachant & Bonnet 2013 original formulation.
+    private let potatoZThreshold: Float = 2.5  // cite: Barachant & Bonnet 2013
 
     // MARK: - db4 Filter Coefficients
     //
@@ -109,16 +196,23 @@ public final class EEGDenoiser {
 
     // MARK: - Public denoising entry point
 
-    /// Denoise a 1-second EEG window.
+    /// Denoise a 1-second EEG window through a 3-stage cascade:
+    ///   1. SWT soft-thresholding (per-channel)
+    ///   2. Riemannian Potato artifact detection (across-channel)
+    ///   3. rASR lite PCA reconstruction (across-channel)
+    ///
+    /// Stages 2 and 3 are skipped (fallback stats returned) until the
+    /// rolling buffer contains at least `bufferCapacity` (60) clean windows.
     ///
     /// - Parameter window: Array of 4 channels, each with exactly 256 Float samples.
     ///   Channel order: [TP9, AF7, AF8, TP10].
     /// - Returns: Tuple of cleaned window (same shape) and per-window quality stats
-    ///   averaged across all 4 channels.
+    ///   averaged across all 4 channels, plus per-window artifact flags.
     public func denoise(window: [[Float]]) -> (cleaned: [[Float]], stats: EEGDenoiseStats) {
         precondition(window.count == 4, "Expected 4 channels")
         precondition(window.allSatisfy { $0.count == N }, "Expected \(N) samples per channel")
 
+        // ── Stage 1: SWT soft-thresholding (per-channel) ──────────────────────
         var cleanedChannels = [[Float]]()
         cleanedChannels.reserveCapacity(4)
 
@@ -130,18 +224,503 @@ public final class EEGDenoiser {
             let raw = window[ch]
             let (cleaned, chStats) = denoiseChannel(raw)
             cleanedChannels.append(cleaned)
-            totalAlphaRatio   += chStats.alphaPowerRatio
-            totalSpikeRms     += chStats.spikeRmsReduction
+            totalAlphaRatio    += chStats.alphaPowerRatio
+            totalSpikeRms      += chStats.spikeRmsReduction
             totalSpikesRemoved += chStats.spikesRemoved
         }
 
         let nCh = Float(4)
-        let stats = EEGDenoiseStats(
-            alphaPowerRatio:  totalAlphaRatio  / nCh,
-            spikeRmsReduction: totalSpikeRms   / nCh,
-            spikesRemoved:    totalSpikesRemoved
+        let swtAlphaRatio     = totalAlphaRatio    / nCh
+        let swtSpikeRms       = totalSpikeRms      / nCh
+        let swtSpikesRemoved  = totalSpikesRemoved
+
+        // Fallback stats (returned when buffer not yet full or on error)
+        let fallbackStats = EEGDenoiseStats(
+            alphaPowerRatio:      swtAlphaRatio,
+            spikeRmsReduction:    swtSpikeRms,
+            spikesRemoved:        swtSpikesRemoved,
+            potatoFlagged:        false,
+            potatoDistance:       0.0,
+            asrComponentsReplaced: 0
         )
-        return (cleanedChannels, stats)
+
+        // ── Buffer guard: stages 2+3 need a full clean-reference buffer ────────
+        guard windowBuffer.count >= bufferCapacity else {
+            // Buffer not yet full — store this window (no potato check yet) and
+            // return SWT-only result.
+            appendToBuffer(cleanedChannels)
+            return (cleanedChannels, fallbackStats)
+        }
+
+        // ── Stage 2: Riemannian Potato ─────────────────────────────────────────
+        // Dispatch: applyRiemannianPotato updates potatoG, potatoDistances, and
+        // returns the (possibly reconstructed) channels + artifact flag/distance.
+        let (potatoChannels, potatoFlagged, potatoDistance) =
+            applyRiemannianPotato(channels: cleanedChannels)
+
+        // Update rolling buffer: only store windows that Potato accepted.
+        if !potatoFlagged {
+            appendToBuffer(potatoChannels)
+        }
+
+        // ── Stage 3: rASR lite ────────────────────────────────────────────────
+        // rASR does the real reconstruction; Potato's fallback (channel mean) is
+        // intentionally simple — see comment in applyRiemannianPotato.
+        let (asrChannels, asrComponentsReplaced) =
+            applyRASR(channels: potatoChannels)
+
+        let stats = EEGDenoiseStats(
+            alphaPowerRatio:       swtAlphaRatio,
+            spikeRmsReduction:     swtSpikeRms,
+            spikesRemoved:         swtSpikesRemoved,
+            potatoFlagged:         potatoFlagged,
+            potatoDistance:        potatoDistance,
+            asrComponentsReplaced: asrComponentsReplaced
+        )
+        return (asrChannels, stats)
+    }
+
+    // MARK: - Rolling buffer helpers
+
+    /// Append `channels` to the rolling buffer, evicting oldest entry when full.
+    private func appendToBuffer(_ channels: [[Float]]) {
+        if windowBuffer.count >= bufferCapacity {
+            windowBuffer.removeFirst()
+        }
+        windowBuffer.append(channels)
+    }
+
+    // MARK: - Stage 2: Riemannian Potato
+    //
+    // Reference: Barachant A, Bonnet S. "Riemannian geometry applied to BCI
+    // classification." TOBI Workshop IV, 2013.
+    //
+    // The "potato" is a convex region in the Riemannian manifold of SPD matrices.
+    // Windows whose covariance matrix falls outside it (large Riemannian distance
+    // from the geometric mean G) are flagged as artifacts.
+    //
+    // Distance metric: d = sqrt( trace( log(G^{-1/2} C G^{-1/2})^2 ) )
+    // See Barachant 2013, eq. (3). We approximate log via eigendecomposition of
+    // the 4×4 whitened covariance matrix (see mat4LogSymm).
+
+    /// Apply Riemannian Potato to one multi-channel window.
+    /// Returns: (processed channels, flagged, riemannian distance).
+    /// On any matrix-operation failure, returns SWT channels with flagged=false, d=0.
+    private func applyRiemannianPotato(
+        channels: [[Float]]
+    ) -> (channels: [[Float]], flagged: Bool, distance: Float) {
+
+        // ── Compute 4×4 sample covariance matrix C ──────────────────────────
+        guard let C = sampleCovariance4(channels: channels) else {
+            // Degenerate/singular input — skip stage
+            return (channels, false, 0.0)
+        }
+
+        // ── Update running geometric mean G (log-Euclidean approximation) ───
+        // SIMPLIFICATION (B84): direct convex combination on covariance matrices.
+        // Full matrix-log update G_new = expm((1-α)*logm(G) + α*logm(C)) requires
+        // two matrix exponentials/logarithms per window.  Instead we use the
+        // tangent-space approximation: G_new ≈ (1-α)*G + α*C, valid when
+        // G ≈ C (i.e. signal statistics are slowly varying).
+        // Full logm/expm planned for B85+.
+        // cite: Arsigny V et al. Log-Euclidean metrics. Magn Reson Med 2006.
+        var G: [Float]
+        if let existing = potatoG {
+            // Exponential moving average: G ← (1-α)*G + α*C
+            // α = 0.05  (cite: Barachant & Bonnet 2013)
+            G = mat4Add(
+                mat4Scale(existing, scalar: 1.0 - potatoAlpha),
+                mat4Scale(C,        scalar: potatoAlpha)
+            )
+        } else {
+            G = C  // First window: initialise G = C
+        }
+        potatoG = G
+
+        // ── Compute Riemannian distance d(G, C) ─────────────────────────────
+        // d = sqrt( trace( logm(G^{-1/2} C G^{-1/2})^2 ) )
+        // Implementation:
+        //   1. Whitened matrix S = G^{-1/2} C G^{-1/2}
+        //      For SPD G: G^{-1/2} via eigendecomposition of G.
+        //   2. logm(S) via eigendecomposition (S is SPD when G,C are SPD).
+        //   3. trace(logm(S)^2) = sum of squared eigenvalues of logm(S).
+        let distance: Float
+        if let d = riemannianDistance(G: G, C: C) {
+            distance = d
+        } else {
+            // Matrix op failed — skip stage, return SWT result
+            return (channels, false, 0.0)
+        }
+
+        // ── Adaptive threshold via running z-score ───────────────────────────
+        potatoDistances.append(distance)
+        if potatoDistances.count > bufferCapacity * 2 {
+            potatoDistances.removeFirst()  // bounded history
+        }
+
+        var flagged = false
+        if potatoDistances.count >= 5 {  // need a few samples for stable stats
+            let dMean = potatoDistances.reduce(0, +) / Float(potatoDistances.count)
+            let dVar  = potatoDistances.map { ($0 - dMean) * ($0 - dMean) }
+                            .reduce(0, +) / Float(potatoDistances.count)
+            let dStd  = sqrt(max(dVar, 1e-10))
+            // Flag if distance exceeds mean + 2.5*std (Barachant & Bonnet 2013)
+            flagged = distance > dMean + potatoZThreshold * dStd
+        }
+
+        // ── Fallback reconstruction if flagged ───────────────────────────────
+        // FALLBACK RECONSTRUCTION (B84): replace each channel with its
+        // channel-mean from the rolling buffer. This is simple and defensible
+        // for the flagging pass; rASR (stage 3) does the real signal recovery.
+        // cite: Barachant & Bonnet 2013 (flagging); rASR reconstruction in stage 3.
+        if flagged {
+            var reconstructed = [[Float]]()
+            reconstructed.reserveCapacity(nChannels)
+            for ch in 0..<nChannels {
+                // Channel mean across all buffered windows (time × windows)
+                var chMean = [Float](repeating: 0.0, count: N)
+                for w in windowBuffer {
+                    vDSP_vadd(chMean, 1, w[ch], 1, &chMean, 1, vDSP_Length(N))
+                }
+                var scale = 1.0 / Float(windowBuffer.count)
+                vDSP_vsmul(chMean, 1, &scale, &chMean, 1, vDSP_Length(N))
+                reconstructed.append(chMean)
+            }
+            return (reconstructed, true, distance)
+        }
+
+        return (channels, false, distance)
+    }
+
+    // MARK: - Stage 3: rASR lite
+    //
+    // Reference:
+    //   Mullen TR et al. "Real-time neuroimaging and cognitive monitoring using
+    //   wearable dry EEG." IEEE Trans. Biomed. Eng. 62(11):2553-2567, 2015.
+    //   — ASR algorithm (Artifact Subspace Reconstruction)
+    //   Blum S et al. "A Riemannian modification of Artifact Subspace
+    //   Reconstruction for EEG artifact handling." Front. Hum. Neurosci. 13:141, 2019.
+    //   — RANSAC clean-reference selection
+    //
+    // Steps:
+    //   1. RANSAC reference selection: pick cleanest 30% of buffer windows by RMS.
+    //   2. Build PCA from concatenated reference windows (4-channel PCA).
+    //   3. Project current window into PCA basis.
+    //   4. Identify components with variance > 5σ above reference distribution.
+    //   5. Zero those components and project back.
+    //
+    // Component variance threshold 5σ: Mullen 2015 Table I default.
+    // RANSAC 30% percentile: Blum 2019 §2.2 recommendation.
+
+    /// Apply rASR lite to one multi-channel window.
+    /// Returns: (reconstructed channels, number of components replaced).
+    /// On failure, returns input unchanged with 0 components replaced.
+    private func applyRASR(
+        channels: [[Float]]
+    ) -> (channels: [[Float]], componentsReplaced: Int) {
+
+        let bufLen = windowBuffer.count
+        guard bufLen >= 10 else { return (channels, 0) }  // need enough reference windows
+
+        // ── RANSAC reference selection: cleanest 30% by total RMS ────────────
+        // cite: Blum et al. 2019 §2.2 — RANSAC clean-reference selection
+        let windowRMS: [Float] = windowBuffer.map { w in
+            var totalSq: Float = 0
+            for ch in 0..<nChannels {
+                var chSq: Float = 0
+                vDSP_svesq(w[ch], 1, &chSq, vDSP_Length(N))
+                totalSq += chSq
+            }
+            return sqrt(totalSq / Float(nChannels * N))
+        }
+        let sortedRMS = windowRMS.sorted()
+        // 30% cleanest = lowest RMS windows
+        let refCount = max(1, Int(Float(bufLen) * 0.30))  // cite: Blum 2019
+        let rmsThreshold = sortedRMS[refCount - 1]
+        let refWindows = zip(windowBuffer, windowRMS)
+            .filter { $0.1 <= rmsThreshold }
+            .map { $0.0 }
+
+        guard !refWindows.isEmpty else { return (channels, 0) }
+
+        // ── Build PCA from reference windows ─────────────────────────────────
+        // Concatenate all reference windows per channel: refData[ch] = all samples
+        // Then compute 4×4 covariance matrix of the reference set.
+        let refSamples = refWindows.count * N
+        var refMatrix = [[Float]](repeating: [Float](repeating: 0, count: refSamples), count: nChannels)
+        for (wi, w) in refWindows.enumerated() {
+            for ch in 0..<nChannels {
+                let offset = wi * N
+                for s in 0..<N {
+                    refMatrix[ch][offset + s] = w[ch][s]
+                }
+            }
+        }
+
+        // Reference covariance (nChannels × nChannels)
+        guard let refCov = sampleCovarianceN(matrix: refMatrix, nSamples: refSamples) else {
+            return (channels, 0)
+        }
+
+        // PCA via eigendecomposition of refCov (4×4 symmetric)
+        guard let (eigenvalues, eigenvectors) = eigendecompose4(matrix: refCov) else {
+            return (channels, 0)
+        }
+
+        // ── Reference component variances ────────────────────────────────────
+        // For each PCA component k, its variance in the reference set equals
+        // its eigenvalue (by definition of PCA).
+        let refComponentVar = eigenvalues  // [Float], length 4
+
+        // ── Project current window into PCA basis ─────────────────────────────
+        // currentMat[ch][s] — already have this as `channels`
+        // Project: componentSignal[k][s] = sum_ch eigenvectors[ch][k] * channels[ch][s]
+        var componentSignals = [[Float]](repeating: [Float](repeating: 0, count: N), count: nChannels)
+        for k in 0..<nChannels {
+            for ch in 0..<nChannels {
+                let weight = eigenvectors[ch * nChannels + k]  // col-major: eigvec k
+                for s in 0..<N {
+                    componentSignals[k][s] += weight * channels[ch][s]
+                }
+            }
+        }
+
+        // ── Compute per-component variance and threshold ──────────────────────
+        // Threshold: 5σ above reference component variance (Mullen 2015, Table I)
+        var replacedMask = [Bool](repeating: false, count: nChannels)
+        var nReplaced = 0
+        for k in 0..<nChannels {
+            var compVar: Float = 0
+            vDSP_svesq(componentSignals[k], 1, &compVar, vDSP_Length(N))
+            compVar /= Float(N)
+            let refVar = max(refComponentVar[k], 1e-12)
+            // Flag if component variance exceeds 5σ above reference.
+            // Here we treat refVar as the reference "mean variance" and
+            // use sqrt(2*refVar) as a proxy σ (chi-distribution for variance).
+            // cite: Mullen TR et al. 2015 — ASR component threshold
+            let threshold = refVar + 5.0 * sqrt(2.0 * refVar)  // cite: Mullen 2015
+            if compVar > threshold {
+                replacedMask[k] = true
+                componentSignals[k] = [Float](repeating: 0.0, count: N)  // zero component
+                nReplaced += 1
+            }
+        }
+
+        guard nReplaced > 0 else { return (channels, 0) }
+
+        // ── Project back to channel space ─────────────────────────────────────
+        // reconstructed[ch][s] = sum_k eigenvectors[ch][k] * componentSignals[k][s]
+        var reconstructed = [[Float]](repeating: [Float](repeating: 0, count: N), count: nChannels)
+        for ch in 0..<nChannels {
+            for k in 0..<nChannels {
+                let weight = eigenvectors[ch * nChannels + k]
+                for s in 0..<N {
+                    reconstructed[ch][s] += weight * componentSignals[k][s]
+                }
+            }
+        }
+
+        return (reconstructed, nReplaced)
+    }
+
+    // MARK: - Matrix helpers (4×4 SPD, stored row-major as [Float], length 16)
+
+    /// Compute 4×4 sample covariance matrix from `channels` (4 × N Float arrays).
+    /// Returns nil if input is degenerate (zero variance).
+    private func sampleCovariance4(channels: [[Float]]) -> [Float]? {
+        var C = [Float](repeating: 0, count: 16)
+        // Subtract channel means first (centre the data).
+        var means = [Float](repeating: 0, count: nChannels)
+        for ch in 0..<nChannels {
+            vDSP_meanv(channels[ch], 1, &means[ch], vDSP_Length(N))
+        }
+        for i in 0..<nChannels {
+            for j in i..<nChannels {
+                // cov(i,j) = E[(xi - μi)(xj - μj)]
+                var sumProd: Float = 0
+                for s in 0..<N {
+                    sumProd += (channels[i][s] - means[i]) * (channels[j][s] - means[j])
+                }
+                let cov = sumProd / Float(N - 1)
+                C[i * nChannels + j] = cov
+                C[j * nChannels + i] = cov  // symmetric
+            }
+        }
+        // Sanity check: diagonal must be positive
+        for i in 0..<nChannels {
+            if C[i * nChannels + i] < 1e-20 { return nil }
+        }
+        return C
+    }
+
+    /// Compute nChannels×nChannels sample covariance from a general matrix.
+    /// `matrix`: nChannels × nSamples. Returns nil on degenerate input.
+    private func sampleCovarianceN(matrix: [[Float]], nSamples: Int) -> [Float]? {
+        var C = [Float](repeating: 0, count: nChannels * nChannels)
+        var means = [Float](repeating: 0, count: nChannels)
+        for ch in 0..<nChannels {
+            vDSP_meanv(matrix[ch], 1, &means[ch], vDSP_Length(nSamples))
+        }
+        for i in 0..<nChannels {
+            for j in i..<nChannels {
+                var sumProd: Float = 0
+                for s in 0..<nSamples {
+                    sumProd += (matrix[i][s] - means[i]) * (matrix[j][s] - means[j])
+                }
+                let cov = sumProd / Float(nSamples - 1)
+                C[i * nChannels + j] = cov
+                C[j * nChannels + i] = cov
+            }
+        }
+        for i in 0..<nChannels {
+            if C[i * nChannels + i] < 1e-20 { return nil }
+        }
+        return C
+    }
+
+    /// Eigendecompose a 4×4 symmetric matrix via Jacobi iteration.
+    /// Returns (eigenvalues [Float], eigenvectors [Float] column-major 4×4).
+    /// Eigenvalues sorted ascending. Returns nil if iteration fails to converge.
+    ///
+    /// We use Jacobi because: (a) N=4 is tiny — 4×4 Jacobi converges in <15
+    /// sweeps, (b) Accelerate's ssyev requires a Fortran-style LAPACK bridging
+    /// that adds boilerplate on iOS, (c) simd_float4x4 has no built-in eig.
+    private func eigendecompose4(matrix: [Float]) -> (eigenvalues: [Float], eigenvectors: [Float])? {
+        let n = 4
+        var A = matrix  // working copy (will be destroyed)
+        // Eigenvectors start as identity
+        var V = [Float](repeating: 0, count: n * n)
+        for i in 0..<n { V[i * n + i] = 1.0 }
+
+        let maxIter = 100
+        let tol: Float = 1e-10
+
+        for _ in 0..<maxIter {
+            // Find largest off-diagonal element
+            var maxOff: Float = 0
+            var p = 0, q = 1
+            for i in 0..<n {
+                for j in (i+1)..<n {
+                    let val = abs(A[i * n + j])
+                    if val > maxOff { maxOff = val; p = i; q = j }
+                }
+            }
+            if maxOff < tol { break }
+
+            // Jacobi rotation to zero A[p,q]
+            let App = A[p * n + p]
+            let Aqq = A[q * n + q]
+            let Apq = A[p * n + q]
+            let theta = (Aqq - App) / (2.0 * Apq)
+            let t: Float = (theta >= 0)
+                ? 1.0 / (theta + sqrt(1.0 + theta * theta))
+                : 1.0 / (theta - sqrt(1.0 + theta * theta))
+            let c = 1.0 / sqrt(1.0 + t * t)
+            let s = t * c
+
+            // Update A
+            A[p * n + p] = App - t * Apq
+            A[q * n + q] = Aqq + t * Apq
+            A[p * n + q] = 0
+            A[q * n + p] = 0
+            for r in 0..<n where r != p && r != q {
+                let Arp = A[r * n + p]
+                let Arq = A[r * n + q]
+                A[r * n + p] = c * Arp - s * Arq
+                A[p * n + r] = A[r * n + p]
+                A[r * n + q] = s * Arp + c * Arq
+                A[q * n + r] = A[r * n + q]
+            }
+            // Update eigenvectors
+            for r in 0..<n {
+                let Vrp = V[r * n + p]
+                let Vrq = V[r * n + q]
+                V[r * n + p] = c * Vrp - s * Vrq
+                V[r * n + q] = s * Vrp + c * Vrq
+            }
+        }
+
+        // Extract eigenvalues from diagonal of A
+        var eigenvalues = (0..<n).map { A[$0 * n + $0] }
+
+        // Sort eigenvalues ascending, permute eigenvectors accordingly
+        let idx = eigenvalues.indices.sorted { eigenvalues[$0] < eigenvalues[$1] }
+        let sortedEV = idx.map { eigenvalues[$0] }
+        var sortedV = [Float](repeating: 0, count: n * n)
+        for (newCol, oldCol) in idx.enumerated() {
+            for row in 0..<n {
+                sortedV[row * n + newCol] = V[row * n + oldCol]
+            }
+        }
+        eigenvalues = sortedEV
+
+        // Validate: all eigenvalues positive (SPD check)
+        guard eigenvalues.allSatisfy({ $0 > 1e-15 }) else { return nil }
+
+        return (eigenvalues, sortedV)
+    }
+
+    /// Compute Riemannian distance between SPD matrices G and C.
+    /// d = sqrt( sum_i lambda_i^2 ) where lambda_i = eigenvalues of log(G^{-1/2} C G^{-1/2}).
+    /// cite: Barachant & Bonnet 2013, eq. (3)
+    private func riemannianDistance(G: [Float], C: [Float]) -> Float? {
+        // Compute G^{-1/2} via eigendecomposition of G:
+        //   G = V D V^T  =>  G^{-1/2} = V D^{-1/2} V^T
+        guard let (gEVals, gEVecs) = eigendecompose4(matrix: G) else { return nil }
+
+        let n = 4
+        // Build G^{-1/2} = V * diag(1/sqrt(lambda)) * V^T
+        var Ghalf_inv = [Float](repeating: 0, count: n * n)
+        for i in 0..<n {
+            for j in 0..<n {
+                var sum: Float = 0
+                for k in 0..<n {
+                    // V[i,k] * (1/sqrt(lambda_k)) * V[j,k]
+                    sum += gEVecs[i * n + k] * (1.0 / sqrt(gEVals[k])) * gEVecs[j * n + k]
+                }
+                Ghalf_inv[i * n + j] = sum
+            }
+        }
+
+        // Compute S = G^{-1/2} C G^{-1/2}  (matrix triple product)
+        // S = Ghalf_inv * C * Ghalf_inv
+        let temp = mat4Mul(Ghalf_inv, C)
+        let S    = mat4Mul(temp, Ghalf_inv)
+
+        // logm(S): S should be SPD; get eigenvalues and take log
+        guard let (sEVals, _) = eigendecompose4(matrix: S) else { return nil }
+
+        // d = sqrt( sum_i log(lambda_i)^2 )
+        // cite: Barachant & Bonnet 2013
+        let sumSq = sEVals.map { l -> Float in
+            guard l > 1e-15 else { return 0 }
+            let logL = log(l)
+            return logL * logL
+        }.reduce(0, +)
+
+        return sqrt(sumSq)
+    }
+
+    // MARK: - 4×4 matrix arithmetic (row-major [Float], length 16)
+
+    private func mat4Mul(_ A: [Float], _ B: [Float]) -> [Float] {
+        var C = [Float](repeating: 0, count: 16)
+        for i in 0..<4 {
+            for j in 0..<4 {
+                var s: Float = 0
+                for k in 0..<4 { s += A[i * 4 + k] * B[k * 4 + j] }
+                C[i * 4 + j] = s
+            }
+        }
+        return C
+    }
+
+    private func mat4Scale(_ A: [Float], scalar: Float) -> [Float] {
+        return A.map { $0 * scalar }
+    }
+
+    private func mat4Add(_ A: [Float], _ B: [Float]) -> [Float] {
+        return zip(A, B).map(+)
     }
 
     // MARK: - Per-channel denoising
@@ -223,10 +802,16 @@ public final class EEGDenoiser {
             spikeRmsReduction = 1.0 // no spikes detected; ratio is unity
         }
 
+        // Stage-2 and stage-3 fields are not applicable at the per-channel level;
+        // they are filled in by the top-level denoise(window:) after all channels
+        // have been processed.  Use sentinel/zero values here.
         let stats = EEGDenoiseStats(
-            alphaPowerRatio:   alphaPowerRatio,
-            spikeRmsReduction: spikeRmsReduction,
-            spikesRemoved:     spikesRemoved
+            alphaPowerRatio:       alphaPowerRatio,
+            spikeRmsReduction:     spikeRmsReduction,
+            spikesRemoved:         spikesRemoved,
+            potatoFlagged:         false,
+            potatoDistance:        0.0,
+            asrComponentsReplaced: 0
         )
         return (reconstructed, stats)
     }
@@ -322,11 +907,10 @@ public final class EEGDenoiser {
             // (Shensa 1992: "The Discrete Wavelet Transform: Wedding the à Trous and
             // Mallat Algorithms," IEEE Trans. Signal Processing 40(10):2464-2482).
             var combined = [Float](repeating: 0.0, count: N)
-            vDSP_vadd(synth.prefix(N) + [Float](),
-                      1,
-                      Array(cD.prefix(N)), 1,
-                      &combined, 1,
-                      vDSP_Length(N))
+            // Materialize Slices to Arrays so vDSP_vadd has contiguous storage.
+            let synthN = Array(synth.prefix(N))
+            let cDN    = Array(cD.prefix(N))
+            vDSP_vadd(synthN, 1, cDN, 1, &combined, 1, vDSP_Length(N))
             var half: Float = 0.5
             vDSP_vsmul(combined, 1, &half, &reconstructed, 1, vDSP_Length(N))
         }

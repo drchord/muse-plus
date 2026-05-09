@@ -86,6 +86,11 @@ struct SessionDiagnostics: Codable {
     var deviceModel:         String
     var iosVersion:          String
     var museModel:           String?  // "ms03" if Athena detected, nil otherwise
+    // B83 — A/B/C/F headband-fit grade derived from contact-state-change rate.
+    // Surfaces in session summary; trains user awareness of fit quality.
+    var contactQualityGrade: String? = nil
+    // B83 — total transitions / minute, used to derive grade. Persisted for transparency.
+    var contactTransitionsPerMin: Double? = nil
 }
 
 struct DeepEpisode: Codable {
@@ -256,6 +261,18 @@ private struct NDJSONUIState: Codable {
     let timerHudRendered: Int          // monotonic counter from Probe
     let depthGaugeRendered: Int
     let chipViewRendered: Int
+}
+
+private struct NDJSONDenoiseStats: Codable {
+    var _type = "denoiseStats"
+    let time: Double
+    let alphaPowerRatio: Float        // filtered/raw alpha power 8-12 Hz; ≈1.0 = preservation
+    let spikeRmsReduction: Float      // RMS drop in flagged-spike bins
+    let spikesRemoved: Int            // |coeff|>T at SWT level 1
+    let potatoFlagged: Bool           // Riemannian Potato artifact verdict
+    let potatoDistance: Float         // Mahalanobis-like distance in Riemannian metric
+    let asrComponentsReplaced: Int    // # PCA components reconstructed
+    let bypassReason: String?         // "buffer_warming" | "denoise_disabled" | nil if active
 }
 
 // MARK: - Recorder
@@ -649,6 +666,34 @@ final class SessionRecorder: ObservableObject {
     private func currentSessionElapsedLocked() -> Double {
         guard let rec = current else { return 0.0 }
         return Date().timeIntervalSince(rec.startDate)
+    }
+
+    /// EEG denoising metrics — emitted once per 1-second window by EEGWindowBuffer.
+    /// Cleaned signal is logged as a sidecar; raw EEG continues flowing through the
+    /// real-time pipeline unchanged for B83. B84 may switch the live signal to cleaned
+    /// once these metrics validate against tap-to-mark ground truth.
+    func appendDenoiseStats(alphaPowerRatio: Float,
+                            spikeRmsReduction: Float,
+                            spikesRemoved: Int,
+                            potatoFlagged: Bool,
+                            potatoDistance: Float,
+                            asrComponentsReplaced: Int,
+                            bypassReason: String?) {
+        queue.async {
+            guard self.isRecording else { return }
+            let t = self.currentSessionElapsedLocked()
+            let nd = NDJSONDenoiseStats(
+                _type: "denoiseStats", time: t,
+                alphaPowerRatio: alphaPowerRatio,
+                spikeRmsReduction: spikeRmsReduction,
+                spikesRemoved: spikesRemoved,
+                potatoFlagged: potatoFlagged,
+                potatoDistance: potatoDistance,
+                asrComponentsReplaced: asrComponentsReplaced,
+                bypassReason: bypassReason
+            )
+            self.appendLine(nd)
+        }
     }
 
     // MARK: - Storage

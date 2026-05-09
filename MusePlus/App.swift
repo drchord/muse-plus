@@ -13,6 +13,9 @@ struct MusePlusApp: App {
         // B80: register BGProcessingTask handler for crash-safe NDJSON flush.
         // Must be called before app finishes launching (before first scene connect).
         SessionRecorder.registerBackgroundTasks()
+        // B83 — generate fallback bowl WAVs on first launch (idempotent).
+        // Bundle .m4a / .wav take priority via EndGongPlayer.bundleURL ordering.
+        BowlAudioGenerator.shared.generateIfNeeded()
     }
 
     var body: some Scene {
@@ -202,6 +205,8 @@ final class Probe: ObservableObject {
                     self?.sessionEvents = []
                     self?.lastHsiRaw = []
                     LivenessWatchdog.shared.start()
+                    // B83 — clear sidecar denoise window buffer. New session = clean state.
+                    EEGWindowBuffer.shared.reset()
                     // B80(D): cancel any leftover session timer from prior connection.
                     SessionTimer.shared.cancel()
                 case .disconnected:
@@ -1037,16 +1042,29 @@ final class Probe: ObservableObject {
 
     func buildDiagnostics(endReason: String) -> SessionDiagnostics {
         let watchdog = LivenessWatchdog.shared.currentStats()
-        // Compute gap stats from watchdog EWMA (approximate; exact stats in recorder log).
         let gapMean = watchdog.mean
-        // sigma → P95 approximation: normal distribution P95 ≈ mean + 1.645*sigma.
         let gapP95  = gapMean + 1.645 * watchdog.std
-        // lastGap as proxy for max (exact max would require a sliding window not maintained here).
         let gapMax  = max(watchdog.lastGap, gapMean + 3 * watchdog.std)
 
         let device = UIDevice.current
         let model  = device.model
         let iosVer = UIDevice.current.systemVersion
+
+        // B83 — compute A/B/C/F headband-fit grade from contact-state transitions.
+        // B82 reference: 210 transitions / 22.6 min = 9.3/min → grades C under this scheme.
+        let totalTransitions = sessionDiagCounters.contactStateChanges.values.reduce(0, +)
+        let sessionMin: Double = {
+            guard let started = recordingStartedAt else { return 0 }
+            return Date().timeIntervalSince(started) / 60.0
+        }()
+        let transPerMin: Double = sessionMin > 0 ? Double(totalTransitions) / sessionMin : 0
+        let grade: String = {
+            if sessionMin < 1.0 { return "—" }   // too short to grade
+            if transPerMin <= 2  { return "A" }
+            if transPerMin <= 5  { return "B" }
+            if transPerMin <= 10 { return "C" }
+            return "F"
+        }()
 
         return SessionDiagnostics(
             packetGapMean:       gapMean,
@@ -1060,10 +1078,12 @@ final class Probe: ObservableObject {
             contactStateChanges: sessionDiagCounters.contactStateChanges,
             stallEvents:         sessionDiagCounters.stallEvents,
             endReason:           endReason,
-            buildTag:            "B80",
+            buildTag:            "B83",
             deviceModel:         model,
             iosVersion:          iosVer,
-            museModel:           nil  // IXNMuse model not exposed post-session; see MuseClient.connectedMuseModel (private)
+            museModel:           nil,
+            contactQualityGrade: grade,
+            contactTransitionsPerMin: transPerMin
         )
     }
 }

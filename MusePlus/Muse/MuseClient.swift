@@ -310,6 +310,9 @@ extension MuseClient: IXNMuseDataListener {
             MuseClient.lastPacketGapMs = Float(dtMs)
         }
         MuseClient.lastEegPacketTime = now
+        // B83 — sidecar denoise: feed packet to 1-sec window buffer. Stats emit to NDJSON.
+        // Live pipeline unchanged; cleaned signal is measurement-only for now.
+        EEGWindowBuffer.shared.ingest(pkt)
         eegStatsLock.lock()
         eegPacketTimestamps.append(now)
         if eegPacketTimestamps.count > 256 * 30 { // cap ring at 30s × 256Hz worst-case

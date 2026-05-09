@@ -76,9 +76,12 @@ final class MainThreadStall {
         isRunning = false
     }
 
-    // MARK: Private — tick handler (always on main thread)
+    // MARK: Private — tick handler (always on main thread; Timer is added to RunLoop.main).
+    // No @MainActor annotation — under Swift 5.9 strict concurrency, Timer block is not
+    // an actor-isolated context, so the annotation would force every call site through
+    // the actor and emit "non-isolated context" diagnostics. The Timer guarantee that
+    // the block runs on RunLoop.main is sufficient.
 
-    @MainActor
     private func tick() {
         let now = CACurrentMediaTime()
         let delta = now - lastTickTime
