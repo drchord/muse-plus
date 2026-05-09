@@ -78,11 +78,26 @@ public final class EndGongPlayer: NSObject, AVAudioPlayerDelegate {
     // MARK: - Private Playback Logic
 
     private func play(resourceName: String, fallback: @escaping () -> Void) {
-        // Locate file in bundle — try .m4a first, then .wav
+        // Locate file in bundle — try .m4a first, then .wav, then Documents/Sounds.
         guard let fileURL = bundleURL(resourceName: resourceName) else {
-            Telemetry.audio.error("EndGongPlayer: bundle file not found for '\(resourceName)' (.m4a/.wav); using synthesis fallback")
-            emitEvent(kind: "gongFailed", detail: "\(resourceName)_not_in_bundle")
+            // B83 round-5 — when no file present, log gongLifecycle as SYNTHESIS-source,
+            // not "file:..._not_in_bundle". Prior commit's emitEvent path lied: every
+            // gongLifecycle line claimed source=file:* even when synthesis fired.
+            Telemetry.audio.error("EndGongPlayer: bundle file not found for '\(resourceName)' (.m4a/.wav/Documents); using synthesis fallback")
+            SessionRecorder.shared.appendGongLifecycle(
+                phase: "scheduled",
+                source: "synth:ChimeEngine-432Hz",
+                detail: "no_bundle_or_documents_file_for_\(resourceName)"
+            )
             fallback()
+            // ChimeEngine synthesis is fire-and-forget; mark as completed so analysts
+            // see a terminating record. Real audibility is still verifiable via the
+            // following audioState snapshot in the caller.
+            SessionRecorder.shared.appendGongLifecycle(
+                phase: "completed",
+                source: "synth:ChimeEngine-432Hz",
+                detail: nil
+            )
             return
         }
 
