@@ -25,8 +25,9 @@
 /// Toggles:
 ///   `eegDenoiseEnabled` (UserDefault, default TRUE) — sidecar denoise + stats emit.
 ///       Set FALSE to skip entirely (save CPU).
-///   `eegDenoiseLiveSignal` (UserDefault, default FALSE, reserved) — when wired in
-///       B84, replaces raw EEG with cleaned signal in `MuseClient.handleEEG`.
+///   (`eegDenoiseLiveSignal` will be added in B84 when live-signal replacement is
+///   actually implemented. NOT reserved or read by any code in B83 — earlier
+///   commit's "reserved" claim was misleading.)
 ///
 /// Thread model: a private serial DispatchQueue. SDK callback thread → ingest →
 /// queue.async → window-full check → denoise on same queue (off main).

@@ -334,17 +334,12 @@ final class Probe: ObservableObject {
                     SessionRecorder.shared.addFitEvent()
                     self.fitEventCount += 1   // B83 — parallel counter for grade metric
                 }
-                // B83 — pre-session fit-stability tracking. 1Hz tick when allGood;
-                // reset to 0 the moment any contact flips. Banner watches this to
-                // tell the user "hold for 5 sec" before/during calibration.
-                let now = Date()
-                if snap.allGood {
-                    let dt = now.timeIntervalSince(self.lastFitGoodTick)
-                    if dt >= 1.0 {
-                        self.consecutiveGoodSeconds += 1
-                        self.lastFitGoodTick = now
-                    }
-                } else {
+                // B83 round-4 — fit-stability counter is INSTANTLY reset on flip→bad here,
+                // but the per-second INCREMENT is driven by `pipeline.onBandPowers` (2 Hz),
+                // not this sink. Reason: `client.fitCheck` is a CurrentValueSubject and
+                // only fires on snapshot CHANGE — during steady allGood it would never
+                // tick, freezing the banner. Round-3 fix had this wrong.
+                if !snap.allGood {
                     self.consecutiveGoodSeconds = 0
                     self.lastFitGoodTick = .distantPast
                 }
@@ -431,6 +426,17 @@ final class Probe: ObservableObject {
 
         pipeline.onBandPowers = { [weak self] powers, correctedPowers in
             guard let self else { return }
+            // B83 round-4 — drive `consecutiveGoodSeconds` from band-power callbacks
+            // (~2 Hz steady) so the fit-stability banner ticks even during stable allGood
+            // periods. Increments only when fit.allGood AND ≥1 s elapsed since last tick.
+            // Reset to 0 happens in the fit sink the moment allGood flips.
+            if self.fit.allGood {
+                let now = Date()
+                if now.timeIntervalSince(self.lastFitGoodTick) >= 1.0 {
+                    self.consecutiveGoodSeconds += 1
+                    self.lastFitGoodTick = now
+                }
+            }
             let frontal = powers.filter { [1, 2].contains($0.channel) }
             if !frontal.isEmpty {
                 let n = Float(frontal.count)
@@ -1047,7 +1053,17 @@ final class Probe: ObservableObject {
         let session = AVAudioSession.sharedInstance()
         let route = session.currentRoute
         let outputs = route.outputs.map { $0.portType.rawValue }
-        let chimeVol: Float = UserDefaults.standard.object(forKey: "chimeVolume") as? Float ?? 0.7
+        // B83 round-4 — UserDefaults stores numeric values as NSNumber. The `as? Float`
+        // cast fails when the underlying NSNumber holds a Double; falling back to 0.7
+        // would mask a user who actually turned the volume DOWN. Read both Float and
+        // Double then clamp.
+        let chimeVol: Float = {
+            let raw = UserDefaults.standard.object(forKey: "chimeVolume")
+            if let f = raw as? Float  { return max(0, min(1, f)) }
+            if let d = raw as? Double { return max(0, min(1, Float(d))) }
+            if let n = raw as? NSNumber { return max(0, min(1, n.floatValue)) }
+            return 0.7  // default if absent
+        }()
         let secsSinceRoute: Int? = lastRouteChangeAt == .distantPast
             ? nil
             : Int(Date().timeIntervalSince(lastRouteChangeAt))

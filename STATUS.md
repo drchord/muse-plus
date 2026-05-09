@@ -121,7 +121,9 @@ Five new NDJSON `_type` records, each with a typed `SessionRecorder.append*` API
 13. **`denoiseStats`** records present every 1 s (or `bypassReason: "denoise_disabled"` if turned off)
 14. **`SessionDiagnostics.contactQualityGrade`** present (A/B/C/F) and `fitEventsPerMin` matches
     visible fit dot flicker rate
-15. **`SessionDiagnostics.museModel`** is `"ms03"` (Athena) or appropriate string (no longer `nil`)
+15. **`SessionDiagnostics.museModel`** is non-nil and matches your headband
+    (`"ms03"` Athena MS-03, `"mu06"` Muse2 2024, `"mu05"` MuseS 2021, `"mu04"` MuseS 2019,
+    `"mu03"` Muse2 2018, `"mu02"` Muse 2016, `"mu01"` Muse 2014)
 16. **No B80 regressions**: NDJSON crash recovery still works; soundscape still adapts to depth;
     calibration still completes in 60s
 

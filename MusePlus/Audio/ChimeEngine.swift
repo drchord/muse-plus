@@ -30,7 +30,16 @@ final class ChimeEngine {
     // MARK: - Volume
 
     var chimeVolume: Float {
-        get { UserDefaults.standard.object(forKey: "chimeVolume") as? Float ?? 0.7 }
+        get {
+            // B83 round-4 — UserDefaults can store Float as NSNumber-Double depending
+            // on call site. `as? Float` fails when the underlying type is Double.
+            // Robust read across types; clamps to [0,1].
+            let raw = UserDefaults.standard.object(forKey: "chimeVolume")
+            if let f = raw as? Float  { return max(0, min(1, f)) }
+            if let d = raw as? Double { return max(0, min(1, Float(d))) }
+            if let n = raw as? NSNumber { return max(0, min(1, n.floatValue)) }
+            return 0.7
+        }
         set { UserDefaults.standard.set(newValue, forKey: "chimeVolume") }
     }
 
