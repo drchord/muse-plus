@@ -86,11 +86,12 @@ struct SessionDiagnostics: Codable {
     var deviceModel:         String
     var iosVersion:          String
     var museModel:           String?  // "ms03" if Athena detected, nil otherwise
-    // B83 — A/B/C/F headband-fit grade derived from contact-state-change rate.
+    // B83 — A/B/C/F headband-fit grade derived from FIT-event rate (allGood flips).
     // Surfaces in session summary; trains user awareness of fit quality.
     var contactQualityGrade: String? = nil
-    // B83 — total transitions / minute, used to derive grade. Persisted for transparency.
-    var contactTransitionsPerMin: Double? = nil
+    // B83 — fit events per minute, used to derive grade. Persisted for transparency.
+    // Renamed from `contactTransitionsPerMin` (misnamed prior to grade-metric correction).
+    var fitEventsPerMin: Double? = nil
 }
 
 struct DeepEpisode: Codable {

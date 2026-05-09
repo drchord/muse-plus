@@ -99,8 +99,18 @@ final class MainThreadStall {
     // MARK: Private — stall reporter
 
     private func reportStall(delta: CFTimeInterval) {
-        // Capture context at the tick *after* recovery — best available
-        // without private API. Symbols remain mangled; that is intentional.
+        // KNOWN LIMITATION: `Thread.callStackSymbols` returns the stack at THIS
+        // tick (post-recovery), NOT the stack that was holding the main thread
+        // during the freeze. By the time we observe the stall, the offending
+        // frames have already returned. The captured stack only tells us where
+        // the run loop resumed — typically the Timer callback itself. To get
+        // the actual blocking frames we'd need:
+        //   (a) signpost-style sampling on a watchdog dispatch queue, OR
+        //   (b) MetricKit's `MXCallStackTree` from `MXCPUExceptionDiagnostic`,
+        //       which Apple delivers post-hoc but not in-session.
+        // For now we record the post-recovery stack as a coarse marker; the
+        // value of this telemetry is the DELTA + count, not the stack itself.
+        // Symbols remain mangled; that is intentional.
         let top5stack = Thread.callStackSymbols
             .prefix(5)
             .joined(separator: " | ")

@@ -84,7 +84,16 @@ final class Probe: ObservableObject {
         var stallEvents:         [StallEvent]  = []
     }
     private var sessionDiagCounters = SessionDiagCounters()
+    // B83 — `sessionEvents` is dual-written with `SessionRecorder.appendEvent` (NDJSON).
+    // NDJSON is the crash-survivable source of truth (recoverable via CrashRecovery).
+    // The in-memory list is kept ONLY so the canonical .json synthesis path can attach
+    // it via `attachEventStream` for offline analysis scripts that don't parse NDJSON.
+    // If you remove this, also remove `attachEventStream` calls AND update existing
+    // analysis scripts to read NDJSON `_type:"event"` lines instead of `eventStream`.
     private var sessionEvents: [SessionEvent] = []
+    // B83 — count of `addFitEvent` calls this session (parallel to `_type:"fit"` NDJSON
+    // line count). Used by buildDiagnostics for the contact-quality grade metric.
+    private var fitEventCount: Int = 0
     // Last known HSI per-channel raw value; used to detect transitions in fitCheck sink.
     // Index mapping: [0]=TP9, [1]=AF7, [2]=AF8, [3]=TP10
     private var lastHsiRaw: [Double] = []
@@ -102,6 +111,10 @@ final class Probe: ObservableObject {
     @Published var timerHudRendered: Int = 0
     @Published var depthGaugeRendered: Int = 0
     @Published var chipViewRendered: Int = 0
+    // B83 (B81 carryover) — pre-session fit-stability gate. Counts consecutive seconds
+    // with all 4 contacts good. Banner dismisses when ≥5; reappears if any contact flips.
+    @Published var consecutiveGoodSeconds: Int = 0
+    private var lastFitGoodTick: Date = .distantPast
     private var lastRouteChangeAt: Date = .distantPast
     // B83 — periodic audioState + uiState logger. Fires every 30s while recording.
     private var diagnosticsTimer: Timer?
@@ -203,6 +216,7 @@ final class Probe: ObservableObject {
                     // B80(C): reset diagnostic counters and start liveness watchdog.
                     self?.sessionDiagCounters = SessionDiagCounters()
                     self?.sessionEvents = []
+                    self?.fitEventCount = 0
                     self?.lastHsiRaw = []
                     LivenessWatchdog.shared.start()
                     // B83 — clear sidecar denoise window buffer. New session = clean state.
@@ -316,7 +330,24 @@ final class Probe: ObservableObject {
                 // Post-calibration: record fit events for data, never play contact audio.
                 // Dots give visual state — audio mid-sit breaks concentration regardless
                 // of which contacts fluctuate (TP9/TP10 are rarely simultaneously green).
-                if wasGood && !snap.allGood { SessionRecorder.shared.addFitEvent() }
+                if wasGood && !snap.allGood {
+                    SessionRecorder.shared.addFitEvent()
+                    self.fitEventCount += 1   // B83 — parallel counter for grade metric
+                }
+                // B83 — pre-session fit-stability tracking. 1Hz tick when allGood;
+                // reset to 0 the moment any contact flips. Banner watches this to
+                // tell the user "hold for 5 sec" before/during calibration.
+                let now = Date()
+                if snap.allGood {
+                    let dt = now.timeIntervalSince(self.lastFitGoodTick)
+                    if dt >= 1.0 {
+                        self.consecutiveGoodSeconds += 1
+                        self.lastFitGoodTick = now
+                    }
+                } else {
+                    self.consecutiveGoodSeconds = 0
+                    self.lastFitGoodTick = .distantPast
+                }
             }
             .store(in: &bag)
 
@@ -722,6 +753,10 @@ final class Probe: ObservableObject {
         let effectiveReason = reason  // simplified until Agent B lands isPausedForReconnect
         Telemetry.recording.notice("endSessionGracefully reason=\(effectiveReason, privacy: .public)")
         SessionTimer.shared.cancel()
+        // B83 — capture audio state at gong time. The MOST important snapshot for
+        // debugging audibility; without this we can't tell whether the speaker had
+        // output enabled when the gong fired.
+        fireDiagnosticsSnapshot(trigger: "endSession-pre-gong")
         // B83 — route to EndGongPlayer. If `bowl_success.{m4a,wav}` is bundled, plays the
         // recorded sample via AVAudioPlayer (file-based, immune to engine state). Otherwise
         // falls back to ChimeEngine.playGong() — now at 432 Hz fundamental (audible on
@@ -926,6 +961,8 @@ final class Probe: ObservableObject {
         recordingStartWork?.cancel()
         recordingStartWork = nil
         recordingStartedAt = nil
+        // B83 — capture audio state at failure-gong time.
+        fireDiagnosticsSnapshot(trigger: "performFinalDisconnect-pre-gong")
         // B83 — was missing in B80; grace-expiry would silently end with NO audio cue.
         // EndGongPlayer.playFailure tries `bowl_failure.{m4a,wav}` then falls back to
         // ChimeEngine.playFailureChime (5 short alert pings, all in passband).
@@ -1050,20 +1087,26 @@ final class Probe: ObservableObject {
         let model  = device.model
         let iosVer = UIDevice.current.systemVersion
 
-        // B83 — compute A/B/C/F headband-fit grade from contact-state transitions.
-        // B82 reference: 210 transitions / 22.6 min = 9.3/min → grades C under this scheme.
-        let totalTransitions = sessionDiagCounters.contactStateChanges.values.reduce(0, +)
+        // B83 — compute A/B/C/F headband-fit grade.
+        // METRIC HONESTY (corrected from prior commit): Use FIT-event rate as the
+        // primary signal, NOT HSI transition rate. Fit events fire when overall
+        // `FitCheckSnapshot.allGood` flips good→bad — directly mirrors the user's
+        // perceived headband-instability cadence. HSI transitions count per-channel
+        // tier flips (1↔2, 1↔4) which are noisier and less aligned with user feel.
+        // B82 reference: 210 fit events / 22.6 min = 9.3/min → grades C.
         let sessionMin: Double = {
             guard let started = recordingStartedAt else { return 0 }
             return Date().timeIntervalSince(started) / 60.0
         }()
-        let transPerMin: Double = sessionMin > 0 ? Double(totalTransitions) / sessionMin : 0
+        let fitsPerMin: Double = sessionMin > 0 ? Double(fitEventCount) / sessionMin : 0
+        // Per-channel HSI transitions retained as secondary metric — surfaces in
+        // contactStateChanges dict but not in the grade itself.
         let grade: String = {
             if sessionMin < 1.0 { return "—" }   // too short to grade
-            if transPerMin <= 2  { return "A" }
-            if transPerMin <= 5  { return "B" }
-            if transPerMin <= 10 { return "C" }
-            return "F"
+            if fitsPerMin <= 2  { return "A" }   // ≤2/min: rock solid
+            if fitsPerMin <= 5  { return "B" }   // ≤5/min: minor wobble
+            if fitsPerMin <= 10 { return "C" }   // ≤10/min: noticeable instability (B82 region)
+            return "F"                           // >10/min: replace headband or reseat
         }()
 
         return SessionDiagnostics(
@@ -1081,9 +1124,9 @@ final class Probe: ObservableObject {
             buildTag:            "B83",
             deviceModel:         model,
             iosVersion:          iosVer,
-            museModel:           nil,
+            museModel:           client.museModelString,
             contactQualityGrade: grade,
-            contactTransitionsPerMin: transPerMin
+            fitEventsPerMin:     fitsPerMin
         )
     }
 }
@@ -1292,6 +1335,17 @@ private struct MeditationView: View {
             }
 
             Spacer(minLength: 0)
+
+            // B83 (B81 carryover) — pre-session fit-stability banner. Visible during
+            // calibration when allGood has not held continuously for 5 seconds. Shows
+            // a 1-of-5 progress bar so user knows when band is stable enough to proceed.
+            // Auto-hides once consecutiveGoodSeconds >= 5 OR calibration completes.
+            if !probe.depth.isCalibrated && probe.consecutiveGoodSeconds < 5 {
+                FitStabilityBannerView(consecutiveGood: probe.consecutiveGoodSeconds,
+                                        fit: probe.fit)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 4)
+            }
 
             // Hero depth gauge
             DepthGaugeView(probe: probe)
@@ -1622,6 +1676,54 @@ private struct MarksRowView: View {
 }
 
 // MARK: - Signal chips
+
+// MARK: - Pre-session fit-stability banner (B83)
+
+/// Shown during calibration when contact has not been continuously good for 5 s.
+/// Each second of stable allGood ticks the counter; any contact flip resets it.
+/// Communicates to the user: "your band needs to settle before calibration can finish."
+private struct FitStabilityBannerView: View {
+    let consecutiveGood: Int
+    let fit: FitCheckSnapshot
+
+    private var badChannelLabels: [String] {
+        var b: [String] = []
+        if !fit.tp9  { b.append("TP9")  }
+        if !fit.af7  { b.append("AF7")  }
+        if !fit.af8  { b.append("AF8")  }
+        if !fit.tp10 { b.append("TP10") }
+        return b
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "headphones")
+                    .font(.system(size: 14, weight: .semibold))
+                Text(badChannelLabels.isEmpty
+                     ? "Hold steady — locking fit \(consecutiveGood)/5 s"
+                     : "Reseat band — \(badChannelLabels.joined(separator: ", ")) loose")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .foregroundStyle(.white.opacity(0.9))
+
+            // 5-segment progress bar.
+            HStack(spacing: 3) {
+                ForEach(0..<5, id: \.self) { i in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(i < consecutiveGood
+                              ? Color.green.opacity(0.8)
+                              : Color.white.opacity(0.18))
+                        .frame(height: 4)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
 
 private struct SignalChipsView: View {
     let fit: FitCheckSnapshot

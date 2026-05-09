@@ -36,6 +36,23 @@ final class MuseClient: NSObject {
     private var presetAppliedFor: IXNMuseModel?
     // Remembered after applyPresetForModel; drives 8-channel EEG read in handleEEG.
     private var connectedMuseModel: IXNMuseModel?
+    // B83 — read-only public accessor for SessionDiagnostics.museModel field.
+    // Map IXNMuseModel enum to a stable lowercase string for NDJSON / analysis.
+    // Cases per Frameworks/Muse.framework/Headers/api/IXNMuseModel.h:
+    //   Mu01..Mu06: legacy bands; Ms03: MuseS 2025 (Athena, the high-end target).
+    var museModelString: String? {
+        guard let m = connectedMuseModel else { return nil }
+        switch m {
+        case .ms03: return "ms03"        // MuseS 2025 Athena (8-EEG + Optics)
+        case .mu06: return "mu06"        // Muse2 2024 USB-C
+        case .mu05: return "mu05"        // MuseS 2021
+        case .mu04: return "mu04"        // MuseS 2019
+        case .mu03: return "mu03"        // Muse2 2018
+        case .mu02: return "mu02"        // Muse 2016
+        case .mu01: return "mu01"        // Muse 2014
+        @unknown default: return "unknown"
+        }
+    }
     // Timestamp of last received .notchFilteredEeg packet (SDK callback thread only — no lock needed).
     // Used to gate the .eeg fallback: if .notchFilteredEeg has not arrived in 2s, .eeg is active.
     // Boolean hasNotchEeg was insufficient: Athena at preset1041 emits ONE notch packet on connect

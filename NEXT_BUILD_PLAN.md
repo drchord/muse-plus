@@ -1,99 +1,77 @@
 # MusePlus — Next Build Plan (Post-B83)
 
-**Last updated:** 2026-05-09
+**Last updated:** 2026-05-09 (after audit-loop round 2)
+
+## What B83 actually shipped (corrected)
+
+Items previously listed under "B84 carryovers" that ARE in B83:
+- ✅ EEGDenoiser wired (sidecar mode; live-signal replacement still gated for B84)
+- ✅ Per-window `denoiseStats` NDJSON
+- ✅ Pre-session fit-stability banner (calibration-phase 5-s contact-stable gate)
+- ✅ Per-session A/B/C/F contact-quality grade (in `SessionDiagnostics`, computed from
+   fit-event rate not HSI-transition rate — corrected metric)
+- ✅ Athena auto-preset (already there since pre-B81; STATUS.md was stale)
+- ✅ XCTest scaffolding (5 files, 522 LOC)
+- ✅ Bowl WAV auto-generation at first launch (`BowlAudioGenerator`)
 
 ## Pre-condition: B83 device validation
 
-Do not start B84 work until B83 ships and produces an NDJSON with:
-
-- `gongLifecycle` events (scheduled→started→completed)
-- `audioState` records every 30s
-- `uiState.timerHudRendered > 0`
-- Per-sample `contactStateTP9/TP10/AF7/AF8` populated (not undefined)
+Do not start B84 until B83 ships and the NDJSON contains:
+- `gongLifecycle` (`scheduled` → `started` → `completed` for manual end)
+- `audioState` (every 30 s + `endSession-pre-gong` snapshot)
+- `audioState.chimeVolumeSetting` ≥ 0.7 at gong-pre snapshot
+- `audioState.outputs` showing `["builtInSpeaker"]` confirms speaker route
+- `uiState.timerHudRendered` > 0
+- Per-sample `contactStateTP9/TP10/AF7/AF8` populated
 - `packetGapMs` populated per sample
-- `event` records matching runtime activity (fits, route changes, etc.)
-- `mainStall` count quantifying any "freezing" sensation
+- `event` records matching runtime activity
+- `mainStall` count (0 in healthy session)
+- `denoiseStats` records every 1 s (or `bypassReason` when disabled)
+- `SessionDiagnostics.contactQualityGrade` and `museModel` populated
 
-If B83 fails any of those, B84 is blocked on B83 hotfix.
+If any of those is missing or wrong, B84 is blocked on B83 hotfix.
 
 ---
 
-## B84 — Filter wire-in + B81 carryovers
+## B84 — Live-signal denoise + filter validation + remaining gaps
 
-### Theme
-
-With B83 instrumentation in place, we can finally validate filter benefit objectively against tap-to-mark ground truth. Plus deliver the B81 carryovers that were always queued.
-
-### B84 scope
-
-| # | Feature | Why now | Files |
+| # | Feature | Why | Files |
 |---|---|---|---|
-| 1 | **Wire `EEGDenoiser` into `handleEEG`** with `denoiseEnabled` UserDefault toggle (default OFF) | B83 collected baseline; B84 enables A/B test via tap-mark validator | `MuseClient.swift`, new `Pipeline/EEGWindowBuffer.swift` |
-| 2 | Per-window `_type:"denoiseStats"` NDJSON record | Quantifies alpha-band power preservation, spike RMS reduction, gamma coherence drop | `EEGDenoiser.swift`, `SessionRecorder.swift` |
-| 3 | Pre-session fit guide (5 s contact-stable gate before "Start" enables) | B81 carryover; addresses underlying TP9/TP10 physical issue not just UI hysteresis | `App.swift` (new ConnectGate view), `MuseClient` (fit-stability tracker) |
-| 4 | Per-session contact-quality grade (A/B/C/F) in summary | B81 carryover; trains user awareness of headband fit | `App.swift` (sessionSummary view), `SessionRecorder` (compute from B83 contactState fields) |
-| 5 | Athena auto-preset (`preset1041` MS-03, `preset21` legacy) | B81 carryover | `MuseClient.swift` |
-| 6 | XCTest scaffolding for B83 instrumentation + B80 resilience | Prevent regressions before TestFlight | `MusePlusTests/` |
-| 7 | Bowl `.m4a` files in `MusePlus/Resources/Sounds/` (drop-in by user) | Replaces 432 Hz synthesis fallback with proper recordings | resources only |
+| 1 | **Live-signal denoise replacement** (gated by `eegDenoiseLiveSignal` UserDefault, default OFF) | Once tap-mark validator shows benefit, route cleaned packets back through MuseClient → EEGPipeline | `Muse/MuseClient.swift`, `Pipeline/EEGWindowBuffer.swift` |
+| 2 | **True Riemannian matrix log via eigendecomposition** for Potato distance | Replaces the B83 log-Euclidean approximation; aligns with Barachant, Andreev & Congedo 2013 prescription | `Pipeline/EEGDenoiser.swift` (extend Jacobi eigendecomp already present) |
+| 3 | **Tap-mark validation harness expansion** | Compute `Δ(deep_marks − shallow_marks)` with denoiseEnabled ON vs OFF on the same session. Threshold for promoting to live: >0.05 ECDF-display gap improvement | `analysis/tapmark_validation.js` (extend) |
+| 4 | **Bowl `.m4a` drop-in support test** | Confirm `Bundle.main.url(forResource:withExtension:"m4a")` priority works once user adds files | manual test |
+| 5 | **`MainThreadStall` blocking-stack capture** via signpost-style watchdog dispatch queue | The B83 implementation captures post-recovery stack only; for actual blocking frames need a parallel queue that snapshots main thread when threshold crossed | `Diagnostics/MainThreadStall.swift` rewrite |
+| 6 | **Session-summary card** displaying `contactQualityGrade` and `museModel` to user | Makes B83 grade visible (currently only in saved JSON) | `App.swift` `SessionSummaryView` |
+| 7 | **`BowlAudioGenerator` audio-quality validation** | Listen to generated WAVs on device; tune partial mix if they sound thin | manual test + tweak constants |
 
-**B84 estimated total:** ~700 LOC across 5-6 files + ~600 LOC tests.
+## B85+ — Conditional, pending B84 evidence
 
-### B84 sub-agent split
-
-- **Agent FILTER-WIRE** — #1, #2 (EEG window buffer, denoise stats emission)
-- **Agent FIT** — #3, #4 (pre-session guide + grade)
-- **Agent A2** — #5 (Athena auto-preset)
-- **Agent TEST** — #6 (XCTest)
-
-Per `feedback_patch_file_workflow.md` — agents emit OLD/NEW patch blocks; Opus integrates.
-
----
-
-## B85 — Filter expansion (conditional)
-
-**Trigger:** B84's `denoiseStats` records show alpha preservation 0.95-1.05, spike-RMS reduction ≥50%, gamma coherence drop ≥30%, AND tap-mark validator shows mean(deep_marks)−mean(shallow_marks) gauge difference INCREASES with denoiser ON vs OFF.
-
-If those criteria pass on real B84 sessions:
-
-- Add **Riemannian Potato** stage (Barachant & Bonnet 2013) — 4×4 SPD covariance distance from running geometric mean. Flags whole-window failures.
-- Add **rASR** stage (Mullen 2015 ASR + Blum 2019 RANSAC calibration) — sample-level reconstruction from clean PCA basis.
-
-If the criteria fail on B84 sessions: revert filter, re-evaluate. **No cargo-culting.**
-
----
-
-## B86+ — Speculative
-
-| Idea | Notes |
+| Item | Trigger |
 |---|---|
-| Apple Watch HRV companion | Cross-validation against Optics7/8 |
-| iCloud session sync | Multi-device continuity |
-| Adaptive soundscape via depth | Layer mix shifts as depth deepens |
-| Trainer mode | Two-headband paired session |
-| Deep-learning denoiser benchmark | EEGDfus 2024 vs SWT+Potato+rASR |
-| fNIRS OpticsPipeline | Beer-Lambert HbO/HbR from Athena Optics1-6 |
-
-None queued.
+| Deep-learning denoiser benchmark (EEGDfus 2024) | Only if B84 SWT/Potato/rASR pipeline doesn't show monotonic tap-mark benefit |
+| Apple Watch HRV companion | Backlog |
+| iCloud session sync | Backlog |
+| Adaptive soundscape via depth | Backlog |
+| fNIRS OpticsPipeline (Beer-Lambert HbO/HbR) | Backlog |
 
 ---
 
-## Process Discipline (lessons from B82→B83)
+## Process discipline
 
-- **Data first, theory second.** B82 root-cause changed from "speaker physics" to "sub-resonant on iPhone speaker AND broken instrumentation" only after reading the actual NDJSON. Skip the data-read at your peril.
-- **Ship instrumentation BEFORE the fix.** Speculation costs CI builds. B83 ships measurement, not just remediation.
-- **No fabrication of facts about what other apps do.** I made unfounded claims about Muse app's internals in early plans. B83 plan dropped them.
-- **Filter on validation, not on feel.** EEGDenoiser library is built but not wired until tap-mark validation harness has data. "Adding more layers because they're famous" is not a strategy.
-- **Compile gate is CI.** No Mac locally; every push = ~1 build quota. Batch fixes.
-- **HARD RULE preserved**: never push without user "go". B83 commits locally only.
+- **Audit loops are real.** B82 → B83 went through three audit-and-fix rounds before
+   landing. The "ship a clean V1" instinct lies; multiple passes are honest.
+- **Every claim must trace to a logged metric.** B83 instrumentation overhaul exists
+   precisely because B82 had no way to disambiguate hypotheses about audio, HSI, or
+   timer rendering.
+- **No fabricating algorithm provenance.** Citations must be verifiable. Approximations
+   must be clearly labeled as such (B83 Potato uses log-Euclidean direct, not full
+   matrix log).
+- **HARD RULE preserved**: never push without explicit user "go".
 
----
+## Routing reminders
 
-## Routing reminders (per `feedback_opus_reserve_hard.md`)
-
-- T1 (status check, single-line edit) → Bash/Edit direct, no model call
-- T2 (small refactor, format) → `model_router.py --tier T2`
-- T3 (multi-step reasoning, 1-file change) → `model_router.py --tier T3` or single Sonnet Agent
-- T4 (multi-file feature) → 3-4× parallel Sonnet Agents in worktrees, Opus integrates
-- T5 (architectural rewrite) → Opus orchestrator + Sonnet workers
-
-Opus only for T4-T5 orchestration and tricky merges. Drift to Opus for T1-T3 is a failure.
+- T1–T3 → external models / direct edits
+- T4 → 3-4× parallel Sonnet sub-agents in worktrees, Opus integrates
+- T5 → Opus orchestrator + Sonnet workers
+- Opus only for T4–T5 + tricky merges

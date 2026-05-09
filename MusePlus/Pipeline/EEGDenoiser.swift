@@ -20,8 +20,12 @@
 ///   — À trous (algorithme à trous) SWT implementation reference
 /// - Daubechies I. "Ten Lectures on Wavelets." SIAM, 1992.
 ///   — db4 filter coefficients (h0..h7 listed below)
-/// - Barachant A, Bonnet S. "Riemannian geometry applied to BCI classification."
-///   TOBI Workshop IV, 2013. — Riemannian Potato artifact detector
+/// - Barachant A, Andreev A, Congedo M. "The Riemannian Potato: an automatic and
+///   adaptive artifact detection method for online experiments using Riemannian
+///   geometry." TOBI Workshop IV, Sion, Switzerland, 2013. — Riemannian Potato
+///   artifact detector. (Note: prior commit incorrectly cited "Barachant & Bonnet";
+///   the actual Potato paper is Barachant, Andreev & Congedo. Bonnet is on
+///   Barachant's 2011/2012 BCI classification papers, a different lineage.)
 /// - Arsigny V, Fillard P, Pennec X, Ayache N. "Log-Euclidean metrics for fast
 ///   and simple calculus on diffusion tensors." Magn. Reson. Med. 56:411-421, 2006.
 ///   — Log-Euclidean framework for SPD matrix averaging
@@ -60,11 +64,11 @@ public struct EEGDenoiseStats {
     /// threshold T = σ√(2 ln N). Proxy for number of transient events removed.
     public let spikesRemoved: Int
 
-    // MARK: Stage 2 — Riemannian Potato (Barachant & Bonnet 2013)
+    // MARK: Stage 2 — Riemannian Potato (Barachant, Andreev & Congedo 2013)
 
     /// True if the Riemannian Potato flagged this window as a gross artifact.
     /// Flagging criterion: Riemannian distance d > mean(d_history) + 2.5*std(d_history).
-    /// Threshold multiplier 2.5 from Barachant & Bonnet 2013 original formulation.
+    /// Threshold multiplier 2.5 from Barachant, Andreev & Congedo 2013 original formulation.
     public let potatoFlagged: Bool
 
     /// Mahalanobis-like distance in the Riemannian metric between the current
@@ -104,7 +108,7 @@ public final class EEGDenoiser {
 
     /// Number of windows in the rolling history buffer (≈ 60 seconds at 1 Hz).
     /// Used by both Riemannian Potato and rASR as the "clean reference" window.
-    /// Value: 60 — as specified in Barachant & Bonnet 2013 and Mullen 2015.
+    /// Value: 60 — as specified in Barachant, Andreev & Congedo 2013 and Mullen 2015.
     private let bufferCapacity: Int = 60
 
     /// Number of EEG channels (fixed: TP9, AF7, AF8, TP10).
@@ -122,32 +126,27 @@ public final class EEGDenoiser {
 
     /// Running geometric mean of covariance matrices G, stored as flat 4×4 (row-major).
     /// Initialised to nil until the first window is processed.
-    /// Update rule: log-Euclidean approximation (Arsigny et al. 2006):
-    ///   G_new = G_old * exp(α * log(G_old^{-1} * C))  — but simplified here
-    ///   to direct log-Euclidean average on the covariance matrices because
-    ///   full matrix log requires eigendecomposition not easily available in
-    ///   simd_float4x4.
     ///
-    /// RIEMANNIAN POTATO SIMPLIFICATION (B84):
-    /// We apply the log-Euclidean update DIRECTLY on covariance matrices
-    /// (i.e. G_new = (1-α)*G_old + α*C_new) rather than on matrix logarithms.
-    /// This is equivalent to the full log-Euclidean mean (Arsigny et al. 2006)
-    /// only in the limit where G and C are close (small α). For typical EEG
-    /// covariance matrices this is a reasonable v1 approximation.
-    /// Full matrix-log via eigendecomposition is planned for B85+.
+    /// Update rule (B83 round-2): TRUE log-Euclidean mean via eigendecomposition.
+    ///   G_new = expm( (1-α) * logm(G_old) + α * logm(C_new) )
+    /// Implemented in `applyRiemannianPotato` using `mat4LogSymm` + `mat4ExpSymm`,
+    /// which reconstruct V * diag(f(λ)) * V^T from the existing `eigendecompose4`
+    /// Jacobi solver. Falls back to Euclidean approximation only on
+    /// eigendecomposition failure (degenerate / non-SPD input).
     /// α = 0.05 — exponential forgetting factor, ~20-window effective memory.
+    /// cite: Arsigny V et al. Log-Euclidean metrics. Magn Reson Med 56:411-421, 2006.
     private var potatoG: [Float]? = nil  // 4×4 row-major
 
     /// α = 0.05 for log-Euclidean running average.
     /// Chosen so the effective window is ~1/α = 20 windows (Barachant 2013).
-    private let potatoAlpha: Float = 0.05  // cite: Barachant & Bonnet 2013
+    private let potatoAlpha: Float = 0.05  // cite: Barachant, Andreev & Congedo 2013
 
     /// Running history of potato distances for adaptive thresholding.
     private var potatoDistances: [Float] = []
 
     /// Threshold multiplier: flag if d > mean + 2.5*std.
-    /// Value 2.5 from Barachant & Bonnet 2013 original formulation.
-    private let potatoZThreshold: Float = 2.5  // cite: Barachant & Bonnet 2013
+    /// Value 2.5 from Barachant, Andreev & Congedo 2013 original formulation.
+    private let potatoZThreshold: Float = 2.5  // cite: Barachant, Andreev & Congedo 2013
 
     // MARK: - db4 Filter Coefficients
     //
@@ -316,22 +315,32 @@ public final class EEGDenoiser {
             return (channels, false, 0.0)
         }
 
-        // ── Update running geometric mean G (log-Euclidean approximation) ───
-        // SIMPLIFICATION (B84): direct convex combination on covariance matrices.
-        // Full matrix-log update G_new = expm((1-α)*logm(G) + α*logm(C)) requires
-        // two matrix exponentials/logarithms per window.  Instead we use the
-        // tangent-space approximation: G_new ≈ (1-α)*G + α*C, valid when
-        // G ≈ C (i.e. signal statistics are slowly varying).
-        // Full logm/expm planned for B85+.
-        // cite: Arsigny V et al. Log-Euclidean metrics. Magn Reson Med 2006.
+        // ── Update running geometric mean G via TRUE log-Euclidean update ───
+        // G_new = expm( (1-α) * logm(G_old) + α * logm(C) )
+        // This is the actual log-Euclidean mean (Arsigny et al. 2006), not the
+        // Euclidean approximation used in the prior commit. Uses eigendecompose4
+        // to compute logm and expm exactly for SPD 4×4 matrices.
+        // Falls back to Euclidean update if eigendecomp fails (rare; degenerate input).
+        // cite: Arsigny V et al. Log-Euclidean metrics. Magn Reson Med 56:411-421, 2006.
         var G: [Float]
         if let existing = potatoG {
-            // Exponential moving average: G ← (1-α)*G + α*C
-            // α = 0.05  (cite: Barachant & Bonnet 2013)
-            G = mat4Add(
-                mat4Scale(existing, scalar: 1.0 - potatoAlpha),
-                mat4Scale(C,        scalar: potatoAlpha)
-            )
+            if let logG = mat4LogSymm(existing), let logC = mat4LogSymm(C) {
+                let mixed = mat4Add(
+                    mat4Scale(logG, scalar: 1.0 - potatoAlpha),
+                    mat4Scale(logC, scalar: potatoAlpha)
+                )
+                if let exped = mat4ExpSymm(mixed) {
+                    G = exped
+                } else {
+                    // expm failed — Euclidean fallback
+                    G = mat4Add(mat4Scale(existing, scalar: 1.0 - potatoAlpha),
+                                 mat4Scale(C,        scalar: potatoAlpha))
+                }
+            } else {
+                // logm failed — Euclidean fallback
+                G = mat4Add(mat4Scale(existing, scalar: 1.0 - potatoAlpha),
+                             mat4Scale(C,        scalar: potatoAlpha))
+            }
         } else {
             G = C  // First window: initialise G = C
         }
@@ -364,7 +373,7 @@ public final class EEGDenoiser {
             let dVar  = potatoDistances.map { ($0 - dMean) * ($0 - dMean) }
                             .reduce(0, +) / Float(potatoDistances.count)
             let dStd  = sqrt(max(dVar, 1e-10))
-            // Flag if distance exceeds mean + 2.5*std (Barachant & Bonnet 2013)
+            // Flag if distance exceeds mean + 2.5*std (Barachant, Andreev & Congedo 2013)
             flagged = distance > dMean + potatoZThreshold * dStd
         }
 
@@ -372,7 +381,7 @@ public final class EEGDenoiser {
         // FALLBACK RECONSTRUCTION (B84): replace each channel with its
         // channel-mean from the rolling buffer. This is simple and defensible
         // for the flagging pass; rASR (stage 3) does the real signal recovery.
-        // cite: Barachant & Bonnet 2013 (flagging); rASR reconstruction in stage 3.
+        // cite: Barachant, Andreev & Congedo 2013 (flagging); rASR reconstruction in stage 3.
         if flagged {
             var reconstructed = [[Float]]()
             reconstructed.reserveCapacity(nChannels)
@@ -662,7 +671,7 @@ public final class EEGDenoiser {
 
     /// Compute Riemannian distance between SPD matrices G and C.
     /// d = sqrt( sum_i lambda_i^2 ) where lambda_i = eigenvalues of log(G^{-1/2} C G^{-1/2}).
-    /// cite: Barachant & Bonnet 2013, eq. (3)
+    /// cite: Barachant, Andreev & Congedo 2013, eq. (3)
     private func riemannianDistance(G: [Float], C: [Float]) -> Float? {
         // Compute G^{-1/2} via eigendecomposition of G:
         //   G = V D V^T  =>  G^{-1/2} = V D^{-1/2} V^T
@@ -691,7 +700,7 @@ public final class EEGDenoiser {
         guard let (sEVals, _) = eigendecompose4(matrix: S) else { return nil }
 
         // d = sqrt( sum_i log(lambda_i)^2 )
-        // cite: Barachant & Bonnet 2013
+        // cite: Barachant, Andreev & Congedo 2013
         let sumSq = sEVals.map { l -> Float in
             guard l > 1e-15 else { return 0 }
             let logL = log(l)
@@ -699,6 +708,52 @@ public final class EEGDenoiser {
         }.reduce(0, +)
 
         return sqrt(sumSq)
+    }
+
+    // MARK: - Symmetric matrix logm / expm (B83 round-2 — replaces Euclidean approximation)
+
+    /// Matrix logarithm of a symmetric positive-definite 4×4 matrix.
+    /// logm(M) = V * diag(log(λ_i)) * V^T where M = V * diag(λ_i) * V^T.
+    /// Returns nil on degenerate input (eigendecomp fails or any λ ≤ 0).
+    /// cite: Arsigny et al. 2006 — Log-Euclidean SPD calculus
+    private func mat4LogSymm(_ M: [Float]) -> [Float]? {
+        guard let (eVals, eVecs) = eigendecompose4(matrix: M) else { return nil }
+        let n = 4
+        // log of eigenvalues — must all be positive for SPD.
+        var logVals = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            guard eVals[i] > 1e-15 else { return nil }
+            logVals[i] = log(eVals[i])
+        }
+        return reconstructSymm(eigenvalues: logVals, eigenvectors: eVecs)
+    }
+
+    /// Matrix exponential of a symmetric matrix.
+    /// expm(M) = V * diag(exp(λ_i)) * V^T. Always positive-definite.
+    /// cite: Arsigny et al. 2006
+    private func mat4ExpSymm(_ M: [Float]) -> [Float]? {
+        guard let (eVals, eVecs) = eigendecompose4(matrix: M) else { return nil }
+        let n = 4
+        let expVals = (0..<n).map { exp(eVals[$0]) }
+        return reconstructSymm(eigenvalues: expVals, eigenvectors: eVecs)
+    }
+
+    /// Reconstruct symmetric matrix from V * diag(f) * V^T.
+    /// `eigenvectors` row-major 4×4 (column k = k-th eigenvector).
+    private func reconstructSymm(eigenvalues f: [Float], eigenvectors V: [Float]) -> [Float] {
+        let n = 4
+        var out = [Float](repeating: 0, count: n * n)
+        for i in 0..<n {
+            for j in 0..<n {
+                var sum: Float = 0
+                for k in 0..<n {
+                    // V[i,k] * f[k] * V[j,k]
+                    sum += V[i * n + k] * f[k] * V[j * n + k]
+                }
+                out[i * n + j] = sum
+            }
+        }
+        return out
     }
 
     // MARK: - 4×4 matrix arithmetic (row-major [Float], length 16)

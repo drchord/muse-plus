@@ -96,37 +96,65 @@ Five new NDJSON `_type` records, each with a typed `SessionRecorder.append*` API
 
 ## B83 Validation Checklist (run on device after install)
 
+**Pre-test setup (DO FIRST):**
+- Open Settings → confirm Chime Volume slider is at 70% or higher. UserDefault `chimeVolume`
+  persists across app updates. If you ever set it to 0, every gong is silent regardless of
+  speaker physics or code path. **`audioState.chimeVolumeSetting` in NDJSON will record the
+  actual value at gong time** — verify it shows ≥0.7.
+
+**Validation steps:**
+
 1. **Audibility** (built-in speaker, no earbuds): manual stop at 5 min — bowl/gong heard at >50% device volume
 2. **gongLifecycle** present in NDJSON: `scheduled` → `started` → `completed` (or `failed`)
-3. **audioState** records present every 30s + at gong sites — answers "was speaker actually outputting?" deterministically
-4. **Timer HUD** large + visible: 20-min preset from Settings → `MM:SS` digits at 28pt opacity 0.85
-5. **`uiState.timerHudRendered`** > 0 in NDJSON — proves binding rendered
-6. **HSI hysteresis**: wiggle TP9/TP10 contact → chip stays green ≥4 s before flipping orange
-7. **Per-sample `contactStateTP9` etc populated** in NDJSON (no longer `undefined`)
-8. **`packetGapMs`** populated per sample (not nil)
-9. **`event` records** match runtime: 210 fits → 210+ event lines (vs B82 zero)
-10. **`mainStall`** records: 0 in a healthy session; non-zero proves the "freezing" claim quantitatively
-11. **No B80 regressions**: NDJSON crash recovery still works; soundscape still adapts to depth; calibration still completes in 60s
+3. **audioState** records present every 30s + at every gong site (`endSession-pre-gong`,
+    `performFinalDisconnect-pre-gong`) — answers "was speaker actually outputting at gong time?"
+4. **`audioState.chimeVolumeSetting`** ≥ 0.7 at the gong-pre snapshot
+5. **Timer HUD** large + visible: 20-min preset from Settings → `MM:SS` digits at 28pt opacity 0.85
+6. **`uiState.timerHudRendered`** > 0 in NDJSON — proves binding rendered
+7. **HSI hysteresis**: wiggle TP9/TP10 contact → chip stays green ≥4 s before flipping orange
+8. **Pre-session fit-stability banner** appears during calibration if any contact flips;
+    progress bar fills 0/5 → 5/5 over 5 s of stable allGood; auto-dismisses
+9. **Per-sample `contactStateTP9` etc populated** in NDJSON (no longer `undefined`)
+10. **`packetGapMs`** populated per sample (not nil)
+11. **`event` records** match runtime: ~210 fits → 210+ event lines (vs B82 zero)
+12. **`mainStall`** records: 0 in a healthy session; non-zero proves the "freezing" claim quantitatively
+13. **`denoiseStats`** records present every 1 s (or `bypassReason: "denoise_disabled"` if turned off)
+14. **`SessionDiagnostics.contactQualityGrade`** present (A/B/C/F) and `fitEventsPerMin` matches
+    visible fit dot flicker rate
+15. **`SessionDiagnostics.museModel`** is `"ms03"` (Athena) or appropriate string (no longer `nil`)
+16. **No B80 regressions**: NDJSON crash recovery still works; soundscape still adapts to depth;
+    calibration still completes in 60s
 
 ---
 
-## Files Changed in B83
+## Files Changed in B83 (cumulative across all 3 commits)
 
 **New files:**
-- `MusePlus/Audio/EndGongPlayer.swift` (202 LOC)
-- `MusePlus/Diagnostics/MainThreadStall.swift` (138 LOC, post-edit)
-- `MusePlus/Pipeline/EEGDenoiser.swift` (493 LOC)
+- `MusePlus/Audio/EndGongPlayer.swift` (~220 LOC)
+- `MusePlus/Audio/BowlAudioGenerator.swift` (293 LOC)
+- `MusePlus/Diagnostics/MainThreadStall.swift` (~150 LOC)
+- `MusePlus/Pipeline/EEGDenoiser.swift` (~1077 LOC, 3-stage cascade)
+- `MusePlus/Pipeline/EEGWindowBuffer.swift` (~140 LOC, sidecar dispatcher)
 - `MusePlus/Resources/Sounds/README.md` (bowl drop-in instructions)
 - `analysis/tapmark_validation.js` (offline filter validator)
 - `analysis/B82_session_analysis.md` (data-driven diagnosis)
+- `MusePlusTests/{SessionRecorder,EEGDenoiser,MainThreadStall,AlertCoordinator,SessionTimer}Tests.swift` (5 files, 522 LOC)
 
 **Modified files:**
-- `MusePlus/App.swift` — Probe new fields (lastValidHsi, hsiStableTier, hsiBuffer, render counters, lastRouteChangeAt, diagnosticsTimer); HSI sink hysteresis logic; addSample reads lastValidHsi + MuseClient.lastPacketGapMs; recordEvent writes NDJSON; endSessionGracefully uses EndGongPlayer; performFinalDisconnect plays failure bowl + 4s fade; route-change observer stamps + snapshots; session-start fires diagnosticsTimer + MainThreadStall; timer HUD redesign; SignalChipsView uses stable tier
-- `MusePlus/Audio/ChimeEngine.swift` — engine.prepare(); 84 Hz → 432 Hz in playGong/playSuccessChime/playTimerEnd; isEngineRunning/isPlayerPlaying public accessors; Telemetry.audio notice on synthesis
-- `MusePlus/Audio/SoundscapePlayer.swift` — isEngineRunning public accessor
-- `MusePlus/SessionRecorder.swift` — 5 new NDJSON struct types; appendEvent + appendAudioState + appendGongLifecycle + appendMainStall + appendUIState + currentSessionElapsed; NDJSONSample fields populated; addFitEvent now also emits event line; buildTag B80 → B83
-- `MusePlus/Muse/MuseClient.swift` — lastPacketGapMs static; computed in handleEEG
-- `MusePlus/Session/SessionTimer.swift` — allowedDurations expanded
+- `MusePlus/App.swift` — many Probe additions: lastValidHsi, hsiStableTier+hsiBuffer, render counters, lastRouteChangeAt, diagnosticsTimer, fitEventCount, consecutiveGoodSeconds. HSI sink hysteresis. addSample reads lastValidHsi + MuseClient.lastPacketGapMs. recordEvent dual-writes (NDJSON + in-mem). endSessionGracefully + performFinalDisconnect: pre-gong audioState snapshot + EndGongPlayer + 4s soundscape fade. Route-change observer stamps + snapshots. Session-start fires diagnosticsTimer + MainThreadStall + EEGWindowBuffer reset. Timer HUD: 28pt rounded mono + onChange counter. SignalChipsView reads hsiStable. Pre-session fit-stability banner. buildDiagnostics: A/B/C/F grade from fit-event rate (corrected from prior HSI-transition conflation), museModel from MuseClient.museModelString, buildTag→B83. New view: FitStabilityBannerView. MusePlusApp.init calls BowlAudioGenerator.generateIfNeeded().
+- `MusePlus/Audio/ChimeEngine.swift` — engine.prepare() before start; 84 Hz → 432 Hz fundamental in playGong/playSuccessChime/playTimerEnd; isEngineRunning/isPlayerPlaying accessors; Telemetry.audio notice on each synth call.
+- `MusePlus/Audio/SoundscapePlayer.swift` — isEngineRunning accessor.
+- `MusePlus/Audio/EndGongPlayer.swift` — bundleURL fallback chain extended to Documents/Sounds/.wav (BowlAudioGenerator output); fallback to ChimeEngine.playFailureChime (was nonexistent playEndedFailure); appendGongLifecycle dispatch via SessionRecorder.
+- `MusePlus/SessionRecorder.swift` — 6 new NDJSON struct types (event, audioState, gongLifecycle, mainStall, uiState, denoiseStats); 7 new public helpers (appendEvent, appendAudioState, appendGongLifecycle, appendMainStall, appendUIState, appendDenoiseStats, currentSessionElapsed); NDJSONSample extended with B83 fields populated by Probe; addFitEvent also emits event line; buildTag B80 → B83; SessionDiagnostics gains contactQualityGrade + fitEventsPerMin.
+- `MusePlus/Muse/MuseClient.swift` — lastPacketGapMs atomic static (computed in handleEEG); museModelString public accessor; EEGWindowBuffer.shared.ingest call after eegPacket.send.
+- `MusePlus/Pipeline/EEGDenoiser.swift` — extended from 493 LOC SWT-only to 1077 LOC 3-stage cascade (SWT + Riemannian Potato + rASR-lite); EEGDenoiseStats gains potatoFlagged + potatoDistance + asrComponentsReplaced; rolling 60-window buffer state; vDSP_vadd Slice→Array compile fix; correct citation Barachant, Andreev & Congedo 2013.
+- `MusePlus/Diagnostics/MainThreadStall.swift` — @MainActor removed (was Swift-strict-concurrency hazard); appendMainStall typed call; honest comment on stack-capture limitation (post-recovery stack ≠ blocking stack).
+- `MusePlus/Session/SessionTimer.swift` — allowedDurations [60,75,90] → [5,10,15,20,25,30,45,60,75,90,120].
+
+**Documentation:**
+- `STATUS.md` (this file)
+- `NEXT_BUILD_PLAN.md` (B84 scope: live-signal denoise + filter validation + B81 leftovers)
+- `.gitignore` (analysis/incoming/ added)
 
 ---
 

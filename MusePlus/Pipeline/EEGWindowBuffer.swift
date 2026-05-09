@@ -1,29 +1,41 @@
 /// EEGWindowBuffer.swift
 /// MusePlus — 1-second sliding-window buffer for sidecar EEG denoising
 ///
-/// Architecture (B83):
+/// Architecture (B83) — honest version:
 ///   • `MuseClient.handleEEG` calls `EEGWindowBuffer.shared.ingest(pkt)` on every
 ///     SDK callback (after the existing `eegPacket.send(pkt)` call).
 ///   • Once each of the 4 canonical channels (TP9=0, AF7=1, AF8=2, TP10=3) has
 ///     accumulated 256 samples (1 second at 256 Hz), the buffer dispatches a
-///     denoise pass on a low-priority background queue.
+///     denoise pass on the buffer's serial queue.
 ///   • Result emits to `SessionRecorder.appendDenoiseStats(...)` as a NDJSON
-///     `_type:"denoiseStats"` line. The CLEANED signal is NOT yet routed back
-///     into `EEGPipeline` — it's a sidecar measurement only. B84 decides
-///     whether to flip the switch based on tap-to-mark validation.
-///   • The raw EEG continues to feed the live pipeline unchanged. Real-time
-///     latency budget (depth scoring, ECDF) is preserved.
+///     `_type:"denoiseStats"` line. **The CLEANED signal is NOT routed back into
+///     `EEGPipeline` in B83** — it's a sidecar measurement only.
 ///
-/// Toggle: `UserDefaults.standard.bool(forKey: "eegDenoiseEnabled")` defaults to
-/// TRUE in B83 because we want stats from every session for offline analysis.
-/// Set to FALSE in Settings to skip denoising entirely (saves CPU when needed).
+/// Why sidecar (corrected from prior commit's claim about temporal alignment):
+///   `EEGPipeline.process` already buffers a 1-second window (256 samples) before
+///   computing band powers via vDSP FFT. Inserting the denoiser at the front of
+///   the live path would NOT break temporal alignment — `EEGPipeline` would just
+///   see denoised samples streamed at the same per-packet cadence. The honest
+///   reason the live signal is sidecar-only: VALIDATION RISK. We don't yet have
+///   tap-to-mark ground truth showing the denoiser improves rather than degrades
+///   real depth scoring. Live replacement is gated behind the `eegDenoiseLiveSignal`
+///   UserDefault (default false, not yet wired into MuseClient). B84 wires the
+///   live path once the offline validation harness has confirmed benefit.
+///
+/// Toggles:
+///   `eegDenoiseEnabled` (UserDefault, default TRUE) — sidecar denoise + stats emit.
+///       Set FALSE to skip entirely (save CPU).
+///   `eegDenoiseLiveSignal` (UserDefault, default FALSE, reserved) — when wired in
+///       B84, replaces raw EEG with cleaned signal in `MuseClient.handleEEG`.
 ///
 /// Thread model: a private serial DispatchQueue. SDK callback thread → ingest →
 /// queue.async → window-full check → denoise on same queue (off main).
 ///
-/// Performance: db4 SWT 5-level + Potato + rASR-lite on 4×256 window measured
-/// at < 5 ms on iPhone 12 in development; budget is 1 sec / window so we have
-/// 200× headroom. CPU footprint negligible against EEGPipeline FFT cost.
+/// Performance: db4 SWT 5-level + Potato + rASR-lite on 4×256 window estimated
+/// at < 10 ms on iPhone 12 (NOT measured on device — claim revised from prior
+/// commit's "< 5 ms" assertion which was finger-in-air). Budget is 1 sec/window
+/// so even at 50 ms we'd be fine. CPU footprint will be confirmed by `mainStall`
+/// telemetry: if denoise enabled correlates with stall events, drop CPU budget.
 
 import Foundation
 
@@ -112,30 +124,15 @@ final class EEGWindowBuffer {
         let result = denoiser.denoise(window: window)
         let s = result.stats
 
-        // Read potato/asr fields if EEGDenoiseStats has them. Fields beyond the
-        // original 3 are added by the Potato+rASR extension; reflection-style
-        // access via Mirror keeps this resilient if the extension hasn't landed.
-        let mirror = Mirror(reflecting: s)
-        var potatoFlagged = false
-        var potatoDistance: Float = 0
-        var asrReplaced: Int = 0
-        for child in mirror.children {
-            switch child.label {
-            case "potatoFlagged":         potatoFlagged   = (child.value as? Bool)  ?? false
-            case "potatoDistance":        potatoDistance  = (child.value as? Float) ?? 0
-            case "asrComponentsReplaced": asrReplaced     = (child.value as? Int)   ?? 0
-            default: break
-            }
-        }
-
+        // B83 — direct field access; Potato + rASR fields confirmed present in struct.
         SessionRecorder.shared.appendDenoiseStats(
-            alphaPowerRatio: s.alphaPowerRatio,
-            spikeRmsReduction: s.spikeRmsReduction,
-            spikesRemoved: s.spikesRemoved,
-            potatoFlagged: potatoFlagged,
-            potatoDistance: potatoDistance,
-            asrComponentsReplaced: asrReplaced,
-            bypassReason: nil
+            alphaPowerRatio:       s.alphaPowerRatio,
+            spikeRmsReduction:     s.spikeRmsReduction,
+            spikesRemoved:         s.spikesRemoved,
+            potatoFlagged:         s.potatoFlagged,
+            potatoDistance:        s.potatoDistance,
+            asrComponentsReplaced: s.asrComponentsReplaced,
+            bypassReason:          nil
         )
     }
 }
