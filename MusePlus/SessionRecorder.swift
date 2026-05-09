@@ -174,6 +174,8 @@ private struct NDJSONMark: Codable {
 private struct NDJSONFit: Codable {
     var _type = "fit"
     let time: Double
+    let hsi: [Double]?
+    let allGood: Bool?
 }
 
 private struct NDJSONSample: Codable {
@@ -338,7 +340,7 @@ final class SessionRecorder: ObservableObject {
                 calibrationIndexMean: calibrationIndexMean,
                 calibrationIndexStd:  calibrationIndexStd,
                 marks: [],
-                buildTag: "B83"
+                buildTag: "B87"
             )
             lastDeepState = false
             sampleCount   = 0
@@ -542,14 +544,14 @@ final class SessionRecorder: ObservableObject {
         }
     }
 
-    func addFitEvent() {
+    func addFitEvent(hsi: [Double]? = nil, allGood: Bool? = nil) {
         queue.sync {
             guard isRecording, var rec = current else { return }
             let t = Date().timeIntervalSince(rec.startDate)
             rec.fitEvents.append(t)
             current = rec
 
-            let nd = NDJSONFit(_type: "fit", time: t)
+            let nd = NDJSONFit(_type: "fit", time: t, hsi: hsi, allGood: allGood)
             appendLine(nd)
             // B83 — also append to event stream so all instrumentation flows through one channel.
             self.appendEventLocked(SessionEvent(time: t, kind: "fit", detail: nil))
@@ -753,7 +755,7 @@ final class SessionRecorder: ObservableObject {
             startDate: iso8601.string(from: now),
             calibrationIndexMean: calibrationIndexMean,
             calibrationIndexStd:  calibrationIndexStd,
-            buildTag: "B83"
+            buildTag: "B87"
         )
         appendLine(header)
         Telemetry.recording.notice("NDJSON opened: \(url.lastPathComponent, privacy: .public)")

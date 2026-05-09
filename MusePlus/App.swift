@@ -331,7 +331,7 @@ final class Probe: ObservableObject {
                 // Dots give visual state — audio mid-sit breaks concentration regardless
                 // of which contacts fluctuate (TP9/TP10 are rarely simultaneously green).
                 if wasGood && !snap.allGood {
-                    SessionRecorder.shared.addFitEvent()
+                    SessionRecorder.shared.addFitEvent(hsi: self.lastValidHsi, allGood: snap.allGood)
                     self.fitEventCount += 1   // B83 — parallel counter for grade metric
                 }
                 // B83 round-4 — fit-stability counter is INSTANTLY reset on flip→bad here,
@@ -1297,8 +1297,7 @@ private struct MeditationView: View {
     @Binding var showTimer:      Bool
 
     @State private var showEndConfirm = false
-    @ObservedObject private var timer = MeditationTimer.shared
-    @ObservedObject private var sessionTimer = SessionTimer.shared   // D1
+    @ObservedObject private var sessionTimer = SessionTimer.shared
     @ObservedObject private var sound = SoundscapePlayer.shared
     // D3: toast message — auto-cleared by ToastModifier after 3s
     @State private var toastMessage: String? = nil
@@ -1429,8 +1428,8 @@ private struct MeditationView: View {
             HStack(spacing: 0) {
                 BottomButton(
                     icon: "timer",
-                    label: timer.isRunning ? timer.formattedRemaining : "Timer",
-                    active: timer.isRunning
+                    label: sessionTimer.isRunning ? sessionTimer.formattedRemaining : "\(sessionTimer.selectedDurationMin)m",
+                    active: sessionTimer.isRunning
                 ) { showTimer = true }
 
                 Divider().frame(height: 28).background(.white.opacity(0.1))
@@ -1809,7 +1808,8 @@ private struct BottomButton: View {
                     .foregroundStyle(active ? .white.opacity(0.85) : .white.opacity(0.35))
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
         }
     }
 }
@@ -2023,12 +2023,39 @@ private struct SoundscapeSheet: View {
 
 private struct TimerSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var sessionTimer = SessionTimer.shared
+
     var body: some View {
         NavigationStack {
-            List { MeditationTimerView() }
-                .navigationTitle("Session Timer")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            List {
+                Section("Session Duration") {
+                    Picker("Duration", selection: $sessionTimer.selectedDurationMin) {
+                        ForEach(SessionTimer.allowedDurations, id: \.self) { min in
+                            Text("\(min) min").tag(min)
+                        }
+                    }
+                    .pickerStyle(.wheel)
+                    .disabled(sessionTimer.isRunning)
+                    if sessionTimer.isRunning {
+                        Text("Change takes effect on next session")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if sessionTimer.isRunning {
+                    Section("Running") {
+                        LabeledContent("Remaining", value: sessionTimer.formattedRemaining)
+                            .monospacedDigit()
+                        LabeledContent("Total", value: "\(sessionTimer.selectedDurationMin) min")
+                    }
+                }
+                Section {
+                    Text("Timer starts automatically when calibration completes. Session ends and data is saved when it expires.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Session Timer")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
     }
 }
@@ -2170,95 +2197,7 @@ private struct ChimePreviewRow: View {
     }
 }
 
-// MARK: - Meditation timer model
-
-final class MeditationTimer: ObservableObject {
-    static let shared = MeditationTimer()
-
-    @Published var duration:  TimeInterval = 20 * 60
-    @Published var remaining: TimeInterval = 0
-    @Published var isRunning  = false
-    @Published var isDone     = false
-
-    private var endDate:      Date?
-    private var displayTimer: Timer?
-
-    func start() {
-        isDone    = false
-        isRunning = true
-        endDate   = Date().addingTimeInterval(duration)
-        remaining = duration
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-    }
-
-    func stop() {
-        displayTimer?.invalidate()
-        displayTimer = nil
-        isRunning    = false
-        isDone       = false
-        remaining    = 0
-    }
-
-    var formattedRemaining: String {
-        let r = max(0, remaining)
-        let h = Int(r) / 3600
-        let m = (Int(r) % 3600) / 60
-        let s = Int(r) % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%d:%02d", m, s)
-    }
-
-    private func tick() {
-        guard let end = endDate else { return }
-        let r = max(0, end.timeIntervalSinceNow)
-        remaining = r
-        if r <= 0 {
-            displayTimer?.invalidate()
-            displayTimer = nil
-            isRunning    = false
-            isDone       = true
-            ChimeEngine.shared.playTimerEnd()
-            // Fade soundscape out as timer ends — session is complete
-            SoundscapePlayer.shared.stopAll(fadeSeconds: 4.0)
-        }
-    }
-}
-
-// MARK: - Meditation timer view
-
-private struct MeditationTimerView: View {
-    @ObservedObject private var mt = MeditationTimer.shared
-
-    private let presets: [(String, TimeInterval)] = [
-        ("5 min",  300),  ("10 min", 600),  ("15 min", 900),
-        ("20 min", 1200), ("30 min", 1800), ("45 min", 2700),
-        ("60 min", 3600), ("90 min", 5400),
-    ]
-
-    var body: some View {
-        Picker("Duration", selection: $mt.duration) {
-            ForEach(presets, id: \.1) { label, secs in
-                Text(label).tag(secs)
-            }
-        }
-        .pickerStyle(.menu)
-        .disabled(mt.isRunning)
-
-        if mt.isRunning || mt.isDone {
-            LabeledContent(mt.isDone ? "Session complete" : "Remaining",
-                           value: mt.isDone ? "" : mt.formattedRemaining)
-                .foregroundStyle(mt.isDone ? .green : .primary)
-        }
-
-        Button(mt.isRunning ? "Stop" : "Start") {
-            mt.isRunning ? mt.stop() : mt.start()
-        }
-        .foregroundStyle(mt.isRunning ? .red : .green)
-    }
-}
+// MeditationTimer removed in B87 — unified into SessionTimer.
 
 // MARK: - Recording control
 

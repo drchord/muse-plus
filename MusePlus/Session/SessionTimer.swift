@@ -29,6 +29,16 @@ final class SessionTimer: ObservableObject {
     /// Called on main thread when timer expires.
     var onExpire: (() -> Void)?
 
+    var formattedRemaining: String {
+        let r = max(0, remainingSec)
+        let h = r / 3600
+        let m = (r % 3600) / 60
+        let s = r % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, s)
+            : String(format: "%d:%02d", m, s)
+    }
+
     private var timer: Timer?
 
     private init() {
