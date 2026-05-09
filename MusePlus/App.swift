@@ -1387,7 +1387,7 @@ private struct MeditationView: View {
                         .foregroundStyle(.white.opacity(0.55))
                 }
                 .padding(.top, 8)
-                .onChange(of: r) { _ in
+                .onChange(of: r) { _, _ in
                     DispatchQueue.main.async { probe.timerHudRendered += 1 }
                 }
             }

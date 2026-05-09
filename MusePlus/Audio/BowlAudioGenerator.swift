@@ -95,8 +95,11 @@ public final class BowlAudioGenerator {
             channels: 1,
             interleaved: true
         ) else {
-            // Fallback (should never be reached on iOS 16+)
-            return AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)
+            // B83 round-6 — fallback initializer ALSO returns Optional; force-unwrap is
+            // safe here because both the int16 and standard 44.1k mono initialisers
+            // are documented to succeed on iOS 16+ with these parameters. If both
+            // somehow returned nil the app couldn't synthesize audio at all.
+            return AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
         }
         return fmt
     }
