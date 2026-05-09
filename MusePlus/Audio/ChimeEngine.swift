@@ -20,6 +20,9 @@ final class ChimeEngine {
         engine.connect(player, to: reverb, format: fmt)
         engine.connect(reverb, to: engine.mainMixerNode, format: fmt)
         configureSession()
+        // B83: Apple-recommended prepare() before start() — pre-allocates audio buffers,
+        // reduces first-buffer latency, and stabilizes engine state across route changes.
+        engine.prepare()
         try? engine.start()
         observeAudio()
     }
@@ -30,6 +33,10 @@ final class ChimeEngine {
         get { UserDefaults.standard.object(forKey: "chimeVolume") as? Float ?? 0.7 }
         set { UserDefaults.standard.set(newValue, forKey: "chimeVolume") }
     }
+
+    // MARK: - B83 state introspection (for SessionRecorder.appendAudioState)
+    var isEngineRunning: Bool { engine.isRunning }
+    var isPlayerPlaying: Bool { player.isPlaying }
 
     // MARK: - Public API
 
@@ -101,13 +108,19 @@ final class ChimeEngine {
 
     // MARK: - Session end gong (D)
 
-    /// Session end gong: single sustained 84 Hz gong with 8-second fade-out.
-    /// Plays over a fading soundscape (Agent B / stopAll handles the fade).
-    /// No depth-gate check — always fires at session completion.
-    /// Called from: timer expiry (SessionTimer.onExpire), manual end, disconnect-grace success.
+    /// Session end gong: single sustained 432 Hz gong with 8-second fade-out.
+    /// B83: fundamental raised from 84 Hz → 432 Hz. iPhone built-in speaker has known
+    /// rolloff below ~200 Hz; the previous 84 Hz fundamental and lower partials were
+    /// physically reproducible only via earbuds/AirPods. 432 Hz with inharmonic
+    /// gong partials (1.516×, 2.871×, 4.465×, 6.122×) puts most energy in the
+    /// 432-2645 Hz band — solidly within iPhone speaker passband.
+    /// EndGongPlayer.shared.playSuccess() now invokes this only as a fallback when
+    /// no `bowl_success.m4a` resource is bundled.
+    /// Called from: EndGongPlayer fallback path; legacy callers retained for compatibility.
     func playGong() {
+        Telemetry.audio.notice("ChimeEngine.playGong scheduled fundamental=432Hz")
         reverb.wetDryMix = 35
-        scheduleGong(fundamental: 84, decayRate: 0.18, duration: 8.0, amplitude: 0.75)
+        scheduleGong(fundamental: 432, decayRate: 0.18, duration: 8.0, amplitude: 0.75)
         scheduleDuck(over: 8.0)
     }
 
@@ -138,15 +151,16 @@ final class ChimeEngine {
     }
 
     /// Session ended successfully: three long descending gong strikes — completion, finality.
-    /// Uses playTimerEnd pattern but quieter (amplitude 0.5/0.35/0.22) for non-timer context.
+    /// B83: fundamental raised 84 → 432 Hz (iPhone speaker passband).
     func playSuccessChime() {
+        Telemetry.audio.notice("ChimeEngine.playSuccessChime scheduled fundamental=432Hz")
         reverb.wetDryMix = 32
-        scheduleGong(fundamental: 84, decayRate: 0.20, duration: 6.0, amplitude: 0.50)
+        scheduleGong(fundamental: 432, decayRate: 0.20, duration: 6.0, amplitude: 0.50)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-            self?.scheduleGong(fundamental: 84, decayRate: 0.20, duration: 6.0, amplitude: 0.35)
+            self?.scheduleGong(fundamental: 432, decayRate: 0.20, duration: 6.0, amplitude: 0.35)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-            self?.scheduleGong(fundamental: 84, decayRate: 0.20, duration: 6.0, amplitude: 0.22)
+            self?.scheduleGong(fundamental: 432, decayRate: 0.20, duration: 6.0, amplitude: 0.22)
         }
         scheduleDuck(over: 11.0)
     }
@@ -165,14 +179,16 @@ final class ChimeEngine {
     }
 
     /// Timer end: three descending gong strikes.
+    /// B83: fundamental raised 84 → 432 Hz (iPhone speaker passband).
     func playTimerEnd() {
+        Telemetry.audio.notice("ChimeEngine.playTimerEnd scheduled fundamental=432Hz")
         reverb.wetDryMix = 35
-        scheduleGong(fundamental: 84, decayRate: 0.20, duration: 7.0, amplitude: 0.70)
+        scheduleGong(fundamental: 432, decayRate: 0.20, duration: 7.0, amplitude: 0.70)
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            self?.scheduleGong(fundamental: 84, decayRate: 0.20, duration: 7.0, amplitude: 0.50)
+            self?.scheduleGong(fundamental: 432, decayRate: 0.20, duration: 7.0, amplitude: 0.50)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
-            self?.scheduleGong(fundamental: 84, decayRate: 0.20, duration: 7.0, amplitude: 0.35)
+            self?.scheduleGong(fundamental: 432, decayRate: 0.20, duration: 7.0, amplitude: 0.35)
         }
         scheduleDuck(over: 13.0)
     }

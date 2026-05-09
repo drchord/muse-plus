@@ -14,7 +14,8 @@ import os.log
 
 final class SessionTimer: ObservableObject {
     static let shared = SessionTimer()
-    static let allowedDurations = [60, 75, 90]  // minutes
+    // B83: expanded presets — user reported B82 session was 20 min but no preset matched, forcing manual end.
+    static let allowedDurations = [5, 10, 15, 20, 25, 30, 45, 60, 75, 90, 120]  // minutes
 
     @Published private(set) var remainingSec: Int = 0
     @Published private(set) var isRunning: Bool = false

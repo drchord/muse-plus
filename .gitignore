@@ -25,3 +25,6 @@ Podfile.lock
 
 # Tooling caches
 .swiftpm/
+
+# B83: session NDJSON data dumped from device for offline analysis — not source.
+analysis/incoming/

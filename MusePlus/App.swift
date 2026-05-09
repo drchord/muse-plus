@@ -85,6 +85,23 @@ final class Probe: ObservableObject {
     // Last known HSI per-channel raw value; used to detect transitions in fitCheck sink.
     // Index mapping: [0]=TP9, [1]=AF7, [2]=AF8, [3]=TP10
     private var lastHsiRaw: [Double] = []
+    // B83 — last NON-EMPTY HSI vector. The Combine `hsiRaw` publisher fires only after
+    // the first SDK callback; before that, `self.hsiRaw == []` and per-sample contactState
+    // fields land as nil → `undefined` in NDJSON (B82 instrumentation gap).
+    // `lastValidHsi` retains the last 4-element vector seen, never resets on connect.
+    private var lastValidHsi: [Double] = []
+    // B83 — UI-stable HSI tier per channel. 4-of-5 sliding majority on rounded HSI tier
+    // (1=good, 2=mediocre, 4=bad). Suppresses single-sample chip flicker that triggered
+    // user complaint "TP9/TP10 keep going green/yellow." 5 samples × 1 Hz = ≤5 s latency.
+    @Published var hsiStableTier: [Int] = [1, 1, 1, 1]
+    private var hsiBuffer: [[Int]] = [[], [], [], []]
+    // B83 — UI render counters; incremented by view bodies, drained by 30s appendUIState.
+    @Published var timerHudRendered: Int = 0
+    @Published var depthGaugeRendered: Int = 0
+    @Published var chipViewRendered: Int = 0
+    private var lastRouteChangeAt: Date = .distantPast
+    // B83 — periodic audioState + uiState logger. Fires every 30s while recording.
+    private var diagnosticsTimer: Timer?
     private var sessionStart = Date()
     private var reconnectAttempts = 0
     // B80 (B2): grace-period state — when a BLE drop occurs mid-session we don't
@@ -331,6 +348,27 @@ final class Probe: ObservableObject {
                 guard let self else { return }
                 self.hsiCount += 1
                 self.hsiRaw = vals
+                // B83 — retain last non-empty vector for addSample. Survives reconnect.
+                if vals.count == 4 {
+                    self.lastValidHsi = vals
+                    // B83 — 4-of-5 sliding-majority hysteresis per channel for UI display.
+                    // SDK tiers: 1=good, 2=mediocre, 4=bad. Round and append.
+                    for i in 0..<4 {
+                        let tier = Int(vals[i].rounded())
+                        self.hsiBuffer[i].append(tier)
+                        if self.hsiBuffer[i].count > 5 {
+                            self.hsiBuffer[i].removeFirst(self.hsiBuffer[i].count - 5)
+                        }
+                        // 4-of-5 majority: only flip stable tier when ≥4 of last 5 agree.
+                        var counts: [Int: Int] = [:]
+                        for v in self.hsiBuffer[i] { counts[v, default: 0] += 1 }
+                        if let (best, n) = counts.max(by: { $0.value < $1.value }), n >= 4 {
+                            if self.hsiStableTier[i] != best {
+                                self.hsiStableTier[i] = best
+                            }
+                        }
+                    }
+                }
                 // B80: detect per-channel HSI state transitions.
                 // HSI vals index: [0]=TP9, [1]=AF7, [2]=AF8, [3]=TP10
                 // Threshold: < 2.0 = good (1), >= 2.0 & < 4.0 = mediocre (2), >= 4.0 = bad (4)
@@ -423,15 +461,19 @@ final class Probe: ObservableObject {
                 return Date().timeIntervalSince(started) < 300 ? "warmup" : "main"
             }()
             let elem = self.elements.values
-            // B80: gather per-sample diagnostic fields.
-            // hsiRaw index: [0]=TP9 [1]=AF7 [2]=AF8 [3]=TP10. Round to integer (1/2/4 tiers).
-            let hsi = self.hsiRaw
+            // B83 — read from lastValidHsi (retainer) instead of hsiRaw (Combine race).
+            // hsi index: [0]=TP9 [1]=AF7 [2]=AF8 [3]=TP10. Round to integer (1/2/4 tiers).
+            // B82 NDJSON had every contactState field undefined because hsiRaw was
+            // empty when the very first sample built. lastValidHsi survives.
+            let hsi = self.lastValidHsi
             let hsiAF7  = hsi.count > 1 ? Int(hsi[1].rounded()) : nil
             let hsiAF8  = hsi.count > 2 ? Int(hsi[2].rounded()) : nil
             let hsiTP9  = hsi.count > 0 ? Int(hsi[0].rounded()) : nil
             let hsiTP10 = hsi.count > 3 ? Int(hsi[3].rounded()) : nil
-            let watchdogStats = LivenessWatchdog.shared.currentStats()
-            let gapMs: Float? = watchdogStats.lastGap > 0 ? Float(watchdogStats.lastGap * 1000) : nil
+            // B83 — packet gap from MuseClient atomic counter (updated on every SDK
+            // callback). LivenessWatchdog's lastGap was sometimes stale at sample time.
+            let gapRaw: Float = MuseClient.lastPacketGapMs
+            let gapMs: Float? = gapRaw > 0 ? gapRaw : nil
             let battFrac: Float? = self.battery > 0 ? Float(self.battery / 100.0) : nil
             let orientStr: String = {
                 switch UIDevice.current.orientation {
@@ -503,11 +545,26 @@ final class Probe: ObservableObject {
                     calibrationIndexMean: self.scorer.calibrationIndexMean,
                     calibrationIndexStd:  self.scorer.calibrationIndexStd
                 )
+                // B83 — start main-thread stall detector (1Hz heartbeat, 1.5s threshold).
+                // Quantifies the "freezing" sensation users describe; emits `mainStall` events.
+                MainThreadStall.shared.start()
+                // B83 — periodic 30s diagnostics: audioState + uiState snapshot.
+                // Drains UI render counters, captures AVAudioSession + engine state,
+                // route info, chime volume. Fires the very first one immediately so
+                // we capture state at session start, not 30s in.
+                self.diagnosticsTimer?.invalidate()
+                self.fireDiagnosticsSnapshot(trigger: "session-start")
+                self.diagnosticsTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                    self?.fireDiagnosticsSnapshot(trigger: "periodic")
+                }
+                if let dt = self.diagnosticsTimer { RunLoop.main.add(dt, forMode: .common) }
                 // D1: Start session-length auto-timer.
                 // Timer fires endSessionGracefully(reason:) on expiry.
                 SessionTimer.shared.start()
                 SessionTimer.shared.onExpire = { [weak self] in
                     Telemetry.recording.notice("timer expired at \(SessionTimer.shared.selectedDurationMin, privacy: .public)min")
+                    self?.recordEvent(kind: "timer-expired",
+                                      detail: "\(SessionTimer.shared.selectedDurationMin)min")
                     self?.endSessionGracefully(reason: "timer-completed")
                 }
             }
@@ -600,15 +657,20 @@ final class Probe: ObservableObject {
             .store(in: &bag)
 
         // B80 (B3): Route change — log only. Engine handles reconnect via AVAudioEngineConfigurationChange.
+        // B83 — also stamp `lastRouteChangeAt` so audioState snapshots can answer
+        // "was the gong scheduled within N seconds of a route change?" — a known
+        // class of AVAudioPlayerNode silent-render bug.
         NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] note in
                 guard let info = note.userInfo,
                       let reasonVal = info[AVAudioSessionRouteChangeReasonKey] as? UInt else { return }
                 Telemetry.audio.notice("route change reason=\(reasonVal, privacy: .public) at \(Date(), privacy: .public)")
-                // B80: count route changes and log event.
+                self?.lastRouteChangeAt = Date()
                 self?.sessionDiagCounters.routeChanges += 1
                 self?.recordEvent(kind: "route-change", detail: "reason=\(reasonVal)")
+                // Snapshot audio state on every route change.
+                self?.fireDiagnosticsSnapshot(trigger: "route-change")
             }
             .store(in: &bag)
 
@@ -655,9 +717,19 @@ final class Probe: ObservableObject {
         let effectiveReason = reason  // simplified until Agent B lands isPausedForReconnect
         Telemetry.recording.notice("endSessionGracefully reason=\(effectiveReason, privacy: .public)")
         SessionTimer.shared.cancel()
-        ChimeEngine.shared.playGong()
+        // B83 — route to EndGongPlayer. If `bowl_success.{m4a,wav}` is bundled, plays the
+        // recorded sample via AVAudioPlayer (file-based, immune to engine state). Otherwise
+        // falls back to ChimeEngine.playGong() — now at 432 Hz fundamental (audible on
+        // iPhone built-in speaker, unlike the old 84 Hz that B82 instrumentation will prove
+        // was sub-resonant if outputs included only `builtInSpeaker`).
+        EndGongPlayer.shared.playSuccess()
+        // B83 — record the manual/timer end as event in NDJSON.
+        recordEvent(kind: "session-end-success", detail: effectiveReason)
         // Fade soundscape over 4s (gong plays concurrently per task spec).
         SoundscapePlayer.shared.stopAll(fadeSeconds: 4.0)
+        MainThreadStall.shared.stop()
+        diagnosticsTimer?.invalidate()
+        diagnosticsTimer = nil
         recordingStartWork?.cancel()
         // B80(C): attach diagnostics before endSession so they're included in the saved file.
         SessionRecorder.shared.attachDiagnostics(buildDiagnostics(endReason: effectiveReason))
@@ -849,10 +921,18 @@ final class Probe: ObservableObject {
         recordingStartWork?.cancel()
         recordingStartWork = nil
         recordingStartedAt = nil
-        // Stop soundscape (already faded at grace entry, but guard in case state changed)
-        SoundscapePlayer.shared.stopAll(fadeSeconds: 0.5)
+        // B83 — was missing in B80; grace-expiry would silently end with NO audio cue.
+        // EndGongPlayer.playFailure tries `bowl_failure.{m4a,wav}` then falls back to
+        // ChimeEngine.playFailureChime (5 short alert pings, all in passband).
+        EndGongPlayer.shared.playFailure()
+        recordEvent(kind: "session-end-failure", detail: "grace-expired")
+        // Lengthen the soundscape fade so it doesn't get cut off mid-gong.
+        SoundscapePlayer.shared.stopAll(fadeSeconds: 4.0)
+        MainThreadStall.shared.stop()
+        diagnosticsTimer?.invalidate()
+        diagnosticsTimer = nil
         Telemetry.recording.error("endSession reason=grace-expired")
-        let recUrl = SessionRecorder.shared.endSession()
+        let recUrl = SessionRecorder.shared.endSession(reason: "grace-expired")
         pipeline.endSession()
         hrv.reset()
         rmssd     = nil
@@ -910,7 +990,44 @@ final class Probe: ObservableObject {
 
     func recordEvent(kind: String, detail: String? = nil) {
         let t = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-        sessionEvents.append(SessionEvent(time: t, kind: kind, detail: detail))
+        let ev = SessionEvent(time: t, kind: kind, detail: detail)
+        sessionEvents.append(ev)
+        // B83 — also write to NDJSON immediately. The B80 in-memory `sessionEvents`
+        // attached only at endSession; if the app crashed mid-session, every event was
+        // lost. NDJSON-streamed events survive crashes (matches B80 NDJSON-sample design).
+        SessionRecorder.shared.appendEvent(ev)
+    }
+
+    /// B83 — capture AVAudioSession state, engine flags, and UI render counters.
+    /// Called at session start, every 30s, and immediately before every gong/chime
+    /// scheduling site (via `audioStateBeforeGong`).
+    func fireDiagnosticsSnapshot(trigger: String) {
+        let session = AVAudioSession.sharedInstance()
+        let route = session.currentRoute
+        let outputs = route.outputs.map { $0.portType.rawValue }
+        let chimeVol: Float = UserDefaults.standard.object(forKey: "chimeVolume") as? Float ?? 0.7
+        let secsSinceRoute: Int? = lastRouteChangeAt == .distantPast
+            ? nil
+            : Int(Date().timeIntervalSince(lastRouteChangeAt))
+        SessionRecorder.shared.appendAudioState(
+            trigger: trigger,
+            outputVolume: session.outputVolume,
+            category: session.category.rawValue,
+            mode: session.mode.rawValue,
+            isOtherAudioPlaying: session.isOtherAudioPlaying,
+            outputs: outputs,
+            chimeEngineRunning: ChimeEngine.shared.isEngineRunning,
+            chimeEnginePlayerPlaying: ChimeEngine.shared.isPlayerPlaying,
+            soundscapeEngineRunning: SoundscapePlayer.shared.isEngineRunning,
+            chimeVolumeSetting: chimeVol,
+            secondsSinceLastRouteChange: secsSinceRoute
+        )
+        SessionRecorder.shared.appendUIState(
+            trigger: trigger,
+            timerHudRendered: timerHudRendered,
+            depthGaugeRendered: depthGaugeRendered,
+            chipViewRendered: chipViewRendered
+        )
     }
 
     // buildDiagnostics: call immediately before endSession. Reads current counter snapshot
@@ -1118,7 +1235,7 @@ private struct MeditationView: View {
         VStack(spacing: 0) {
             // Top bar
             HStack(alignment: .center, spacing: 10) {
-                SignalChipsView(fit: probe.fit, hsi: probe.hsiRaw)
+                SignalChipsView(fit: probe.fit, hsi: probe.hsiRaw, hsiStable: probe.hsiStableTier, probe: probe)
                 Spacer()
                 if probe.heartRate > 0 {
                     Label("\(Int(probe.heartRate.rounded())) bpm", systemImage: "heart.fill")
@@ -1159,13 +1276,30 @@ private struct MeditationView: View {
             // Hero depth gauge
             DepthGaugeView(probe: probe)
 
-            // D1: Session-length countdown — visible once auto-timer is running.
+            // B83: Session-length countdown — large, prominent, always visible during session.
+            // B82 user feedback: "no countdown timer telling me how long I have left."
+            // Was previously caption-sized at opacity 0.45 — easy to miss. Now 28pt rounded
+            // mono digits at opacity 0.85, with elapsed/total split for at-a-glance feedback.
+            // `timerHudRendered` increments each second so SessionRecorder.appendUIState
+            // can prove the binding is firing — eliminates "did the view actually render?"
+            // ambiguity in future debugging.
             if sessionTimer.isRunning {
                 let r = sessionTimer.remainingSec
-                Text(String(format: "%d:%02d remaining", r / 60, r % 60))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.45))
-                    .padding(.top, 4)
+                let total = sessionTimer.selectedDurationMin * 60
+                let elapsed = total - r
+                VStack(spacing: 2) {
+                    Text(String(format: "%d:%02d", r / 60, r % 60))
+                        .font(.system(size: 28, weight: .light, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.88))
+                    Text(String(format: "%d:%02d / %d:%02d  remaining",
+                                elapsed / 60, elapsed % 60, total / 60, total % 60))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+                .padding(.top, 8)
+                .onChange(of: r) { _ in
+                    DispatchQueue.main.async { probe.timerHudRendered += 1 }
+                }
             }
 
             Spacer(minLength: 8)
@@ -1472,25 +1606,41 @@ private struct MarksRowView: View {
 private struct SignalChipsView: View {
     let fit: FitCheckSnapshot
     let hsi: [Double]
+    /// B83 — UI-stable HSI tier per channel (4-of-5 sliding majority on rounded value).
+    /// Replaces direct `hsi` reads to suppress single-sample yellow/green flicker.
+    /// Indexing: [0]=TP9, [1]=AF7, [2]=AF8, [3]=TP10. Empty = no HSI yet.
+    let hsiStable: [Int]
+    /// B83 — render counter sink. Increments on body invocation so SessionRecorder.appendUIState
+    /// can prove the chip view is rendering.
+    @ObservedObject var probe: Probe
 
     private func hsiLabel(_ i: Int) -> (String, Color) {
+        // B83 — prefer stable tier when available; fall back to raw only if buffer empty.
+        if hsiStable.count > i {
+            switch hsiStable[i] {
+            case 1:  return ("●", .green)
+            case 2:  return ("●", .orange)
+            default: return ("●", .red)
+            }
+        }
         guard hsi.count > i else { return ("●", .gray) }
-        // HSI SDK values: 1=good, 2=mediocre, 4=no contact.
-        // Threshold aligns with FitCheckSnapshot.allGood (< 2.0) so green dot = genuinely good.
-        // Removes yellow: HSI=2 (headband partially off or nearby) now shows orange, not yellow.
         switch hsi[i] {
-        case ..<2.0: return ("●", .green)   // good contact
-        case ..<3.5: return ("●", .orange)  // mediocre — not ideally seated or off skin
-        default:     return ("●", .red)     // no contact (HSI=4)
+        case ..<2.0: return ("●", .green)
+        case ..<3.5: return ("●", .orange)
+        default:     return ("●", .red)
         }
     }
 
     var body: some View {
+        // B83 — increment render counter via task modifier (post-body, no state-during-update warning).
         HStack(spacing: 5) {
             ForEach(0..<4, id: \.self) { i in
                 let (sym, col) = hsiLabel(i)
                 Text(sym).font(.system(size: 10)).foregroundStyle(col)
             }
+        }
+        .task(id: hsiStable) {
+            probe.chipViewRendered += 1
         }
     }
 }

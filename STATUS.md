@@ -1,123 +1,155 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-08 (B77.2 coded — awaiting push approval)
+**Last updated:** 2026-05-09 (B83 — instrumentation + audibility + HUD + filter library; awaiting CI + user "go" for push)
 
 ## Build State
 
-| Build | Feature | TestFlight | Notes |
-|-------|---------|-----------|-------|
-| 40–54 | Foundation → signal quality → audio | ✅ Historical | See journal |
-| 55–64 | Feature dev (never device-tested) | ⚠️ Intermediate | Superseded by 65 |
-| 65 | Full feature set | ✅ Uploaded | BROKEN — calibration stuck |
-| 66 | Calibration root-cause fixes | ✅ Uploaded | First working build |
-| 67–73 | Incremental features | ✅ Uploaded | See journal |
-| **74** | Soundscape overhaul + HRV + Ad Hoc CI | ✅ TestFlight | Last stable before depth fixes |
-| 75 | Depth scoring overhaul (calibration discard, MAD baseline) | ✅ TestFlight | Saturation persisted — sigmoid display crushed all dynamic range |
-| 76 | Stored calibration metadata for analysis | ✅ TestFlight | Same display saturation as B75; data analysis confirmed root cause |
-| 77 | ECDF display + aperiodic correction + SDK Elements + tap-to-mark + going-deeper chime | ✅ TestFlight | B77 + B77.1 shipped |
-| **77.2** | isConnecting 15s watchdog, frontalGood per-sample, aperiodic cache gated on contact | 🟡 **Coded — awaiting push** | B77.2 improvements from audit |
+| Build | Theme | TestFlight | Status |
+|-------|-------|-----------|--------|
+| 40–73 | Foundation → calibration → soundscape → HRV → ECDF | ✅ Historical | See journal |
+| 74 | Soundscape overhaul + HRV + Ad Hoc CI | ✅ TestFlight | Last stable pre-depth-fix |
+| 75–77.2 | Depth scoring overhaul + ECDF + tap-to-mark | ✅ TestFlight | See journal |
+| 80 (build #81) | Silent-disconnect resilience: NDJSON streaming + alerts + watchdog + timer + gong + bg modes | ✅ TestFlight | **Was running on phone during B82 session** |
+| **82 (build counter)** | Same B80 binary; TestFlight build counter incremented during user trials | ✅ Live | User reported 3 issues from 22-min eyes-open/closed session — see B82 analysis |
+| **83** | **Instrumentation overhaul + audibility fix + HUD + filter library** | ⏳ **Local — awaiting CI + push approval** | All edits in working tree; not yet committed |
 
 ---
 
-## What Build 75 Changed (over Build 74)
+## What B82 Data Showed (analysis: `analysis/B82_session_analysis.md`)
 
-### Depth Scoring — Root Cause Fix
+`G:\My Drive\session_2026-05-09_0846.ndjson` — 1,824 lines, `buildTag: "B80"`. Key findings:
 
-**Problem confirmed by data analysis of 5 real sessions:**
-- 86.5% of meditation-phase z-scores positive → score never below 0.5
-- 38% of samples saturating at sigmoid(3) = 0.9526 → gauge stuck at 80–90
-- Root cause: 60s calibration window captured headband-adjustment transient (elevated beta, suppressed alpha/theta). Meditation state always above calibration baseline → z always positive.
-- Secondary finding: session JSON files do NOT contain calibration-phase data (recording starts 300s post-calibration). All prior analysis of "calibration baseline" was actually early meditation phase.
-
-**Fixes in `DepthScore.swift`:**
-1. **Discard first 30s of calibration** — `progress >= 0.5` time-based gate. Only settled last 30s used for baseline. `calibrationAllSamples` kept as fallback for sub-1Hz delivery.
-2. **MAD-based robust baseline** — Median + MAD×1.4826. Resistant to artifact outliers.
-3. **Upper z-clip removed** — was `clamp(z, -3, 3)`, now `max(-3.0, z)`. The +3 clip was saturating 38% of samples at sigmoid(3)=0.9526 with no resolution.
-
-### Contact Gate Fix (`DepthGate.swift`)
-- Before: bad contact → immediate 0.92 decay → gauge snapped on every TP9/TP10 flicker.
-- After: 30s hold (60 windows), then α=0.97 slow decay. Bad contact = unknown, not declining.
-- `contactLossWindows` counter reset on `reset()` and on contact restored.
-
-### Display & UX (`App.swift`)
-- `displayScore = max(0, (score - 0.5) * 2.0)` — remaps [0.5, 1.0] → [0, 100%].
-- `gdt = (enterThreshold - 0.5) * 2` — gate display threshold. All labels/colors are fractions of gdt; adapts when enterThreshold personalises.
-- `stateText`, `gaugeColor`, `trainingHint` all gate-aware (thresholds at 0.15×, 0.50×, 0.75×, 0.80× gdt).
-- Calibration countdown uses `DepthScore.calibrationDuration` (not hardcoded 60).
-- **ConnectView gear button** — Settings/Sessions accessible without headband connected.
-
-### Session Metadata (`SessionRecorder.swift`)
-- `SessionRecord` stores `calibrationIndexMean?` and `calibrationIndexStd?` — enables offline calibration analysis. Nil in pre-Build 75 sessions (backward compatible).
-- `startSession(calibrationIndexMean:calibrationIndexStd:)` — values captured at calibration-complete time, stored before the 300s delay fires.
-
-### Settings Diagnostics (`App.swift`)
-- "Cal. Baseline Mean" + "Cal. Baseline Std" rows in Depth section (post-calibration).
-- "Display %" row shows `(smoothedScore - 0.5) * 200` as percentage.
-- Adaptive Deep Threshold shown as display-scale % ("30% display depth") not raw sigmoid.
-
-### Info.plist
-- `UIFileSharingEnabled = YES` — enables iTunes bulk export of MuseSessions/ folder.
+| Issue user reported | Root cause from data |
+|---|---|
+| No gong at end of 22-min session | `endReason: "manual"` confirmed gong code path was reached. Gong fundamental was 84 Hz — below iPhone built-in speaker rolloff (~200-250 Hz). Not "physically impossible" as I overclaimed earlier; *probably* sub-resonant on device speaker. B83 logs definitive audioState + gongLifecycle to confirm vs hypothesize. |
+| TP9/TP10 yellow/green flicker | 210 fit events / 22 min (9.3/min). `frontalGood=true` 100%; only TP9/TP10 unstable. UI rendered every 1Hz HSI sample directly. |
+| No countdown timer visible | HUD existed but was `.caption` opacity 0.45 (dim), tucked under hero gauge. Plus `allowedDurations = [60,75,90]` had no 20-min preset matching the user's intended length. |
+| (Hidden) B80 instrumentation broken | All `contactState*`, `packetGapMs`, `appState` fields `undefined` in NDJSON. `eventStream` empty (only one `recordEvent` call site existed). `episodeCount=0` despite 22 min. |
 
 ---
 
-## Build 75 Validation Checklist
+## What B83 Changes (over B80)
 
-Run one full session after TestFlight install:
+### B83-A — Instrumentation suite (NEW)
 
-- [ ] Gauge starts at 0% after calibration — does NOT jump to 80+ immediately
-- [ ] Score dips below 50% during unsettled periods
-- [ ] Settings → Depth: "Cal. Baseline Mean" and "Cal. Baseline Std" visible
-  - Std 0.10–0.35 = normal; < 0.10 = suspiciously stable; > 0.40 = recalibrate
-- [ ] Calibration countdown reads "60s" to "0s" correctly
-- [ ] Contact flicker: gauge holds ~30s before slow decay (no snap to 50%)
-- [ ] Gear icon visible on connect screen (no headband needed)
+Five new NDJSON `_type` records, each with a typed `SessionRecorder.append*` API:
+
+| `_type` | When | Fields |
+|---|---|---|
+| `audioState` | Session start, every 30s, every chime/gong call, route change | outputVolume, category, mode, isOtherAudioPlaying, outputs, chimeEngineRunning, chimeEnginePlayerPlaying, soundscapeEngineRunning, chimeVolumeSetting, secondsSinceLastRouteChange |
+| `gongLifecycle` | Every gong/bowl call | phase ∈ {scheduled, started, completed, failed}, source (file/synth) |
+| `mainStall` | Main-thread tick > 1.5 s | deltaSec, thermalState, appState, topStack (5 frames mangled) |
+| `uiState` | 30s periodic | timerHudRendered, depthGaugeRendered, chipViewRendered (proves bindings fired) |
+| `event` | Every recordEvent site | time, kind, detail (replaces empty B80 in-memory eventStream) |
+
+`recordEvent` now writes to NDJSON immediately via `SessionRecorder.appendEvent` — **single source of truth**. Crash mid-session no longer loses every event.
+
+### B83-B — Audibility fix
+
+- `EndGongPlayer.swift` (NEW) — file-based AVAudioPlayer wrapping `bowl_success`/`bowl_failure` from `MusePlus/Resources/Sounds/`. Falls back to `ChimeEngine.playGong()` / `playFailureChime()` if files absent. Independent of AVAudioEngine state — immune to route-change-killed engine.
+- `ChimeEngine.playGong/playSuccessChime/playTimerEnd` fundamental: **84 Hz → 432 Hz**. iPhone built-in speaker has known rolloff below ~200 Hz; 432 Hz with inharmonic gong partials puts most energy in 432-2645 Hz band (passband).
+- `ChimeEngine.init` — Apple-recommended `engine.prepare()` before `engine.start()` (pre-allocates buffers, stabilizes engine across route changes).
+- `endSessionGracefully(reason:)` calls `EndGongPlayer.shared.playSuccess()` instead of `playGong()`.
+- `performFinalDisconnect(...)` now calls `EndGongPlayer.shared.playFailure()` AND extends soundscape fade to 4 s (was abrupt 0.5 s with no chime).
+
+### B83-C — Timer HUD redesign + 11 presets
+
+- `SessionTimer.allowedDurations`: `[60, 75, 90]` → `[5, 10, 15, 20, 25, 30, 45, 60, 75, 90, 120]` minutes.
+- HUD redesigned: 28 pt rounded mono digits, opacity 0.85, format `MM:SS` + `elapsed/total remaining` line.
+- `Probe.timerHudRendered: Int` (`@Published`) increments on each second's body invocation via `.onChange(of:)`. `appendUIState` drains it every 30 s — proves the binding rendered.
+
+### B83-D — HSI display hysteresis (UI flicker fix)
+
+- `Probe.lastValidHsi: [Double]` (NEW) — retainer for last non-empty HSI vector. Used by `addSample` to populate per-sample `contactState*` fields. **B82 had every contactState undefined because `hsiRaw` was `[]` when first sample built; lastValidHsi survives.**
+- `Probe.hsiStableTier: [Int]` (`@Published`, NEW) — 4-of-5 sliding majority on rounded HSI tier (1=good, 2=mediocre, 4=bad). Suppresses single-sample chip flicker. Latency ≤5 s.
+- `SignalChipsView` reads `hsiStable` first; falls back to `hsi` only if buffer empty.
+
+### B83-E — EEG denoising library (NOT yet wired into live pipeline)
+
+- `MusePlus/Pipeline/EEGDenoiser.swift` (NEW, 493 LOC) — db4 SWT 5-level + universal-threshold soft-thresholding via Accelerate vDSP. Citations: Donoho & Johnstone 1994 (universal threshold); Krishnaveni et al. 2006 (EEG SWT denoising); Daubechies 1992 (db4 coefficients); Mallat 1999 (Stationary WT).
+- **Library only — not yet invoked in `handleEEG`.** Adding a 1-second-window buffer manager + dispatcher is non-trivial scope. Validation harness (`analysis/tapmark_validation.js`) exists; needs raw-EEG-bearing NDJSON sessions (B83+ samples) AND user tap-to-mark labels (deep + shallow) before filter can be evaluated against ground truth. This is intentional — adding an unvalidated filter to the live path could mask real signal.
+- B84 will wire in once B83 sessions provide raw EEG samples + tap-to-mark labels.
+
+### B83-F — Main-thread freeze quantifier
+
+- `MusePlus/Diagnostics/MainThreadStall.swift` (NEW) — 1 Hz Timer on `RunLoop.main` `.common`; if `delta > 1.5 s`, fires `appendMainStall` with deltaSec, thermalState, appState, top-5 mangled stack frames. Started at session start, stopped at session end. Quantifies the "freezing" sensation user reports.
+
+### B83-G — MuseClient packet gap tracking
+
+- `MuseClient.lastPacketGapMs: Float` (NEW, atomic static). Updated on every SDK callback. Read by Probe.addSample → per-sample `packetGapMs` populated for first time.
 
 ---
 
-## Pending
+## What's NOT in B83 (deferred, honest scope)
 
-| Item | Priority | Notes |
-|------|----------|-------|
-| Display remap tuning | Medium | After B75 session data: check if p50 displayScore ≈ 30–50%. May need denominator adjustment in `(score - 0.5) / X`. |
-| Phase A2: Athena model detection | High | Task #13 in progress. Preset branch logic. |
-| baselineStd floor 0.10 validation | Medium | Provisional. Check calibrationIndexStd in Settings after a few B75 sessions. |
-| fNIRS OpticsPipeline (Gate 13) | Low | HbO/HbR from Athena Optics1-6. SessionSample placeholders exist. |
-
----
-
-## Architecture Invariants (never break without understanding)
-
-- `handleIsGood` rate-limited to 5s — prevents calibration-stuck bug
-- Contact chimes gated behind `depth.isCalibrated`
-- Beta cue: additive threshold `bm + 1.5 * bs` (NOT multiplicative — wrong in log domain)
-- Binaural fade: baked into `fillBinaural` amplitude, NOT node volume
-- Athena preset: `preset1041` for MS-03, `preset21` for legacy
-- AVAudioEngine stereo format explicit on all `engine.connect()` calls
-- `asyncAfter(0.5s)` in `AVAudioEngineConfigurationChange` handler
-- `calibrationAllSamples` fallback in `finalizeBaseline()` — do not remove
+| Item | Why deferred |
+|---|---|
+| EEGDenoiser wired into `handleEEG` | Buffer + dispatcher is new architecture; needs raw-EEG NDJSON sessions + tap labels for validation first. Library compiled and ready. |
+| Riemannian Potato + rASR additional stages | Will only add after SWT-only proves it helps via tap-mark correlation. Avoids cargo-culting "more layers = better." |
+| Pre-recorded bowl `.m4a` files | User drops in from Pixabay tibetan-bowl pack. README in `MusePlus/Resources/Sounds/`. |
+| Pre-session fit guide (B81 carryover) | Not in user's reported issues; defer to next sprint. |
+| Athena auto-preset detection (B81 carryover) | Same. |
+| XCTest scaffolding | Same. |
+| fNIRS OpticsPipeline | Aspirational. |
 
 ---
 
-## Key Files
+## B83 Validation Checklist (run on device after install)
 
-| File | Purpose |
-|------|---------|
-| `MusePlus/App.swift` | Root view, Probe, all UI, DepthGaugeView, SettingsSheet |
-| `MusePlus/Muse/MuseClient.swift` | BLE + SDK wrapper |
-| `MusePlus/Pipeline/DepthScore.swift` | Calibration (discard first 30s), MAD baseline, z-score |
-| `MusePlus/Audio/DepthGate.swift` | State machine, hold-then-decay contact logic |
-| `MusePlus/Pipeline/HRVPipeline.swift` | RMSSD + LF/HF (Athena Optics7/8) |
-| `MusePlus/Audio/SoundscapePlayer.swift` | DSP rain/ocean/wind + binaural fade |
-| `MusePlus/SessionRecorder.swift` | JSON recording + calibration metadata |
-| `STATUS.md` | This file — read first every session |
+1. **Audibility** (built-in speaker, no earbuds): manual stop at 5 min — bowl/gong heard at >50% device volume
+2. **gongLifecycle** present in NDJSON: `scheduled` → `started` → `completed` (or `failed`)
+3. **audioState** records present every 30s + at gong sites — answers "was speaker actually outputting?" deterministically
+4. **Timer HUD** large + visible: 20-min preset from Settings → `MM:SS` digits at 28pt opacity 0.85
+5. **`uiState.timerHudRendered`** > 0 in NDJSON — proves binding rendered
+6. **HSI hysteresis**: wiggle TP9/TP10 contact → chip stays green ≥4 s before flipping orange
+7. **Per-sample `contactStateTP9` etc populated** in NDJSON (no longer `undefined`)
+8. **`packetGapMs`** populated per sample (not nil)
+9. **`event` records** match runtime: 210 fits → 210+ event lines (vs B82 zero)
+10. **`mainStall`** records: 0 in a healthy session; non-zero proves the "freezing" claim quantitatively
+11. **No B80 regressions**: NDJSON crash recovery still works; soundscape still adapts to depth; calibration still completes in 60s
+
+---
+
+## Files Changed in B83
+
+**New files:**
+- `MusePlus/Audio/EndGongPlayer.swift` (202 LOC)
+- `MusePlus/Diagnostics/MainThreadStall.swift` (138 LOC, post-edit)
+- `MusePlus/Pipeline/EEGDenoiser.swift` (493 LOC)
+- `MusePlus/Resources/Sounds/README.md` (bowl drop-in instructions)
+- `analysis/tapmark_validation.js` (offline filter validator)
+- `analysis/B82_session_analysis.md` (data-driven diagnosis)
+
+**Modified files:**
+- `MusePlus/App.swift` — Probe new fields (lastValidHsi, hsiStableTier, hsiBuffer, render counters, lastRouteChangeAt, diagnosticsTimer); HSI sink hysteresis logic; addSample reads lastValidHsi + MuseClient.lastPacketGapMs; recordEvent writes NDJSON; endSessionGracefully uses EndGongPlayer; performFinalDisconnect plays failure bowl + 4s fade; route-change observer stamps + snapshots; session-start fires diagnosticsTimer + MainThreadStall; timer HUD redesign; SignalChipsView uses stable tier
+- `MusePlus/Audio/ChimeEngine.swift` — engine.prepare(); 84 Hz → 432 Hz in playGong/playSuccessChime/playTimerEnd; isEngineRunning/isPlayerPlaying public accessors; Telemetry.audio notice on synthesis
+- `MusePlus/Audio/SoundscapePlayer.swift` — isEngineRunning public accessor
+- `MusePlus/SessionRecorder.swift` — 5 new NDJSON struct types; appendEvent + appendAudioState + appendGongLifecycle + appendMainStall + appendUIState + currentSessionElapsed; NDJSONSample fields populated; addFitEvent now also emits event line; buildTag B80 → B83
+- `MusePlus/Muse/MuseClient.swift` — lastPacketGapMs static; computed in handleEEG
+- `MusePlus/Session/SessionTimer.swift` — allowedDurations expanded
 
 ---
 
 ## How to Resume
 
-```
 1. Read STATUS.md (this file)
-2. gh run list --limit 5        ← verify CI clean
-3. If B75 not validated: run session, check validation checklist above
-4. Next feature: Phase A2 Athena model detection (task #13)
-```
+2. Verify CI: `gh run list --limit 5` (do not push until user "go")
+3. If pre-push: open Xcode, build clean (no Mac available locally — CI is the compile gate)
+4. Drop bowl_success.m4a + bowl_failure.m4a into `MusePlus/Resources/Sounds/` (optional — synthesis fallback works)
+5. Wait for explicit user "go" per `MusePlus/CLAUDE.md` HARD RULE
+6. After push + TestFlight install: run B83 Validation Checklist above
+
+---
+
+## Architecture Invariants (do NOT break)
+
+All B80 invariants persist. New B83 invariants:
+
+- `recordEvent` is the single canonical event-append site — DO NOT add a parallel in-memory list
+- `MuseClient.lastPacketGapMs` is atomic static; written on SDK callback thread, read on any thread
+- `Probe.lastValidHsi` retains across reconnects (vs `lastHsiRaw` which resets) — keep separate
+- `EndGongPlayer` configures AVAudioSession defensively before every play — DO NOT remove
+- `ChimeEngine.engine.prepare()` MUST precede `engine.start()` (Apple recommendation)
+- Bowl synthesis fundamental is 432 Hz, NOT 84 Hz — DO NOT revert
+- `MainThreadStall.shared.start()` at session start; `.stop()` at session end (idempotent)
+- `diagnosticsTimer` runs on `.common` mode RunLoop — must invalidate at session end (memory leak otherwise)

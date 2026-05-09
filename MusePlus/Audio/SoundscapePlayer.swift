@@ -111,6 +111,8 @@ final class SoundscapePlayer: ObservableObject {
     var customBinauralHz: Double? = nil
 
     private let engine = AVAudioEngine()
+    // B83 — public read-only flag for SessionRecorder.appendAudioState diagnostics.
+    var isEngineRunning: Bool { engine.isRunning }
     private var nodes:   [SoundLayer: AVAudioPlayerNode] = [:]
     private var buffers: [SoundLayer: AVAudioPCMBuffer]  = [:]
     private var eqs:     [SoundLayer: AVAudioUnitEQ]     = [:]

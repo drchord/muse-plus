@@ -54,6 +54,10 @@ final class MuseClient: NSObject {
     // lastEegPacketTime: updated on every .notchFilteredEeg / .eeg packet. Used post-disconnect
     // to determine whether EEG stalled while the BLE connection appeared up.
     static var lastEegPacketTime: Date = .distantPast
+    // B83 — most recent inter-packet gap in milliseconds. Atomic; written on SDK thread,
+    // read by Probe.addSample to populate per-sample `packetGapMs`. Replaces the B80 gap
+    // field that was nil for every sample (never wired into Probe).
+    static var lastPacketGapMs: Float = 0
     // Ring buffer of recent EEG packet timestamps for rolling 30-s count.
     // Access must be serialised — use the eegStatsLock.
     private var eegPacketTimestamps: [Date] = []
@@ -299,6 +303,12 @@ extension MuseClient: IXNMuseDataListener {
         let pkt = EEGPacket(timestamp: Date().timeIntervalSinceReferenceDate, channels: channels)
         // Update rolling telemetry — no per-packet log (too noisy at 256 Hz).
         let now = Date()
+        // B83 — compute inter-packet gap before updating the timestamp.
+        // Skip the very first packet (lastEegPacketTime == .distantPast).
+        if MuseClient.lastEegPacketTime != .distantPast {
+            let dtMs = now.timeIntervalSince(MuseClient.lastEegPacketTime) * 1000.0
+            MuseClient.lastPacketGapMs = Float(dtMs)
+        }
         MuseClient.lastEegPacketTime = now
         eegStatsLock.lock()
         eegPacketTimestamps.append(now)

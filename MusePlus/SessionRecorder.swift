@@ -198,6 +198,64 @@ private struct NDJSONSample: Codable {
     let betaScoreSDK: Float?
     let phase: String?
     let frontalGood: Bool?
+    // B83 — per-channel HSI from MuseClient retainer; preserves contact state at sample time.
+    let contactStateAF7:  Int?
+    let contactStateAF8:  Int?
+    let contactStateTP9:  Int?
+    let contactStateTP10: Int?
+    let packetGapMs:      Float?
+    let appState:         String?
+}
+
+// MARK: - B83 NDJSON event types — every claim about audio/contact/timer must trace to a logged metric.
+
+private struct NDJSONEvent: Codable {
+    var _type = "event"
+    let time: Double
+    let kind: String       // see SessionEvent.kind
+    let detail: String?
+}
+
+private struct NDJSONAudioState: Codable {
+    var _type = "audioState"
+    let time: Double
+    let trigger: String                // "playGong" | "playEnterDeep" | "periodic" | "endSession" | etc.
+    let outputVolume: Float            // AVAudioSession.outputVolume [0,1]
+    let category: String               // "playback" | "playAndRecord" | ...
+    let mode: String                   // "default" | "spokenAudio" | ...
+    let isOtherAudioPlaying: Bool
+    let outputs: [String]              // ["builtInSpeaker"] | ["bluetoothA2DP"] | ...
+    let chimeEngineRunning: Bool
+    let chimeEnginePlayerPlaying: Bool
+    let soundscapeEngineRunning: Bool
+    let chimeVolumeSetting: Float
+    let secondsSinceLastRouteChange: Int?
+}
+
+private struct NDJSONGongLifecycle: Codable {
+    var _type = "gongLifecycle"
+    let time: Double
+    let phase: String                  // "scheduled" | "started" | "completed" | "failed"
+    let source: String                 // "file:bowl_success.m4a" | "synth:432Hz" | "synth:fallback"
+    let detail: String?
+}
+
+private struct NDJSONMainStall: Codable {
+    var _type = "mainStall"
+    let time: Double
+    let deltaSec: Double               // measured stall duration
+    let thermalState: String           // "nominal" | "fair" | "serious" | "critical"
+    let appState: String               // "active" | "background" | "inactive"
+    let topStack: String               // top 5 frames, " | "-joined, mangled
+}
+
+private struct NDJSONUIState: Codable {
+    var _type = "uiState"
+    let time: Double
+    let trigger: String                // "periodic" | "render" | "touch"
+    let timerHudRendered: Int          // monotonic counter from Probe
+    let depthGaugeRendered: Int
+    let chipViewRendered: Int
 }
 
 // MARK: - Recorder
@@ -262,7 +320,7 @@ final class SessionRecorder: ObservableObject {
                 calibrationIndexMean: calibrationIndexMean,
                 calibrationIndexStd:  calibrationIndexStd,
                 marks: [],
-                buildTag: "B80"
+                buildTag: "B83"
             )
             lastDeepState = false
             sampleCount   = 0
@@ -429,7 +487,14 @@ final class SessionRecorder: ObservableObject {
                 depthZ: depthZ, ecdfDisplay: ecdfDisplay,
                 alphaRel: alphaRel, thetaRel: thetaRel, betaRel: betaRel,
                 alphaScoreSDK: alphaScoreSDK, thetaScoreSDK: thetaScoreSDK,
-                betaScoreSDK: betaScoreSDK, phase: phase, frontalGood: frontalGood
+                betaScoreSDK: betaScoreSDK, phase: phase, frontalGood: frontalGood,
+                // B83 — per-channel HSI + packet gap + app state, populated from Probe.
+                contactStateAF7:  contactStateAF7,
+                contactStateAF8:  contactStateAF8,
+                contactStateTP9:  contactStateTP9,
+                contactStateTP10: contactStateTP10,
+                packetGapMs:      packetGapMs,
+                appState:         appState
             )
             appendLine(ndSample)
 
@@ -468,7 +533,122 @@ final class SessionRecorder: ObservableObject {
 
             let nd = NDJSONFit(_type: "fit", time: t)
             appendLine(nd)
+            // B83 — also append to event stream so all instrumentation flows through one channel.
+            self.appendEventLocked(SessionEvent(time: t, kind: "fit", detail: nil))
         }
+    }
+
+    // MARK: - B83 instrumentation API
+    //
+    // Every audio/contact/timer/freeze claim must trace to a logged metric in NDJSON.
+    // No more "I think the gong played" — gongLifecycle says it did or didn't.
+    // No more "the app froze" — mainStall says how long.
+    // No more "TP9 flickered" — per-sample contactStateTP9 + fit events disambiguate.
+
+    /// Returns elapsed seconds since session start. Returns 0.0 when no session is recording.
+    /// Safe to call from any thread.
+    func currentSessionElapsed() -> Double {
+        return queue.sync {
+            guard let rec = current else { return 0.0 }
+            return Date().timeIntervalSince(rec.startDate)
+        }
+    }
+
+    /// Append a typed event to NDJSON immediately. Single canonical entry point —
+    /// replaces the broken in-memory `sessionEvents` array that B80 wired but never
+    /// populated. Call sites: BLE state, route change, audio interrupt, fit, app
+    /// lifecycle, gong lifecycle, timer expired, depth gate transitions.
+    func appendEvent(_ event: SessionEvent) {
+        queue.async {
+            self.appendEventLocked(event)
+        }
+    }
+
+    private func appendEventLocked(_ event: SessionEvent) {
+        guard isRecording else { return }
+        let nd = NDJSONEvent(_type: "event", time: event.time, kind: event.kind, detail: event.detail)
+        appendLine(nd)
+    }
+
+    /// Snapshot AVAudioSession + engine state. Called from EndGongPlayer + ChimeEngine
+    /// scheduling sites + a 30s periodic timer in App. If we ever need to ask
+    /// "was the gong actually heard?" again, this is the receipt.
+    func appendAudioState(trigger: String,
+                          outputVolume: Float,
+                          category: String,
+                          mode: String,
+                          isOtherAudioPlaying: Bool,
+                          outputs: [String],
+                          chimeEngineRunning: Bool,
+                          chimeEnginePlayerPlaying: Bool,
+                          soundscapeEngineRunning: Bool,
+                          chimeVolumeSetting: Float,
+                          secondsSinceLastRouteChange: Int?) {
+        queue.async {
+            guard self.isRecording else { return }
+            let t = self.currentSessionElapsedLocked()
+            let nd = NDJSONAudioState(
+                _type: "audioState", time: t, trigger: trigger,
+                outputVolume: outputVolume, category: category, mode: mode,
+                isOtherAudioPlaying: isOtherAudioPlaying, outputs: outputs,
+                chimeEngineRunning: chimeEngineRunning,
+                chimeEnginePlayerPlaying: chimeEnginePlayerPlaying,
+                soundscapeEngineRunning: soundscapeEngineRunning,
+                chimeVolumeSetting: chimeVolumeSetting,
+                secondsSinceLastRouteChange: secondsSinceLastRouteChange
+            )
+            self.appendLine(nd)
+        }
+    }
+
+    /// Gong delivery confirmation — every scheduled→started→completed transition.
+    /// If `scheduled` lands but `completed` never does, the audio path is broken
+    /// independent of speaker physics.
+    func appendGongLifecycle(phase: String, source: String, detail: String? = nil) {
+        queue.async {
+            guard self.isRecording else { return }
+            let t = self.currentSessionElapsedLocked()
+            let nd = NDJSONGongLifecycle(_type: "gongLifecycle", time: t,
+                                          phase: phase, source: source, detail: detail)
+            self.appendLine(nd)
+        }
+    }
+
+    /// Main-thread stall — fired by MainThreadStall.shared when its 1Hz heartbeat
+    /// detects > 1.5s gap. Quantifies the "freezing" sensation users report.
+    func appendMainStall(deltaSec: Double, thermalState: String, appState: String, topStack: String) {
+        queue.async {
+            guard self.isRecording else { return }
+            let t = self.currentSessionElapsedLocked()
+            let nd = NDJSONMainStall(_type: "mainStall", time: t,
+                                      deltaSec: deltaSec, thermalState: thermalState,
+                                      appState: appState, topStack: topStack)
+            self.appendLine(nd)
+        }
+    }
+
+    /// UI render counters — proves whether SwiftUI views actually invoked `body`.
+    /// If user says "I didn't see the timer" and `timerHudRendered > 0`, that's a
+    /// contrast/position problem (UI is showing). If `== 0`, it's a binding bug.
+    func appendUIState(trigger: String,
+                       timerHudRendered: Int,
+                       depthGaugeRendered: Int,
+                       chipViewRendered: Int) {
+        queue.async {
+            guard self.isRecording else { return }
+            let t = self.currentSessionElapsedLocked()
+            let nd = NDJSONUIState(_type: "uiState", time: t, trigger: trigger,
+                                    timerHudRendered: timerHudRendered,
+                                    depthGaugeRendered: depthGaugeRendered,
+                                    chipViewRendered: chipViewRendered)
+            self.appendLine(nd)
+        }
+    }
+
+    /// Internal: queue-local elapsed time. Caller must already be on `queue`.
+    private func currentSessionElapsedLocked() -> Double {
+        guard let rec = current else { return 0.0 }
+        return Date().timeIntervalSince(rec.startDate)
     }
 
     // MARK: - Storage
@@ -527,7 +707,7 @@ final class SessionRecorder: ObservableObject {
             startDate: iso8601.string(from: now),
             calibrationIndexMean: calibrationIndexMean,
             calibrationIndexStd:  calibrationIndexStd,
-            buildTag: "B80"
+            buildTag: "B83"
         )
         appendLine(header)
         Telemetry.recording.notice("NDJSON opened: \(url.lastPathComponent, privacy: .public)")
