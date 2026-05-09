@@ -61,6 +61,7 @@ final class DepthGate {
     private var lastEnterChime     = Date.distantPast
     private var lastExitChime      = Date.distantPast
     private var contactLossWindows = 0
+    private var thresholdConfigured = false
 
     // Anchor state — re-fires on entering top-10% of personal ECDF (vs B76 single-fire-per-episode).
     private var deepStateEnteredAt:    Date = .distantPast
@@ -77,7 +78,7 @@ final class DepthGate {
     private let chime = ChimeEngine.shared
     private let zDist = PersonalZDistribution.shared
 
-    var contactsGood: Bool = true
+    var frontalContactGood: Bool = true
 
     func setEcdfThresholds(enter: Float, exit: Float) {
         enterThresholdEcdf = max(0.50, min(0.85, enter))
@@ -93,7 +94,20 @@ final class DepthGate {
             return
         }
 
-        guard contactsGood else {
+        // Adaptive threshold: scale to personal history depth on first calibrated window.
+        // Prevents gate from being unreachable for users with <5 sessions.
+        if !thresholdConfigured {
+            let n = zDist.sessionCount
+            let (enter, exit): (Float, Float) =
+                n == 0 ? (0.55, 0.40) :
+                n <  5 ? (0.60, 0.45) :
+                n < 20 ? (0.65, 0.48) :
+                         (0.70, 0.50)
+            setEcdfThresholds(enter: enter, exit: exit)
+            thresholdConfigured = true
+        }
+
+        guard frontalContactGood else {
             contactLossWindows += 1
             // Bad contact = unknown state. Hold 30s (60 windows × 0.5s), then slow decay.
             if contactLossWindows > 60 {
@@ -189,10 +203,11 @@ final class DepthGate {
         lastAnchorDate     = .distantPast
         lastAnchorAboveTop = false
         contactLossWindows = 0
+        thresholdConfigured = false
         deepeningRing      = [Float](repeating: 0, count: kDeepeningWindow)
         deepeningRingHead  = 0
         deepeningRingFilled = 0
         lastDeepeningCue   = .distantPast
-        // Thresholds persist across sessions.
+        // Thresholds reconfigured adaptively on next calibrated update.
     }
 }

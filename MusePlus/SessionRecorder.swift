@@ -120,6 +120,10 @@ struct SessionRecord: Codable, Identifiable {
     // B80 structured diagnostic stream — Probe-populated.
     var diagnostics: SessionDiagnostics? = nil
     var eventStream: [SessionEvent]?    = nil
+    // B88 — summary scalars for analysis scripts. Populated at endSession; nil in pre-B88.
+    var durationSec:       Double? = nil    // total session length in seconds
+    var summarySampleCount: Int?   = nil    // sample count at close
+    var deepFraction:      Double? = nil    // fraction [0, 1] of session time spent in deep state
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -416,6 +420,12 @@ final class SessionRecorder: ObservableObject {
             } else {
                 Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) (too few to compute gaps)")
             }
+
+            // Populate B88 summary scalars before serialisation.
+            let durSec = (rec.endDate ?? Date()).timeIntervalSince(rec.startDate)
+            rec.durationSec        = durSec
+            rec.summarySampleCount = rec.samples.count
+            rec.deepFraction       = durSec > 0 ? rec.deepMinutes * 60.0 / durSec : 0
 
             current       = nil
             lastDeepState = false

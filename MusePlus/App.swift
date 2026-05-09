@@ -319,7 +319,7 @@ final class Probe: ObservableObject {
                 // B77.1: gauge/gate gate on FRONTAL contacts (AF7+AF8) only.
                 // TP9/TP10 (ear) flicker on Athena even with good fit; using allGood
                 // pinned the gauge in contact-loss decay mode for the entire session.
-                self.gate.contactsGood = snap.frontalGood
+                self.gate.frontalContactGood = snap.frontalGood
                 // B77.2: propagate frontal contact quality to EEGPipeline so the
                 // aperiodic fit cache isn't updated from bad-contact windows.
                 self.pipeline.frontalContactGood = snap.frontalGood
@@ -1428,7 +1428,7 @@ private struct MeditationView: View {
             HStack(spacing: 0) {
                 BottomButton(
                     icon: "timer",
-                    label: sessionTimer.isRunning ? sessionTimer.formattedRemaining : "\(sessionTimer.selectedDurationMin)m",
+                    label: sessionTimer.isRunning ? sessionTimer.formattedRemaining : "Timer",
                     active: sessionTimer.isRunning
                 ) { showTimer = true }
 
@@ -2009,12 +2009,32 @@ private struct SettingsSheet: View {
 
 private struct SoundscapeSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var spotify = SpotifyManager.shared
+
     var body: some View {
         NavigationStack {
-            List { SoundscapeLayerView() }
-                .navigationTitle("Soundscapes")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            List {
+                if spotify.isConnected {
+                    Section("Spotify") {
+                        if !spotify.currentTrack.isEmpty {
+                            Text(spotify.currentTrack)
+                                .font(.subheadline)
+                                .lineLimit(1)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button {
+                            spotify.isPaused ? spotify.play() : spotify.pause()
+                        } label: {
+                            Label(spotify.isPaused ? "Play" : "Pause",
+                                  systemImage: spotify.isPaused ? "play.fill" : "pause.fill")
+                        }
+                    }
+                }
+                SoundscapeLayerView()
+            }
+            .navigationTitle("Soundscapes")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
     }
 }
