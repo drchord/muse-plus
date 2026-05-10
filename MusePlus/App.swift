@@ -1349,70 +1349,72 @@ private struct MeditationView: View {
                     .padding(.bottom, 4)
             }
 
-            // Centre section: depth gauge + timer. Takes all remaining space between
-            // top bar and band chart. No scroll needed — content is always shorter than
-            // this region on any supported iPhone.
-            VStack(spacing: 0) {
-                Spacer(minLength: 0)
-
-                // B83 (B81 carryover) — pre-session fit-stability banner.
-                if !probe.depth.isCalibrated && probe.consecutiveGoodSeconds < 5 {
-                    FitStabilityBannerView(consecutiveGood: probe.consecutiveGoodSeconds,
-                                            fit: probe.fit)
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 4)
-                }
-
-                // Hero depth gauge
-                DepthGaugeView(probe: probe)
-
-                // Session-length countdown
-                if sessionTimer.isRunning {
-                    let r = sessionTimer.remainingSec
-                    let total = sessionTimer.selectedDurationMin * 60
-                    let elapsed = total - r
-                    VStack(spacing: 2) {
-                        Text(String(format: "%d:%02d", r / 60, r % 60))
-                            .font(.system(size: 28, weight: .light, design: .rounded).monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.88))
-                        Text(String(format: "%d:%02d / %d:%02d  remaining",
-                                    elapsed / 60, elapsed % 60, total / 60, total % 60))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.55))
+            // Scrollable body: takes all space between top bar and bottom controls.
+            // ScrollView+frame(maxHeight:.infinity) is the correct SwiftUI pattern for
+            // "fixed header, scrollable middle, fixed footer" — no GeometryReader needed.
+            // On large iPhones content fits without scrolling; on small iPhones or when
+            // all conditional views are shown the user can scroll to reach the band chart.
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    // Pre-session fit-stability banner (B83/B81 carryover)
+                    if !probe.depth.isCalibrated && probe.consecutiveGoodSeconds < 5 {
+                        FitStabilityBannerView(consecutiveGood: probe.consecutiveGoodSeconds,
+                                                fit: probe.fit)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
                     }
-                    .padding(.top, 8)
-                    .onChange(of: r) { _, _ in
-                        DispatchQueue.main.async { probe.timerHudRendered += 1 }
+
+                    // Hero depth gauge — 16pt top padding replaces the collapsing Spacer
+                    DepthGaugeView(probe: probe)
+                        .padding(.top, 16)
+
+                    // Session-length countdown
+                    if sessionTimer.isRunning {
+                        let r = sessionTimer.remainingSec
+                        let total = sessionTimer.selectedDurationMin * 60
+                        let elapsed = total - r
+                        VStack(spacing: 2) {
+                            Text(String(format: "%d:%02d", r / 60, r % 60))
+                                .font(.system(size: 28, weight: .light, design: .rounded).monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.88))
+                            Text(String(format: "%d:%02d / %d:%02d  remaining",
+                                        elapsed / 60, elapsed % 60, total / 60, total % 60))
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.55))
+                        }
+                        .padding(.top, 8)
+                        .onChange(of: r) { _, _ in
+                            DispatchQueue.main.async { probe.timerHudRendered += 1 }
+                        }
+                    }
+
+                    // Tap-to-mark row
+                    if probe.depth.isCalibrated && SessionRecorder.shared.isRecording {
+                        MarksRowView(probe: probe)
+                            .padding(.horizontal, 28)
+                            .padding(.top, 12)
+                    }
+
+                    // FAA bar
+                    if probe.depth.isCalibrated && probe.depth.faa != 0 {
+                        FAABarView(faa: probe.depth.faa)
+                            .padding(.horizontal, 44)
+                            .padding(.top, 8)
+                    }
+
+                    // Band chart — inside scroll so it's reachable on any iPhone size
+                    if probe.depth.isCalibrated && !probe.bandHistory.isEmpty {
+                        BandChart(history: probe.bandHistory)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 12)
+                            .padding(.bottom, 10)
                     }
                 }
-
-                Spacer(minLength: 8)
-
-                // Tap-to-mark row
-                if probe.depth.isCalibrated && SessionRecorder.shared.isRecording {
-                    MarksRowView(probe: probe)
-                        .padding(.horizontal, 28)
-                        .padding(.bottom, 6)
-                }
-
-                // FAA bar
-                if probe.depth.isCalibrated && probe.depth.faa != 0 {
-                    FAABarView(faa: probe.depth.faa)
-                        .padding(.horizontal, 44)
-                        .padding(.bottom, 8)
-                }
-
-                Spacer(minLength: 0)
+                .frame(maxWidth: .infinity)
+                .padding(.bottom, 8)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            // Band chart — pinned above bottom controls, always visible when calibrated.
-            // Placed outside the flexible centre section so it never scrolls off screen.
-            if probe.depth.isCalibrated && !probe.bandHistory.isEmpty {
-                BandChart(history: probe.bandHistory)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 6)
-            }
 
             // Bottom controls
             HStack(spacing: 0) {
