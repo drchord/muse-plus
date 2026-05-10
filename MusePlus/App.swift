@@ -1909,10 +1909,17 @@ private struct SettingsSheet: View {
                         Image(systemName: "bell.fill")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    LabeledContent("Chime Volume") {
+                        Text(ChimeEngine.shared.chimeVolume == 0
+                             ? "0% — drag slider to hear preview"
+                             : String(format: "%.0f%%", ChimeEngine.shared.chimeVolume * 100))
+                            .foregroundStyle(ChimeEngine.shared.chimeVolume == 0 ? .orange : .secondary)
+                            .font(.caption)
+                    }
                     ChimePreviewRow(label: "Enter Deep",     detail: "432 Hz",          color: .green)  { ChimeEngine.shared.playEnterDeep() }
                     ChimePreviewRow(label: "Going Deeper",   detail: "528 Hz · +0.08 ECDF / 30s", color: .mint)   { ChimeEngine.shared.playDeepening() }
                     ChimePreviewRow(label: "Exit Deep",      detail: "288 Hz",          color: .cyan)   { ChimeEngine.shared.playExitDeep() }
-                    ChimePreviewRow(label: "Anchor Tone",    detail: "7 Hz θ binaural", color: .indigo) { ChimeEngine.shared.playConditioningAnchor() }
+                    ChimePreviewRow(label: "Anchor Tone",    detail: "7 Hz θ binaural · headphones only", color: .indigo) { ChimeEngine.shared.playConditioningAnchor() }
                     ChimePreviewRow(label: "β Wander",       detail: "1 kHz tick",      color: .yellow) { ChimeEngine.shared.playBetaCue() }
                     ChimePreviewRow(label: "Contact Lost",   detail: "660 Hz ping",     color: .orange) { ChimeEngine.shared.playContactLost() }
                     ChimePreviewRow(label: "Restored",       detail: "528→660 Hz",      color: .mint)   { ChimeEngine.shared.playContactRestored() }

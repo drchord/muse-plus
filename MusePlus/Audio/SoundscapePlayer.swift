@@ -223,6 +223,10 @@ final class SoundscapePlayer: ObservableObject {
                         self.nodes[layer]?.volume = self.layerVolumes[layer] ?? 0.35
                     }
                     self.activeLayers.removeAll()
+                    // Stop the engine so AVAudioEngineConfigurationChange + resumeActiveLayers()
+                    // cannot resurrect looping nodes during the grace window after session end.
+                    // ensureRunning() / restartEngine() restarts it on next layer activation.
+                    self.engine.stop()
                 }
             }
         }
