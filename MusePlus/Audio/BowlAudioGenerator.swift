@@ -11,6 +11,9 @@ import Foundation
 import AVFoundation
 import os.log
 
+// Bump to force regeneration of cached .wav files on next launch.
+private let kBowlAudioVersion = "B91"
+
 public final class BowlAudioGenerator {
 
     // MARK: - Shared instance
@@ -23,9 +26,6 @@ public final class BowlAudioGenerator {
     private let log = Logger(subsystem: "com.museplus", category: "Telemetry.audio")
 
     // MARK: - Public API
-
-    // Bump this string to force regeneration of cached .wav files on next launch.
-    private let kBowlAudioVersion = "B91"
 
     /// Generate bowl_success.wav and bowl_failure.wav in Documents/Sounds/.
     /// Re-generates if kBowlAudioVersion has changed since last write.
