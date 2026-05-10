@@ -1349,79 +1349,69 @@ private struct MeditationView: View {
                     .padding(.bottom, 4)
             }
 
-            GeometryReader { scrollGeo in
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 0) {
-                        Spacer(minLength: 0)
+            // Centre section: depth gauge + timer. Takes all remaining space between
+            // top bar and band chart. No scroll needed — content is always shorter than
+            // this region on any supported iPhone.
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
 
-                        // B83 (B81 carryover) — pre-session fit-stability banner. Visible during
-                        // calibration when allGood has not held continuously for 5 seconds. Shows
-                        // a 1-of-5 progress bar so user knows when band is stable enough to proceed.
-                        // Auto-hides once consecutiveGoodSeconds >= 5 OR calibration completes.
-                        if !probe.depth.isCalibrated && probe.consecutiveGoodSeconds < 5 {
-                            FitStabilityBannerView(consecutiveGood: probe.consecutiveGoodSeconds,
-                                                    fit: probe.fit)
-                                .padding(.horizontal, 24)
-                                .padding(.bottom, 4)
-                        }
-
-                        // Hero depth gauge
-                        DepthGaugeView(probe: probe)
-
-                        // B83: Session-length countdown — large, prominent, always visible during session.
-                        // B82 user feedback: "no countdown timer telling me how long I have left."
-                        // Was previously caption-sized at opacity 0.45 — easy to miss. Now 28pt rounded
-                        // mono digits at opacity 0.85, with elapsed/total split for at-a-glance feedback.
-                        // `timerHudRendered` increments each second so SessionRecorder.appendUIState
-                        // can prove the binding is firing — eliminates "did the view actually render?"
-                        // ambiguity in future debugging.
-                        if sessionTimer.isRunning {
-                            let r = sessionTimer.remainingSec
-                            let total = sessionTimer.selectedDurationMin * 60
-                            let elapsed = total - r
-                            VStack(spacing: 2) {
-                                Text(String(format: "%d:%02d", r / 60, r % 60))
-                                    .font(.system(size: 28, weight: .light, design: .rounded).monospacedDigit())
-                                    .foregroundStyle(.white.opacity(0.88))
-                                Text(String(format: "%d:%02d / %d:%02d  remaining",
-                                            elapsed / 60, elapsed % 60, total / 60, total % 60))
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.white.opacity(0.55))
-                            }
-                            .padding(.top, 8)
-                            .onChange(of: r) { _, _ in
-                                DispatchQueue.main.async { probe.timerHudRendered += 1 }
-                            }
-                        }
-
-                        Spacer(minLength: 8)
-
-                        // B77: subjective tap-to-mark — user is the only ground truth. Marks compared
-                        // against gauge in session summary; <70% agreement triggers recalibration prompt.
-                        if probe.depth.isCalibrated && SessionRecorder.shared.isRecording {
-                            MarksRowView(probe: probe)
-                                .padding(.horizontal, 28)
-                                .padding(.bottom, 6)
-                        }
-
-                        // FAA bar (after calibration)
-                        if probe.depth.isCalibrated && probe.depth.faa != 0 {
-                            FAABarView(faa: probe.depth.faa)
-                                .padding(.horizontal, 44)
-                                .padding(.bottom, 8)
-                        }
-
-                        // Band chart (only when calibrated and data available)
-                        if probe.depth.isCalibrated && !probe.bandHistory.isEmpty {
-                            BandChart(history: probe.bandHistory)
-                                .padding(.horizontal, 12)
-                                .padding(.bottom, 10)
-                        }
-
-                        Spacer(minLength: 0)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: scrollGeo.size.height)
+                // B83 (B81 carryover) — pre-session fit-stability banner.
+                if !probe.depth.isCalibrated && probe.consecutiveGoodSeconds < 5 {
+                    FitStabilityBannerView(consecutiveGood: probe.consecutiveGoodSeconds,
+                                            fit: probe.fit)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 4)
                 }
+
+                // Hero depth gauge
+                DepthGaugeView(probe: probe)
+
+                // Session-length countdown
+                if sessionTimer.isRunning {
+                    let r = sessionTimer.remainingSec
+                    let total = sessionTimer.selectedDurationMin * 60
+                    let elapsed = total - r
+                    VStack(spacing: 2) {
+                        Text(String(format: "%d:%02d", r / 60, r % 60))
+                            .font(.system(size: 28, weight: .light, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.88))
+                        Text(String(format: "%d:%02d / %d:%02d  remaining",
+                                    elapsed / 60, elapsed % 60, total / 60, total % 60))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
+                    .padding(.top, 8)
+                    .onChange(of: r) { _, _ in
+                        DispatchQueue.main.async { probe.timerHudRendered += 1 }
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                // Tap-to-mark row
+                if probe.depth.isCalibrated && SessionRecorder.shared.isRecording {
+                    MarksRowView(probe: probe)
+                        .padding(.horizontal, 28)
+                        .padding(.bottom, 6)
+                }
+
+                // FAA bar
+                if probe.depth.isCalibrated && probe.depth.faa != 0 {
+                    FAABarView(faa: probe.depth.faa)
+                        .padding(.horizontal, 44)
+                        .padding(.bottom, 8)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            // Band chart — pinned above bottom controls, always visible when calibrated.
+            // Placed outside the flexible centre section so it never scrolls off screen.
+            if probe.depth.isCalibrated && !probe.bandHistory.isEmpty {
+                BandChart(history: probe.bandHistory)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
             }
 
             // Bottom controls
@@ -1808,7 +1798,8 @@ private struct BottomButton: View {
                     .foregroundStyle(active ? .white.opacity(0.85) : .white.opacity(0.35))
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
             .contentShape(Rectangle())
         }
     }
