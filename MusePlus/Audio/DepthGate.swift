@@ -114,6 +114,7 @@ final class DepthGate {
                 smoothedScore   = 0.97 * smoothedScore   + 0.03 * 0.5
                 smoothedDisplay = 0.97 * smoothedDisplay + 0.03 * 0.5
             }
+            SoundscapePlayer.shared.setProximityGain(1.0)
             return
         }
         contactLossWindows = 0
@@ -122,6 +123,8 @@ final class DepthGate {
         smoothedScore   = kEmaAlpha * result.score          + (1 - kEmaAlpha) * smoothedScore
         let displayNow  = zDist.ecdf(result.z)
         smoothedDisplay = kEmaAlpha * displayNow            + (1 - kEmaAlpha) * smoothedDisplay
+
+        applyProximityDuck()
 
         let now = Date()
 
@@ -191,10 +194,30 @@ final class DepthGate {
         }
     }
 
+    // Silently reduce soundscape as smoothedDisplay approaches enterThresholdEcdf.
+    // Called after every EMA update. Must be called on main thread (same as update()).
+    // Gain 1.0 at display ≤ 0.30, 0.15 at display ≥ enterThresholdEcdf.
+    // While inDeepState: restores full gain (chime duck system takes over).
+    private func applyProximityDuck() {
+        guard !inDeepState else {
+            SoundscapePlayer.shared.setProximityGain(1.0)
+            return
+        }
+        let lo: Float = 0.30
+        let hi = enterThresholdEcdf
+        guard smoothedDisplay > lo else {
+            SoundscapePlayer.shared.setProximityGain(1.0)
+            return
+        }
+        let t = min(1.0, (smoothedDisplay - lo) / (hi - lo))
+        SoundscapePlayer.shared.setProximityGain(1.0 - t * 0.85)
+    }
+
     func reset() {
         inDeepState        = false
         smoothedScore      = 0.5
         smoothedDisplay    = 0.0
+        SoundscapePlayer.shared.setProximityGain(1.0)
         consecutiveAbove   = 0
         consecutiveBelow   = 0
         lastEnterChime     = .distantPast

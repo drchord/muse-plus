@@ -4,6 +4,7 @@ import UIKit
 import AVFoundation
 import OSLog
 import BackgroundTasks
+import Charts
 
 @main
 struct MusePlusApp: App {
@@ -763,16 +764,13 @@ final class Probe: ObservableObject {
         // debugging audibility; without this we can't tell whether the speaker had
         // output enabled when the gong fired.
         fireDiagnosticsSnapshot(trigger: "endSession-pre-gong")
-        // B83 — route to EndGongPlayer. If `bowl_success.{m4a,wav}` is bundled, plays the
-        // recorded sample via AVAudioPlayer (file-based, immune to engine state). Otherwise
-        // falls back to ChimeEngine.playGong() — now at 432 Hz fundamental (audible on
-        // iPhone built-in speaker, unlike the old 84 Hz that B82 instrumentation will prove
-        // was sub-resonant if outputs included only `builtInSpeaker`).
+        // Fade soundscape FIRST — stopAll sets isStopping=true so AVAudioEngineConfigurationChange
+        // from gong's configureAudioSession cannot resurrect looping nodes via resumeActiveLayers.
+        SoundscapePlayer.shared.stopAll(fadeSeconds: 4.0)
+        // B83 — route to EndGongPlayer. Plays bowl_success.wav; falls back to ChimeEngine.playGong().
         EndGongPlayer.shared.playSuccess()
         // B83 — record the manual/timer end as event in NDJSON.
         recordEvent(kind: "session-end-success", detail: effectiveReason)
-        // Fade soundscape over 4s (gong plays concurrently per task spec).
-        SoundscapePlayer.shared.stopAll(fadeSeconds: 4.0)
         MainThreadStall.shared.stop()
         diagnosticsTimer?.invalidate()
         diagnosticsTimer = nil
@@ -780,6 +778,7 @@ final class Probe: ObservableObject {
         // B80(C): attach diagnostics before endSession so they're included in the saved file.
         SessionRecorder.shared.attachDiagnostics(buildDiagnostics(endReason: effectiveReason))
         SessionRecorder.shared.attachEventStream(sessionEvents)
+        SessionRecorder.shared.attachEnterThreshold(gate.enterThresholdEcdf)
         Telemetry.recording.notice("endSession reason=\(effectiveReason, privacy: .public)")
         let recUrl = SessionRecorder.shared.endSession(reason: effectiveReason)
         pipeline.endSession()
@@ -1137,7 +1136,7 @@ final class Probe: ObservableObject {
             contactStateChanges: sessionDiagCounters.contactStateChanges,
             stallEvents:         sessionDiagCounters.stallEvents,
             endReason:           endReason,
-            buildTag:            "B83",
+            buildTag:            SessionRecorder.currentBuildTag,
             deviceModel:         model,
             iosVersion:          iosVer,
             museModel:           client.museModelString,
@@ -2284,6 +2283,45 @@ private struct SessionsListView: View {
 
 // MARK: - Session summary sheet
 
+private struct DepthPoint: Identifiable {
+    let id: Int
+    let t: Double   // minutes from session start
+    let v: Double   // ecdfDisplay [0, 1]
+}
+
+private struct DepthTraceChart: View {
+    let points: [DepthPoint]
+    let threshold: Double
+
+    var body: some View {
+        Chart {
+            ForEach(points) { pt in
+                LineMark(
+                    x: .value("min", pt.t),
+                    y: .value("depth", pt.v)
+                )
+                .foregroundStyle(.blue.opacity(0.85))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+            }
+            // Entry threshold
+            RuleMark(y: .value("threshold", threshold))
+                .foregroundStyle(.orange.opacity(0.85))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                .annotation(position: .trailing, alignment: .leading, spacing: 2) {
+                    Text("\(Int((threshold * 100).rounded()))%")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+            // Calibration boundary at 5 min
+            RuleMark(x: .value("cal", 5.0))
+                .foregroundStyle(.secondary.opacity(0.35))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+        }
+        .chartYScale(domain: 0.0...1.0)
+        .chartXAxisLabel("min", alignment: .trailing)
+        .chartYAxisLabel("%")
+    }
+}
+
 private struct SessionSummarySheet: View {
     let record: SessionRecord
     let onDismiss: () -> Void
@@ -2361,6 +2399,21 @@ private struct SessionSummarySheet: View {
                         }
                     }
                 }
+                if !depthPoints.isEmpty {
+                    Section {
+                        DepthTraceChart(
+                            points: depthPoints,
+                            threshold: Double(record.enterThresholdAtSession ?? 0.55)
+                        )
+                        .frame(height: 150)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+                    } header: {
+                        Text("Depth Trace")
+                    } footer: {
+                        Text("Orange dashed: entry threshold. Vertical grey: end of calibration.")
+                            .font(.caption2)
+                    }
+                }
                 Section("Insight") {
                     Text(coachingLine)
                         .font(.subheadline)
@@ -2397,6 +2450,17 @@ private struct SessionSummarySheet: View {
         return v.isEmpty ? nil : v.reduce(0, +) / Float(v.count)
     }
 
+    // Downsample to ≤300 points for chart render performance.
+    private var depthPoints: [DepthPoint] {
+        let all = record.samples.enumerated().compactMap { i, s -> DepthPoint? in
+            guard let v = s.ecdfDisplay else { return nil }
+            return DepthPoint(id: i, t: s.time / 60.0, v: Double(v))
+        }
+        guard all.count > 300 else { return all }
+        let stride = all.count / 300
+        return all.enumerated().compactMap { i, pt in i % stride == 0 ? pt : nil }
+    }
+
     private var coachingLine: String {
         let deep         = record.deepMinutes
         let latency      = record.episodes.first?.enterTime ?? 9999
@@ -2405,6 +2469,15 @@ private struct SessionSummarySheet: View {
         let avgLatency   = UserDefaults.standard.double(forKey: "avgInductionLatency")
 
         if record.episodes.isEmpty {
+            let scores = record.samples.compactMap(\.ecdfDisplay)
+            let peak = scores.max() ?? 0
+            let thresh = record.enterThresholdAtSession ?? 0.55
+            if peak >= thresh * 0.88 {
+                let gap = Int(((thresh - peak) * 100).rounded())
+                let peakPct = Int((peak * 100).rounded())
+                let threshPct = Int((thresh * 100).rounded())
+                return "Peak depth \(peakPct)% — \(gap) percentile point\(gap == 1 ? "" : "s") from the \(threshPct)% threshold. The approach is there. You arrived without crossing. Less monitoring of state, more surrender to the breath."
+            }
             return "No confirmed deep state. Soften jaw, eyes, and shoulders — the gate opens through release, not effort."
         }
 

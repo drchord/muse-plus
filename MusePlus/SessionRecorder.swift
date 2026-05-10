@@ -124,6 +124,8 @@ struct SessionRecord: Codable, Identifiable {
     var durationSec:       Double? = nil    // total session length in seconds
     var summarySampleCount: Int?   = nil    // sample count at close
     var deepFraction:      Double? = nil    // fraction [0, 1] of session time spent in deep state
+    // B91 — ECDF entry threshold active for this session; nil in pre-B91 records.
+    var enterThresholdAtSession: Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -302,6 +304,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
+    static let currentBuildTag = "B91"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -344,7 +347,7 @@ final class SessionRecorder: ObservableObject {
                 calibrationIndexMean: calibrationIndexMean,
                 calibrationIndexStd:  calibrationIndexStd,
                 marks: [],
-                buildTag: "B87"
+                buildTag: SessionRecorder.currentBuildTag
             )
             lastDeepState = false
             sampleCount   = 0
@@ -399,9 +402,10 @@ final class SessionRecorder: ObservableObject {
             // A4: tear down app-state observers
             tearDownAppStateObservers()
 
-            // Feed personal ECDF
+            // Feed personal ECDF — main phase only; warmup samples (first 300s) inflate
+            // the distribution and raise the threshold bar for subsequent sessions.
             let allZs = rec.samples.compactMap { s -> Float? in
-                guard let z = s.depthZ, z.isFinite else { return nil }
+                guard s.phase == "main", let z = s.depthZ, z.isFinite else { return nil }
                 return z
             }
             if !allZs.isEmpty {
@@ -765,7 +769,7 @@ final class SessionRecorder: ObservableObject {
             startDate: iso8601.string(from: now),
             calibrationIndexMean: calibrationIndexMean,
             calibrationIndexStd:  calibrationIndexStd,
-            buildTag: "B87"
+            buildTag: SessionRecorder.currentBuildTag
         )
         appendLine(header)
         Telemetry.recording.notice("NDJSON opened: \(url.lastPathComponent, privacy: .public)")
@@ -1076,6 +1080,13 @@ extension SessionRecorder {
             guard isRecording else { return }
             current?.eventStream = events
             Telemetry.recording.notice("eventStream attached: \(events.count, privacy: .public) events")
+        }
+    }
+
+    func attachEnterThreshold(_ threshold: Float) {
+        queue.sync {
+            guard isRecording else { return }
+            current?.enterThresholdAtSession = threshold
         }
     }
 

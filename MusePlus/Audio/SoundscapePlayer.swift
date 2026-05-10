@@ -206,7 +206,13 @@ final class SoundscapePlayer: ObservableObject {
 
     /// Fade all active layers to silence, stop them, then clear activeLayers.
     func stopAll(fadeSeconds: Double = 2.5) {
-        guard !activeLayers.isEmpty else { return }
+        isStopping = true
+        guard !activeLayers.isEmpty else {
+            // No soundscape active but still stop engine — prevents drone from empty-engine restart.
+            engine.stop()
+            isStopping = false
+            return
+        }
         let steps = 30
         let stepTime = fadeSeconds / Double(steps)
         let layersToStop = activeLayers
@@ -223,12 +229,29 @@ final class SoundscapePlayer: ObservableObject {
                         self.nodes[layer]?.volume = self.layerVolumes[layer] ?? 0.35
                     }
                     self.activeLayers.removeAll()
+                    self.isStopping = false
                     // Stop the engine so AVAudioEngineConfigurationChange + resumeActiveLayers()
                     // cannot resurrect looping nodes during the grace window after session end.
                     // ensureRunning() / restartEngine() restarts it on next layer activation.
                     self.engine.stop()
                 }
             }
+        }
+    }
+
+    /// Approach-zone feedback: silently lower soundscape as user nears depth threshold.
+    /// Called by DepthGate at 2 Hz. Ignored while chime duck is active.
+    func setProximityGain(_ gain: Float) {
+        let clamped = max(0.10, min(1.0, gain))
+        guard abs(clamped - proximityGain) > 0.03 else { return }
+        proximityGain = clamped
+        applyProximityGain()
+    }
+
+    private func applyProximityGain() {
+        guard !isDucked else { return }
+        for layer in activeLayers {
+            nodes[layer]?.volume = (layerVolumes[layer] ?? 0.35) * proximityGain
         }
     }
 
@@ -260,7 +283,9 @@ final class SoundscapePlayer: ObservableObject {
 
     // MARK: - Internals
 
-    private var isDucked: Bool = false
+    private var isDucked:      Bool  = false
+    private var isStopping:    Bool  = false   // true during stopAll fade — blocks resumeActiveLayers
+    private var proximityGain: Float = 1.0     // set by DepthGate approach duck [0.10, 1.0]
 
     private func fade(to multiplier: Float, over duration: Double) {
         isDucked = (multiplier < 1.0)
@@ -276,12 +301,16 @@ final class SoundscapePlayer: ObservableObject {
                     let target = base * multiplier
                     self.nodes[layer]?.volume = cur + t * (target - cur)
                 }
-                if step == steps { self.isDucked = (multiplier < 1.0) }
+                if step == steps {
+                    self.isDucked = (multiplier < 1.0)
+                    if !self.isDucked { self.applyProximityGain() }
+                }
             }
         }
     }
 
     private func activate(_ layer: SoundLayer) {
+        isStopping = false   // new activation always cancels pending stop state
         activeLayers.insert(layer)
         if let buf = buffers[layer] {
             startNode(nodes[layer]!, buffer: buf)
@@ -367,6 +396,7 @@ final class SoundscapePlayer: ObservableObject {
     }
 
     private func resumeActiveLayers() {
+        guard !isStopping else { return }  // block resurrection during session-end fade
         for layer in activeLayers {
             guard let node = self.nodes[layer],
                   let buf  = self.buffers[layer],

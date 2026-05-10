@@ -24,35 +24,43 @@ public final class BowlAudioGenerator {
 
     // MARK: - Public API
 
-    /// Generate bowl_success.wav and bowl_failure.wav in Documents/Sounds/ if absent.
-    /// Idempotent – skips files that already exist.
+    // Bump this string to force regeneration of cached .wav files on next launch.
+    private let kBowlAudioVersion = "B91"
+
+    /// Generate bowl_success.wav and bowl_failure.wav in Documents/Sounds/.
+    /// Re-generates if kBowlAudioVersion has changed since last write.
     public func generateIfNeeded() {
+        let storedVersion = UserDefaults.standard.string(forKey: "bowlAudioVersion")
+        let needsRegen = storedVersion != kBowlAudioVersion
+
         let dir = soundsDirectory()
         createDirectoryIfNeeded(dir)
 
         let successFile = dir.appendingPathComponent("bowl_success.wav")
         let failureFile = dir.appendingPathComponent("bowl_failure.wav")
 
-        if !FileManager.default.fileExists(atPath: successFile.path) {
+        if needsRegen || !FileManager.default.fileExists(atPath: successFile.path) {
+            try? FileManager.default.removeItem(at: successFile)
             do {
                 try writeSuccessBowl(to: successFile)
-                log.info("BowlAudioGenerator: wrote bowl_success.wav")
+                log.info("BowlAudioGenerator: wrote bowl_success.wav v\(kBowlAudioVersion)")
             } catch {
                 log.error("BowlAudioGenerator: failed to write bowl_success.wav – \(error.localizedDescription)")
             }
-        } else {
-            log.debug("BowlAudioGenerator: bowl_success.wav already exists, skipping")
         }
 
-        if !FileManager.default.fileExists(atPath: failureFile.path) {
+        if needsRegen || !FileManager.default.fileExists(atPath: failureFile.path) {
+            try? FileManager.default.removeItem(at: failureFile)
             do {
                 try writeFailureBowl(to: failureFile)
-                log.info("BowlAudioGenerator: wrote bowl_failure.wav")
+                log.info("BowlAudioGenerator: wrote bowl_failure.wav v\(kBowlAudioVersion)")
             } catch {
                 log.error("BowlAudioGenerator: failed to write bowl_failure.wav – \(error.localizedDescription)")
             }
-        } else {
-            log.debug("BowlAudioGenerator: bowl_failure.wav already exists, skipping")
+        }
+
+        if needsRegen {
+            UserDefaults.standard.set(kBowlAudioVersion, forKey: "bowlAudioVersion")
         }
     }
 
@@ -123,16 +131,16 @@ public final class BowlAudioGenerator {
             (8.900, 0.08, 7.8)
         ]
         let fundamental:   Double = 432.0
-        let baseDecay:     Double = 0.4        // per-second decay exponent multiplier
+        let baseDecay:     Double = 0.6        // per-second decay exponent multiplier
         let attackSamples: Int    = Int(0.025 * sampleRate)  // 25 ms
-        let peakAmplitude: Double = 0.9
+        let peakAmplitude: Double = 0.65
         let fadeStartSec:  Double = duration - 1.0
         let fadeStartSmp:  Int    = Int(fadeStartSec * sampleRate)
         let fadeDuration:  Double = 1.0
 
-        // Reverb: 200 ms delay, 0.25 mix
+        // Reverb: 200 ms delay, 0.12 mix
         let reverbDelaySamples = Int(0.200 * sampleRate)
-        let reverbMix: Double  = 0.25
+        let reverbMix: Double  = 0.12
 
         // Build raw float buffer
         var samples = [Double](repeating: 0.0, count: Int(frameCount))
@@ -146,15 +154,6 @@ public final class BowlAudioGenerator {
                 v += p.weight * decay * sin(2.0 * .pi * freq * t)
             }
             samples[i] = v
-        }
-
-        // Normalize to peak amplitude before attack/fade so clipping check is meaningful
-        let maxAbs = samples.map { abs($0) }.max() ?? 1.0
-        if maxAbs > 0 {
-            let scale = peakAmplitude / maxAbs
-            for i in 0 ..< samples.count {
-                samples[i] *= scale
-            }
         }
 
         // Attack ramp
@@ -176,7 +175,15 @@ public final class BowlAudioGenerator {
             reverbbed[i] += samples[i - reverbDelaySamples] * reverbMix
         }
 
-        // Final hard clip to [-1, 1]
+        // Normalize to peakAmplitude after reverb — reverb tail can exceed pre-reverb peak,
+        // so normalizing here guarantees no hard clip regardless of reverbMix.
+        let maxRevAbs = reverbbed.map { abs($0) }.max() ?? 1.0
+        if maxRevAbs > 0 {
+            let scale = peakAmplitude / maxRevAbs
+            for i in 0 ..< reverbbed.count { reverbbed[i] *= scale }
+        }
+
+        // Safety hard clip — should be a no-op after normalization above.
         for i in 0 ..< reverbbed.count {
             reverbbed[i] = max(-1.0, min(1.0, reverbbed[i]))
         }
