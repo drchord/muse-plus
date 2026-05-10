@@ -187,14 +187,21 @@ public final class EndGongPlayer: NSObject, AVAudioPlayerDelegate {
         return nil
     }
 
-    /// Resolve playback volume from UserDefaults, defaulting to 0.7.
+    /// Minimum volume for the end gong regardless of chime volume setting.
+    /// Session-end is a critical signal — must always be audible.
+    private static let gongVolumeFloor: Float = 0.65
+
+    /// Resolve playback volume from UserDefaults with a hard floor at gongVolumeFloor.
+    /// The chime volume slider can go to 0 (silencing depth/transition chimes during
+    /// meditation), but the end gong must always be audible.
     private func resolvedVolume() -> Float {
-        guard let stored = UserDefaults.standard.object(forKey: Self.volumeDefaultsKey) else {
-            return Self.defaultVolume
-        }
-        if let f = stored as? Float { return max(0, min(1, f)) }
-        if let d = stored as? Double { return max(0, min(1, Float(d))) }
-        return Self.defaultVolume
+        let raw: Float
+        let stored = UserDefaults.standard.object(forKey: Self.volumeDefaultsKey)
+        if let f = stored as? Float       { raw = max(0, min(1, f)) }
+        else if let d = stored as? Double { raw = max(0, min(1, Float(d))) }
+        else if let n = stored as? NSNumber { raw = max(0, min(1, n.floatValue)) }
+        else                              { raw = Self.defaultVolume }
+        return max(Self.gongVolumeFloor, raw)
     }
 
     /// Configure AVAudioSession for playback, mixing with other active sessions.

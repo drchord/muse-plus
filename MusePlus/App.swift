@@ -1916,8 +1916,10 @@ private struct SettingsSheet: View {
                     ChimePreviewRow(label: "β Wander",       detail: "1 kHz tick",      color: .yellow) { ChimeEngine.shared.playBetaCue() }
                     ChimePreviewRow(label: "Contact Lost",   detail: "660 Hz ping",     color: .orange) { ChimeEngine.shared.playContactLost() }
                     ChimePreviewRow(label: "Restored",       detail: "528→660 Hz",      color: .mint)   { ChimeEngine.shared.playContactRestored() }
-                    ChimePreviewRow(label: "Timer End",      detail: "84 Hz × 3",       color: .purple) { ChimeEngine.shared.playTimerEnd() }
+                    ChimePreviewRow(label: "Session End",    detail: "432 Hz bowl",     color: .purple) { EndGongPlayer.shared.playSuccess() }
                 }
+                Text("Volume also controls depth and transition chimes during session. End gong has a 65% minimum — always audible even when slider is at zero.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Section("Training") {
                     LabeledContent("Binaural Fade Level") {
                         Text(String(format: "%.0f%%", sound.binauralFadeLevel * 100))
