@@ -113,9 +113,10 @@ public final class EndGongPlayer: NSObject, AVAudioPlayerDelegate {
 
         // Build AVAudioPlayer
         do {
+            let vol = resolvedVolume()
             let newPlayer = try AVAudioPlayer(contentsOf: fileURL)
             newPlayer.delegate = self
-            newPlayer.volume = resolvedVolume()
+            newPlayer.volume = vol
             newPlayer.prepareToPlay()
 
             player = newPlayer
@@ -123,8 +124,10 @@ public final class EndGongPlayer: NSObject, AVAudioPlayerDelegate {
             let started = newPlayer.play()
 
             if started && newPlayer.isPlaying {
-                emitEvent(kind: "gongStarted", detail: detail)
-                Telemetry.audio.notice("EndGongPlayer: playback started — \(detail)")
+                // Log volume in the started event — if this is 0.0, the gong is silent.
+                // Previously required post-hoc NDJSON analysis; now self-documenting.
+                emitEvent(kind: "gongStarted", detail: "\(detail)_vol\(String(format: "%.2f", vol))")
+                Telemetry.audio.notice("EndGongPlayer: playback started — \(detail) vol=\(String(format: "%.2f", vol))")
             } else {
                 Telemetry.audio.error("EndGongPlayer: play() returned false or isPlaying=false for \(detail)")
                 emitEvent(kind: "gongFailed", detail: "\(detail)_play_returned_false")
@@ -187,20 +190,22 @@ public final class EndGongPlayer: NSObject, AVAudioPlayerDelegate {
         return nil
     }
 
-    /// Minimum volume for the end gong regardless of chime volume setting.
-    /// Session-end is a critical signal — must always be audible.
-    private static let gongVolumeFloor: Float = 0.65
+    /// Hard floor for end-gong volume regardless of the chime slider setting.
+    /// At system volume 0.3 (typical during meditation), 0.85 * 0.3 = 25.5% of iPhone
+    /// max — clearly audible without being jarring. Raising this above 1.0 is meaningless.
+    private static let gongVolumeFloor: Float = 0.85
 
-    /// Resolve playback volume from UserDefaults with a hard floor at gongVolumeFloor.
-    /// The chime volume slider can go to 0 (silencing depth/transition chimes during
-    /// meditation), but the end gong must always be audible.
+    /// Resolve playback volume with a hard floor.
+    /// Handles Float/Double/NSNumber storage (UserDefaults bridging varies by call site).
+    /// Returns max(floor, userSetting) so the gong is always audible even when chimes
+    /// are muted for silent meditation sessions.
     private func resolvedVolume() -> Float {
         let raw: Float
         let stored = UserDefaults.standard.object(forKey: Self.volumeDefaultsKey)
-        if let f = stored as? Float       { raw = max(0, min(1, f)) }
-        else if let d = stored as? Double { raw = max(0, min(1, Float(d))) }
+        if let f = stored as? Float         { raw = max(0, min(1, f)) }
+        else if let d = stored as? Double   { raw = max(0, min(1, Float(d))) }
         else if let n = stored as? NSNumber { raw = max(0, min(1, n.floatValue)) }
-        else                              { raw = Self.defaultVolume }
+        else                                { raw = Self.defaultVolume }
         return max(Self.gongVolumeFloor, raw)
     }
 
