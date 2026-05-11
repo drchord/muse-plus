@@ -771,12 +771,13 @@ final class Probe: ObservableObject {
         // B94: shorten fade to 2s; delay gong 1.5s so it fires into near-silence (soundscape ≈25%).
         // Root cause of buzzing: async stopAll + immediate gong → full-volume overlap → DAC clip.
         SoundscapePlayer.shared.stopAll(fadeSeconds: 2.0)
-        let capturedReason = effectiveReason
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        // B83 — record session-end event NOW (before endSession closes the NDJSON file).
+        recordEvent(kind: "session-end-success", detail: effectiveReason)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            // Guard: skip gong if a new session started in the 1.5s window.
+            guard !SessionRecorder.shared.isRecording else { return }
             // B83 — route to EndGongPlayer. Plays bowl_success.wav; falls back to ChimeEngine.playGong().
             EndGongPlayer.shared.playSuccess()
-            // B83 — record the manual/timer end as event in NDJSON.
-            self?.recordEvent(kind: "session-end-success", detail: capturedReason)
         }
         MainThreadStall.shared.stop()
         diagnosticsTimer?.invalidate()
