@@ -28,6 +28,34 @@ struct MusePlusApp: App {
     }
 }
 
+// MARK: - Session Forecast
+
+enum SessionForecast {
+    case strong, building, slow
+
+    var label: String {
+        switch self {
+        case .strong:   return "Strong start"
+        case .building: return "Building"
+        case .slow:     return "Slow start"
+        }
+    }
+    var iconName: String {
+        switch self {
+        case .strong:   return "arrow.up.circle.fill"
+        case .building: return "chart.line.uptrend.xyaxis"
+        case .slow:     return "tortoise.fill"
+        }
+    }
+    var color: Color {
+        switch self {
+        case .strong:   return .green
+        case .building: return .orange
+        case .slow:     return .secondary
+        }
+    }
+}
+
 // MARK: - Probe
 
 final class Probe: ObservableObject {
@@ -131,10 +159,13 @@ final class Probe: ObservableObject {
     private var gracePeriodStarted: Date?
     // Session summary shown after disconnect if session was recorded.
     @Published var sessionSummary: SessionRecord? = nil
+    @Published var sessionForecast: SessionForecast? = nil
     // B76 had a 300s recording delay after calibration; B77 records from calibration end and
     // tags first 300s as "warmup" instead. No data loss; analysis can still filter warmup.
     private var recordingStartWork: DispatchWorkItem?  // legacy field; kept to avoid wider refactor
     private var calibrationFiredRecording = false
+    private var calibrationCompleted = false
+    private var recentEcdf: [Float] = []
     // Wall-clock time when SessionRecorder.startSession was called this connection.
     private var recordingStartedAt: Date? = nil
     // Read-only access for views that need session-relative timestamps for tap-to-mark.
@@ -212,6 +243,9 @@ final class Probe: ObservableObject {
                     self?.sessionSummary = nil
                     // Recording starts at calibration completion (B77: no 300s delay; warmup tag).
                     self?.calibrationFiredRecording = false
+                    self?.sessionForecast     = nil
+                    self?.calibrationCompleted = false
+                    self?.recentEcdf           = []
                     self?.recordingStartWork?.cancel()
                     self?.recordingStartedAt = nil
                     self?.lastBetaCueDate = .distantPast
@@ -581,6 +615,29 @@ final class Probe: ObservableObject {
             // B94: at deep state entry, set binaural to raw iTPF (after updateAdaptiveDepth which uses iTPF-2.0)
             if !wasDeep && self.gate.inDeepState, let iTPF = self.gate.lastKnownITPF {
                 SoundscapePlayer.shared.setAdaptiveBinauralIfActive(hz: Double(iTPF))
+            }
+            // B94 — ecdf history for early forecast (fires 60s after first calibration)
+            if result.isCalibrated {
+                self.recentEcdf.append(self.gate.smoothedDisplay)
+                if self.recentEcdf.count > 120 { self.recentEcdf.removeFirst() }
+                if !self.calibrationCompleted {
+                    self.calibrationCompleted = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+                        guard let self, self.calibrationCompleted,
+                              !self.recentEcdf.isEmpty else { return }
+                        let slice = self.recentEcdf.suffix(120)
+                        let mean = slice.reduce(0, +) / Float(slice.count)
+                        withAnimation(.easeIn(duration: 0.4)) {
+                            self.sessionForecast = mean > 0.52 ? .strong :
+                                                   mean > 0.38 ? .building : .slow
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+                            withAnimation(.easeOut(duration: 0.5)) {
+                                self?.sessionForecast = nil
+                            }
+                        }
+                    }
+                }
             }
             // B77: record from calibration end (no 300s delay). First 300s tagged "warmup"
             // in addSample so analysis can still filter, but data is preserved.
@@ -1464,6 +1521,13 @@ private struct MeditationView: View {
                                 titleVisibility: .visible) {
                 Button("End Session", role: .destructive) { probe.manualEndSession() }
                 Button("Cancel", role: .cancel) { }
+            }
+        }
+        .overlay(alignment: .top) {
+            if let forecast = probe.sessionForecast {
+                SessionForecastBanner(forecast: forecast)
+                    .padding(.top, 60)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         // D3: "Session saved" toast — driven by probe.sessionSavedToast (set in endSessionGracefully).
@@ -2586,5 +2650,22 @@ private struct SessionSummarySheet: View {
     private func fmtSecs(_ s: Double) -> String {
         let m = Int(s) / 60; let sec = Int(s) % 60
         return m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
+    }
+}
+
+private struct SessionForecastBanner: View {
+    let forecast: SessionForecast
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: forecast.iconName)
+                .font(.subheadline)
+            Text(forecast.label)
+                .font(.subheadline.weight(.medium))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.thinMaterial, in: Capsule())
+        .foregroundStyle(forecast.color)
+        .shadow(radius: 4)
     }
 }
