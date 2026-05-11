@@ -88,6 +88,7 @@ final class DepthGate {
     private let kFaaFlowMargin:    Float = 0.25          // ≈ top 25% of session FAA distribution
     private let kFaaSustained:     Int   = 10            // 5s at 0.5s update rate
     private var consecutiveFlow:   Int   = 0
+    private var consecutiveFlowExit: Int = 0
     private(set) var inFlowState:  Bool  = false
     private var lastFlowChime:     Date  = .distantPast
     private let kFlowCooldown:     TimeInterval = 120.0
@@ -221,8 +222,9 @@ final class DepthGate {
                 consecutiveBelow = 0
                 lastExitChime    = now
                 chime.playExitDeep()
-                inFlowState     = false
-                consecutiveFlow = 0
+                inFlowState         = false
+                consecutiveFlow     = 0
+                consecutiveFlowExit = 0
             }
 
             // B94 — FAA flow state: deep + positive frontal asymmetry sustained 5s
@@ -235,10 +237,17 @@ final class DepthGate {
                 lastFlowChime = now
                 chime.playFlow()
             }
-            // Exit flow on sustained drop (hysteresis: exit at 30% of entry margin)
+            // Exit flow only after 3 consecutive samples below threshold (1.5s hysteresis).
+            // Single-sample exit would collapse genuine flow state on momentary FAA noise.
             if smoothedFaa < faaBaseline + kFaaFlowMargin * 0.3 {
-                inFlowState     = false
-                consecutiveFlow = 0
+                consecutiveFlowExit += 1
+                if consecutiveFlowExit >= 3 {
+                    inFlowState         = false
+                    consecutiveFlow     = 0
+                    consecutiveFlowExit = 0
+                }
+            } else {
+                consecutiveFlowExit = 0
             }
         }
     }
@@ -285,8 +294,9 @@ final class DepthGate {
         smoothedFaa       = 0.0
         faaBaselineLocked = false
         faaBaseline       = -0.092
-        consecutiveFlow   = 0
-        inFlowState       = false
+        consecutiveFlow     = 0
+        consecutiveFlowExit = 0
+        inFlowState         = false
         lastFlowChime     = .distantPast
         // Thresholds reconfigured adaptively on next calibrated update.
     }
