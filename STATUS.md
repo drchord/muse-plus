@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-10 (B92 — drone race fix, bowl audio fix, proximity duck, depth trace, warmup ECDF fix)
+**Last updated:** 2026-05-11 (B94 — Kalman depth filter, duckDisplay EMA, FAA flow state, iTPF adaptive binaural, quality score, early forecast banner, TrendsView)
 
 ---
 
@@ -15,6 +15,81 @@
 | **89** | ScrollView layout — band chart visible, buttons normal size | ✅ CI green (run 25615473857) | Pushed 2026-05-09 |
 | **90** | Gong floor 0.85 + drone fix attempt (engine.stop in stopAll) + chime preview 0% warning + Anchor Tone label | ✅ CI green (run 25618431186) | Pushed 2026-05-09 |
 | **92** | Bowl audio fix + drone race fix (ordering + isStopping) + proximity approach duck + depth trace chart + warmup ECDF fix + buildTag | ⏳ Pending CI | Pushed 2026-05-10 |
+| **94** | Kalman depth filter + duckDisplay EMA + FAA flow state + iTPF adaptive binaural + quality score + forecast banner + TrendsView | ⏳ Pending CI | Local — push requires explicit "go" |
+
+---
+
+## B94 Changes
+
+### Kalman depth filter (Task 2–3)
+- `KalmanDepth.swift` — new 2-state Kalman (depth + velocity), `qD=2.16e-3`, `qV=1e-4`, `rBase=0.005`, `rNeutralQuality=0.6`, innovation clamped ±0.3, depth clamped [0,1].
+- `DepthGate.smoothedDisplay` now uses Kalman output (was raw EMA). Kalman frozen during contact loss — more honest than artificial decay.
+- `duckDisplay` = separate slower EMA (α=0.095, τ≈5s) used **only** for proximity duck gain — prevents audible volume pumping. Empirical: 76% fewer approach-zone threshold crossings vs raw smoothedDisplay.
+
+### End-of-session gong fix (Task 4)
+- Root cause: `stopAll(fadeSeconds:4.0)` + immediate `playSuccess()` → full-volume overlap at t=0 → DAC clip → buzzing.
+- Fix: `stopAll(fadeSeconds:2.0)`, gong deferred 1.5s (fires when soundscape ≈25% volume). `recordEvent` called synchronously before asyncAfter (endSession() closes NDJSON file — writing after close was a race).
+
+### FAA flow state (Task 5)
+- `DepthGate.inFlowState` — true when deep AND `smoothedFaa > faaBaseline + 0.25` sustained 10 windows (5s).
+- Baseline locked at calibration end. Population median −0.092; margin 0.25 ≈ top 25% of session FAA distribution.
+- Cooldown 120s. Exit: 3 consecutive samples below `baseline + 0.075` (1.5s hysteresis prevents noise collapse).
+- `ChimeEngine.playFlow()` — 444 Hz bowl (distinct from 528 Hz enter-deep, 432 Hz gong).
+
+### iTPF adaptive binaural (Task 6)
+- `SoundscapePlayer.setAdaptiveBinauralIfActive(hz:)` — sets `customBinauralHz` from iTPF on deep state entry. Valid range 4–9 Hz; ignores if binaural inactive or change < 0.3 Hz.
+- Effect deferred to next 120s buffer loop — no restart, no audible gap.
+- Called from App.swift `wasDeep` pattern AFTER `updateAdaptiveDepth` to prevent immediate overwrite by `iTPF - 2.0` formula.
+
+### Session quality score (Task 7)
+- `SessionRecord.qualityScore: Int?` — composite 0–100: deep fraction (40pts, target 70%) + ECDF smoothness (25pts, std/0.25) + contact quality (35pts, frontalGoodFraction).
+- Computed in `endSession()` using main-phase samples only.
+- `SessionSummarySheet` shows "Session Quality" section: ring gauge (green ≥80, orange ≥60, red <60) + label + deep/contact pct.
+
+### Early session forecast banner (Task 8)
+- `SessionForecast` enum (strong/building/slow) with label, SF symbol, color.
+- 60s after first calibration: computes mean of last 60s ECDF values → strong (>0.52) / building (>0.38) / slow.
+- Banner shown at top of session HUD for 15s then auto-dismisses. Resets on session start.
+
+### TrendsView (Task 9)
+- `TrendsView.swift` — reads last 30 `session_*.json` files asynchronously from documentDirectory.
+- Swift Charts: deep fraction (area+line, green), quality score (line, blue), session duration (bar, indigo).
+- Trend arrow: compares last 7 vs prior 7 sessions (±2pp threshold).
+- "Trends" toolbar button in `SessionSummarySheet` opens TrendsView in sheet.
+
+---
+
+## B94 Validation Checklist
+
+**Audio:**
+1. End session manually → ~1.5s silence → clean gong, no buzzing
+2. End session via timer → same clean gong behavior
+3. `buildTag` in NDJSON header shows `"B94"`; `bowl_success.wav` regenerated on first launch (check logs: `BowlAudioGenerator: wrote bowl_success.wav vB94`)
+
+**Proximity duck (requires active soundscape):**
+4. Approach threshold with soundscape active → gradual smooth volume reduction, no pumping artifacts
+5. At threshold entry chime, soundscape restores to full volume
+
+**Flow state:**
+6. After sustained deep state, flow chime (444 Hz, softer/distinct from enter chime) fires when FAA shifts positive for 5s
+7. Flow chime does not fire when not in deep state
+
+**iTPF binaural:**
+8. Session with binaural active → at deep state entry, binaural frequency shifts toward iTPF value on next buffer cycle (≤120s latency)
+
+**Quality score:**
+9. After session: `SessionSummarySheet` shows "Session Quality" ring gauge with score and label
+10. Sessions without qualityScore (pre-B94 JSON) show no quality section (nil guard works)
+
+**Forecast banner:**
+11. 60s after calibration: forecast banner (strong/building/slow) appears at top of session HUD
+12. Banner disappears after 15s without user interaction
+13. No banner if session ends before 60s post-calibration
+
+**Trends:**
+14. "Trends" button in SessionSummarySheet toolbar opens TrendsView
+15. TrendsView loads last 30 sessions asynchronously (no main-thread stall)
+16. Deep fraction chart shows correct values; B94 sessions show quality score chart
 
 ---
 
@@ -129,20 +204,28 @@
 **B92+:**
 - `SoundscapePlayer.stopAll()` called BEFORE `EndGongPlayer.playSuccess()` in `endSessionGracefully` — ordering is load-bearing.
 - `SoundscapePlayer.isStopping` — blocks `resumeActiveLayers()` during session-end fade. Never remove.
-- `BowlAudioGenerator.kBowlAudioVersion = "B92"` — bump when synthesis params change to force WAV regen.
+- `BowlAudioGenerator.kBowlAudioVersion = "B94"` — bump when synthesis params change to force WAV regen.
 - `SessionRecord.enterThresholdAtSession` stored at session end — used by depth trace chart.
 - PersonalZDistribution ingests main-phase samples only — warmup excluded.
 
+**B94+:**
+- `DepthGate.smoothedDisplay` is Kalman-filtered (not EMA). `duckDisplay` (EMA α=0.095) used exclusively for proximity duck gain.
+- `DepthGate.inFlowState` — FAA flow detection, requires `inDeepState`. Reset on deep-state exit and session reset.
+- `SoundscapePlayer.setAdaptiveBinauralIfActive()` called from App.swift AFTER `updateAdaptiveDepth` — call order is load-bearing.
+- `SessionRecord.qualityScore: Int?` — populated at endSession(), nil for pre-B94 sessions.
+- `recordEvent(kind:"session-end-success")` called synchronously before asyncAfter in endSessionGracefully — NDJSON file closes synchronously; event must precede closure.
+
 ---
 
-## Pending (next build)
+## Pending (B95+)
 
-1. **EEGDenoiser live-signal wire-in** — replace raw EEG with cleaned signal in MuseClient.handleEEG. Gated by `eegDenoiseLiveSignal` UserDefault.
-2. **`playTimerEnd()` cleanup** — dead code in ChimeEngine (preview row calls EndGongPlayer.playSuccess()). Remove.
-3. **BowlAudioGenerator quality** — B92 fixes clipping; bowl sound quality after fix to be validated by user.
-4. **MainThreadStall blocking-stack** — MetricKit MXCallStackTree deferred.
-5. **fNIRS Gate 13** — HbO/HbR from Optics1-6 (backlog).
-6. **NSFileCoordinator** — add to SessionRecorder.save() + CrashRecovery writes to prevent iCloud conflict copies.
+1. **alphaPowerRatio wire-in (B95)** — `DepthResult.alphaPowerRatio` currently hardcoded 0.5. Wire actual denoiser signal quality from pipeline → DepthScore → KalmanDepth adaptive measurement noise.
+2. **Phase-continuous iTPF binaural ramp** — smooth ramp requires short-buffer scheduling (120s pre-gen deferred in B94).
+3. **EEGDenoiser live-signal wire-in** — replace raw EEG with cleaned signal in MuseClient.handleEEG. Gated by `eegDenoiseLiveSignal` UserDefault.
+4. **`playTimerEnd()` cleanup** — dead code in ChimeEngine (preview row calls EndGongPlayer.playSuccess()). Remove.
+5. **MainThreadStall blocking-stack** — MetricKit MXCallStackTree deferred.
+6. **fNIRS Gate 13** — HbO/HbR from Optics1-6 (backlog).
+7. **NSFileCoordinator** — add to SessionRecorder.save() + CrashRecovery writes to prevent iCloud conflict copies.
 
 ---
 
@@ -151,4 +234,5 @@
 1. Read STATUS.md (this file) — canonical.
 2. `gh run list --limit 5` — verify CI green.
 3. Install TestFlight build and run B92 Validation Checklist above.
-4. Hard rule: never push without explicit "go" per `MusePlus/CLAUDE.md`.
+4. Run B94 Validation Checklist above on physical device.
+5. Hard rule: never push without explicit "go" per `MusePlus/CLAUDE.md`.
