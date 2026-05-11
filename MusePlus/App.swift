@@ -768,11 +768,16 @@ final class Probe: ObservableObject {
         fireDiagnosticsSnapshot(trigger: "endSession-pre-gong")
         // Fade soundscape FIRST — stopAll sets isStopping=true so AVAudioEngineConfigurationChange
         // from gong's configureAudioSession cannot resurrect looping nodes via resumeActiveLayers.
-        SoundscapePlayer.shared.stopAll(fadeSeconds: 4.0)
-        // B83 — route to EndGongPlayer. Plays bowl_success.wav; falls back to ChimeEngine.playGong().
-        EndGongPlayer.shared.playSuccess()
-        // B83 — record the manual/timer end as event in NDJSON.
-        recordEvent(kind: "session-end-success", detail: effectiveReason)
+        // B94: shorten fade to 2s; delay gong 1.5s so it fires into near-silence (soundscape ≈25%).
+        // Root cause of buzzing: async stopAll + immediate gong → full-volume overlap → DAC clip.
+        SoundscapePlayer.shared.stopAll(fadeSeconds: 2.0)
+        let capturedReason = effectiveReason
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            // B83 — route to EndGongPlayer. Plays bowl_success.wav; falls back to ChimeEngine.playGong().
+            EndGongPlayer.shared.playSuccess()
+            // B83 — record the manual/timer end as event in NDJSON.
+            self?.recordEvent(kind: "session-end-success", detail: capturedReason)
+        }
         MainThreadStall.shared.stop()
         diagnosticsTimer?.invalidate()
         diagnosticsTimer = nil
