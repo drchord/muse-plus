@@ -12,7 +12,7 @@ import AVFoundation
 import os.log
 
 // Bump to force regeneration of cached .wav files on next launch.
-private let kBowlAudioVersion = "B92"
+private let kBowlAudioVersion = "B94"
 
 public final class BowlAudioGenerator {
 

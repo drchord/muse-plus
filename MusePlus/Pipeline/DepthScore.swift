@@ -94,7 +94,8 @@ final class DepthScore {
             }
             onResult?(DepthResult(score: 0.5, z: 0, meditationIndex: idxRaw,
                                   meditationIndexCorrected: idxCorrected,
-                                  isCalibrated: false, calibrationProgress: progress, faa: faa))
+                                  isCalibrated: false, calibrationProgress: progress,
+                                  faa: faa, alphaPowerRatio: 0.5))
             return
         }
 
@@ -111,7 +112,8 @@ final class DepthScore {
 
         onResult?(DepthResult(score: score, z: z, meditationIndex: idxRaw,
                               meditationIndexCorrected: idxCorrected,
-                              isCalibrated: true, calibrationProgress: 1.0, faa: faa))
+                              isCalibrated: true, calibrationProgress: 1.0,
+                              faa: faa, alphaPowerRatio: 0.5))
     }
 
     private func finalizeBaseline() {

@@ -126,6 +126,7 @@ struct SessionRecord: Codable, Identifiable {
     var deepFraction:      Double? = nil    // fraction [0, 1] of session time spent in deep state
     // B91 — ECDF entry threshold active for this session; nil in pre-B91 records.
     var enterThresholdAtSession: Float? = nil
+    var qualityScore: Int? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -304,7 +305,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B92"
+    static let currentBuildTag = "B94"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []

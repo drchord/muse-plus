@@ -50,7 +50,8 @@ final class Probe: ObservableObject {
     @Published var depth: DepthResult = DepthResult(score: 0.5, z: 0, meditationIndex: 0,
                                                      meditationIndexCorrected: 0,
                                                      isCalibrated: false,
-                                                     calibrationProgress: 0, faa: 0)
+                                                     calibrationProgress: 0, faa: 0,
+                                                     alphaPowerRatio: 0.5)
     // B77: subjective tap-to-mark collector. Cleared on session start.
     @Published var marks = MarkCollector()
     // B77: SDK Elements tracker for cross-validation against our pipeline.

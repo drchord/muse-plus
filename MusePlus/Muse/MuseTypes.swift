@@ -54,6 +54,7 @@ struct DepthResult {
     let isCalibrated: Bool
     let calibrationProgress: Float // 0–1 during calibration
     let faa: Float                 // Frontal Alpha Asymmetry: af8α - af7α, positive = positive affect
+    let alphaPowerRatio: Float   // denoiser signal quality [0.3,0.9]; 0.5 = unavailable/default
 }
 
 struct BandSample: Identifiable {
