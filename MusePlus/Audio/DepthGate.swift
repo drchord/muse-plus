@@ -7,7 +7,7 @@ private let kEnterSustained: Int    = 20   // 20 × 0.5 s = 10 s
 private let kExitSustained:  Int    = 20
 // Minimum gap between two enter/exit chimes (same direction).
 private let kCooldown: TimeInterval = 90   // 1.5 minutes
-// EMA alpha = 0.20 → time constant ~4 windows (~2s)
+// EMA alpha for smoothedScore (sigmoid-space legacy). smoothedDisplay now uses Kalman (B94).
 private let kEmaAlpha: Float        = 0.20
 // B94: duck gain uses separate slower smoother (tau≈5s) to prevent audible volume pumping.
 // Empirical: 76% fewer approach-zone threshold crossings vs raw smoothedDisplay.
@@ -115,6 +115,8 @@ final class DepthGate {
         guard frontalContactGood else {
             contactLossWindows += 1
             // Bad contact = unknown state. Hold 30s (60 windows × 0.5s), then slow decay.
+            // smoothedDisplay (Kalman) intentionally frozen during contact loss — last estimate
+            // is more honest than artificial decay. smoothedScore decays toward 0.5 as fallback.
             if contactLossWindows > 60 {
                 smoothedScore = 0.97 * smoothedScore + 0.03 * 0.5
             }
@@ -204,7 +206,7 @@ final class DepthGate {
         }
     }
 
-    // Silently reduce soundscape as smoothedDisplay approaches enterThresholdEcdf.
+    // Silently reduce soundscape as duckDisplay approaches enterThresholdEcdf.
     // Called after every EMA update. Must be called on main thread (same as update()).
     // Gain 1.0 at display ≤ 0.30, 0.15 at display ≥ enterThresholdEcdf.
     // While inDeepState: restores full gain (chime duck system takes over).

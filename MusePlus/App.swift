@@ -481,6 +481,7 @@ final class Probe: ObservableObject {
             // gate.smoothedDisplay is the B77 ECDF-mapped display value [0,1]:
             //   properly distributed across the user's personal history.
             //   Raw depth.score < 0.3 was nearly always false (ECDF centering fixed this).
+            // B94: smoothedDisplay is now Kalman-filtered (not EMA). Callers get smoother, faster-converging state.
             // Diagnostic log fires every time gate1 passes — reveals why beta cue wasn't firing.
             if self.depth.isCalibrated && self.betaCueEnabled {
                 let bm = self.scorer.calibrationBetaMean
