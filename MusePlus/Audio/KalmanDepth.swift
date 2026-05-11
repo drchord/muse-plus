@@ -19,10 +19,11 @@ struct KalmanDepth {
     private var Pvd: Float = 0.0
     private var Pvv: Float = 0.05
 
-    private let dt:    Float = 0.5      // update interval seconds
-    private let qD:    Float = 0.0022   // process noise: depth
-    private let qV:    Float = 0.00010  // process noise: velocity
-    private let rBase: Float = 0.005    // base measurement noise (approach-zone residual var)
+    private let dt:             Float = 0.5      // update interval seconds
+    private let qD:             Float = 0.0022   // process noise: depth
+    private let qV:             Float = 0.00010  // process noise: velocity
+    private let rBase:          Float = 0.005    // base measurement noise (approach-zone residual var)
+    private let rNeutralQuality: Float = 0.6     // reference quality level for R scaling
 
     /// Update with new ECDF observation z ∈ [0,1].
     /// alphaPowerRatio ∈ [0.3, 0.9]: higher = cleaner signal = lower effective R.
@@ -39,7 +40,7 @@ struct KalmanDepth {
 
         // Adaptive measurement noise: better signal → lower R → trust measurement more
         let quality = max(0.3, min(0.9, alphaPowerRatio))
-        let R = rBase * (0.6 / quality)   // at quality=0.6: R=rBase; at 0.9: R≈0.0033
+        let R = rBase * (rNeutralQuality / quality)   // at quality=rNeutralQuality: R=rBase
 
         // Update (H = [1, 0] — we observe depth only)
         let S     = pPdd + R
@@ -59,6 +60,8 @@ struct KalmanDepth {
 
     mutating func reset() {
         depth = 0.5; vel = 0.0
+        // Covariance reset to initial values. Note: P symmetry (Pdv==Pvd) is not enforced
+        // during filtering — expected for (I-KH)P updates with asymmetric gains. Harmless at float precision.
         Pdd = 0.10; Pdv = 0.0; Pvd = 0.0; Pvv = 0.05
     }
 }
