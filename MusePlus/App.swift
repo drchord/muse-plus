@@ -2341,6 +2341,7 @@ private struct DepthTraceChart: View {
 private struct SessionSummarySheet: View {
     let record: SessionRecord
     let onDismiss: () -> Void
+    @State private var displayScore: Int = 0
 
     var body: some View {
         NavigationStack {
@@ -2352,13 +2353,13 @@ private struct SessionSummarySheet: View {
                                 Circle()
                                     .stroke(Color.secondary.opacity(0.2), lineWidth: 8)
                                 Circle()
-                                    .trim(from: 0, to: min(1, CGFloat(score) / 100))
+                                    .trim(from: 0, to: min(1, CGFloat(displayScore) / 100))
                                     .stroke(
                                         score >= 80 ? Color.green : score >= 60 ? Color.orange : Color.red,
                                         style: StrokeStyle(lineWidth: 8, lineCap: .round)
                                     )
                                     .rotationEffect(.degrees(-90))
-                                    .animation(.easeOut(duration: 0.8), value: score)
+                                    .animation(.easeOut(duration: 0.8), value: displayScore)
                                 Text("\(score)")
                                     .font(.title2.bold())
                             }
@@ -2374,6 +2375,9 @@ private struct SessionSummarySheet: View {
                             Spacer()
                         }
                         .padding(.vertical, 4)
+                        .onAppear {
+                            displayScore = score
+                        }
                     }
                 }
 
