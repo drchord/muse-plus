@@ -90,6 +90,15 @@ final class ChimeEngine {
         scheduleDuck(over: 2.5)
     }
 
+    /// Flow state chime: 444 Hz bowl — fires when deep + positive FAA sustained 5s.
+    /// 444 Hz distinguishes from enter-deep (432 Hz), deepening (528 Hz), exit-deep (288 Hz).
+    func playFlow() {
+        reverb.wetDryMix = 22
+        scheduleBowl(fundamental: 444, decayRate: 1.5, duration: 2.3,
+                     amplitude: 0.065, attackDuration: 0.28)
+        scheduleDuck(over: 2.8)
+    }
+
     /// Conditioning anchor: 7 Hz binaural theta tone (200 Hz L / 207 Hz R).
     /// Fires 20s into sustained deep state once per episode. The brain learns to associate
     /// this tone with the deep state — Pavlovian conditioning for faster future induction.

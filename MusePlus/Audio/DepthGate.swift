@@ -80,6 +80,18 @@ final class DepthGate {
     private var deepeningRingFilled = 0
     private var lastDeepeningCue:  Date = .distantPast
 
+    // B94 — FAA flow state
+    private var smoothedFaa:       Float = 0.0
+    private let kFaaAlpha:         Float = 0.10          // tau ≈ 5s at 0.5s update rate
+    private var faaBaseline:       Float = -0.092        // population median; overwritten at calib end
+    private var faaBaselineLocked: Bool  = false
+    private let kFaaFlowMargin:    Float = 0.25          // ≈ top 25% of session FAA distribution
+    private let kFaaSustained:     Int   = 10            // 5s at 0.5s update rate
+    private var consecutiveFlow:   Int   = 0
+    private(set) var inFlowState:  Bool  = false
+    private var lastFlowChime:     Date  = .distantPast
+    private let kFlowCooldown:     TimeInterval = 120.0
+
     private let chime = ChimeEngine.shared
     private let zDist = PersonalZDistribution.shared
 
@@ -135,6 +147,13 @@ final class DepthGate {
                                               alphaPowerRatio: result.alphaPowerRatio)
         smoothedDisplay = kalmanDepth
         duckDisplay     = kDuckAlpha * displayNow + (1 - kDuckAlpha) * duckDisplay
+
+        // FAA smoothing and baseline lock at calibration end
+        smoothedFaa = kFaaAlpha * result.faa + (1 - kFaaAlpha) * smoothedFaa
+        if result.isCalibrated && !faaBaselineLocked {
+            faaBaseline       = smoothedFaa
+            faaBaselineLocked = true
+        }
 
         applyProximityDuck()
 
@@ -202,6 +221,24 @@ final class DepthGate {
                 consecutiveBelow = 0
                 lastExitChime    = now
                 chime.playExitDeep()
+                inFlowState     = false
+                consecutiveFlow = 0
+            }
+
+            // B94 — FAA flow state: deep + positive frontal asymmetry sustained 5s
+            let flowSignal = smoothedFaa > faaBaseline + kFaaFlowMargin
+            consecutiveFlow = flowSignal ? consecutiveFlow + 1 : 0
+            if consecutiveFlow >= kFaaSustained,
+               !inFlowState,
+               now.timeIntervalSince(lastFlowChime) >= kFlowCooldown {
+                inFlowState   = true
+                lastFlowChime = now
+                chime.playFlow()
+            }
+            // Exit flow on sustained drop (hysteresis: exit at 30% of entry margin)
+            if smoothedFaa < faaBaseline + kFaaFlowMargin * 0.3 {
+                inFlowState     = false
+                consecutiveFlow = 0
             }
         }
     }
@@ -245,6 +282,12 @@ final class DepthGate {
         deepeningRingHead  = 0
         deepeningRingFilled = 0
         lastDeepeningCue   = .distantPast
+        smoothedFaa       = 0.0
+        faaBaselineLocked = false
+        faaBaseline       = -0.092
+        consecutiveFlow   = 0
+        inFlowState       = false
+        lastFlowChime     = .distantPast
         // Thresholds reconfigured adaptively on next calibrated update.
     }
 }
