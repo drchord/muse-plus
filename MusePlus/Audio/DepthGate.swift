@@ -178,10 +178,6 @@ final class DepthGate {
                 deepStateEnteredAt = now
                 lastAnchorAboveTop = false
                 chime.playEnterDeep()
-                // B94: set iTPF-derived binaural frequency on entry; takes effect next buffer loop
-                if let iTPF = lastKnownITPF, iTPF > 4.0, iTPF < 9.0 {
-                    SoundscapePlayer.shared.setAdaptiveBinauralIfActive(hz: Double(iTPF))
-                }
             }
         } else {
             // Anchor re-fire on crossing into top-10% personal ECDF, with kAnchorCooldown
@@ -297,6 +293,7 @@ final class DepthGate {
         deepeningRingHead  = 0
         deepeningRingFilled = 0
         lastDeepeningCue   = .distantPast
+        lastKnownITPF      = nil
         smoothedFaa       = 0.0
         faaBaselineLocked = false
         faaBaseline       = -0.092

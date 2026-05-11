@@ -575,8 +575,13 @@ final class Probe: ObservableObject {
         scorer.onResult = { [weak self] result in
             guard let self else { return }
             self.depth = result
+            let wasDeep = self.gate.inDeepState
             self.gate.update(result)
             SoundscapePlayer.shared.updateAdaptiveDepth(result.score, iTPF: self.iTPFFrontal)
+            // B94: at deep state entry, set binaural to raw iTPF (after updateAdaptiveDepth which uses iTPF-2.0)
+            if !wasDeep && self.gate.inDeepState, let iTPF = self.gate.lastKnownITPF {
+                SoundscapePlayer.shared.setAdaptiveBinauralIfActive(hz: Double(iTPF))
+            }
             // B77: record from calibration end (no 300s delay). First 300s tagged "warmup"
             // in addSample so analysis can still filter, but data is preserved.
             if result.isCalibrated && !self.calibrationFiredRecording {
