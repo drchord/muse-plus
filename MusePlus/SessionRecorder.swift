@@ -433,6 +433,29 @@ final class SessionRecorder: ObservableObject {
             rec.summarySampleCount = rec.samples.count
             rec.deepFraction       = durSec > 0 ? rec.deepMinutes * 60.0 / durSec : 0
 
+            // B94 — quality score: deep fraction (40) + ecdf smoothness (25) + contact (35)
+            let mainSamples  = rec.samples.filter { $0.phase == "main" }
+            let ecdfVals     = mainSamples.compactMap(\.ecdfDisplay)
+            let deepFrac     = Float(rec.deepFraction ?? 0)
+
+            let deepScore: Float = min(40.0, deepFrac / 0.70 * 40.0)
+
+            let smoothScore: Float
+            if ecdfVals.count > 1 {
+                let mean     = ecdfVals.reduce(0, +) / Float(ecdfVals.count)
+                let variance = ecdfVals.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(ecdfVals.count)
+                let std      = sqrt(variance)
+                smoothScore  = max(0.0, (1.0 - std / 0.25)) * 25.0
+            } else {
+                smoothScore = 0.0
+            }
+
+            let frontalGoodFrac: Float = rec.samples.isEmpty ? 0.0 :
+                Float(rec.samples.filter { $0.frontalGood == true }.count) / Float(rec.samples.count)
+            let contactScore = frontalGoodFrac * 35.0
+
+            rec.qualityScore = Int((deepScore + smoothScore + contactScore).rounded())
+
             current       = nil
             lastDeepState = false
             sampleCount   = 0

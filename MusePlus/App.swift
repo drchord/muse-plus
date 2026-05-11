@@ -2345,6 +2345,38 @@ private struct SessionSummarySheet: View {
     var body: some View {
         NavigationStack {
             List {
+                if let score = record.qualityScore {
+                    Section("Session Quality") {
+                        HStack(spacing: 16) {
+                            ZStack {
+                                Circle()
+                                    .stroke(Color.secondary.opacity(0.2), lineWidth: 8)
+                                Circle()
+                                    .trim(from: 0, to: min(1, CGFloat(score) / 100))
+                                    .stroke(
+                                        score >= 80 ? Color.green : score >= 60 ? Color.orange : Color.red,
+                                        style: StrokeStyle(lineWidth: 8, lineCap: .round)
+                                    )
+                                    .rotationEffect(.degrees(-90))
+                                    .animation(.easeOut(duration: 0.8), value: score)
+                                Text("\(score)")
+                                    .font(.title2.bold())
+                            }
+                            .frame(width: 68, height: 68)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(score >= 80 ? "Excellent" : score >= 60 ? "Good" : "Building")
+                                    .font(.headline)
+                                Text("Deep \(Int((record.deepFraction ?? 0) * 100))%  ·  Contact \(Int(frontalGoodPct))%")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
                 Section("This Session") {
                     LabeledContent("Duration",   value: fmtMins(record.durationMinutes))
                     LabeledContent("Deep Time",  value: fmtMins(record.deepMinutes))
@@ -2464,6 +2496,12 @@ private struct SessionSummarySheet: View {
     private var lfhfMean: Float? {
         let v = record.samples.compactMap(\.lfhfRatio)
         return v.isEmpty ? nil : v.reduce(0, +) / Float(v.count)
+    }
+
+    private var frontalGoodPct: Double {
+        let total = record.samples.count
+        guard total > 0 else { return 0 }
+        return Double(record.samples.filter { $0.frontalGood == true }.count) / Double(total) * 100
     }
 
     // Downsample to ≤300 points for chart render performance.
