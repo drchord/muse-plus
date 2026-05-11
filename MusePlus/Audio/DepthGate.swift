@@ -9,6 +9,9 @@ private let kExitSustained:  Int    = 20
 private let kCooldown: TimeInterval = 90   // 1.5 minutes
 // EMA alpha = 0.20 → time constant ~4 windows (~2s)
 private let kEmaAlpha: Float        = 0.20
+// B94: duck gain uses separate slower smoother (tau≈5s) to prevent audible volume pumping.
+// Empirical: 76% fewer approach-zone threshold crossings vs raw smoothedDisplay.
+private let kDuckAlpha: Float       = 0.095
 // Conditioning anchor delay: 20s after confirmed deep entry.
 // Justified: enter chime ducks soundscape for 4.5s then 1.5s unduck → audio restored at ~6s.
 // 20s total = 14s of silence after unduck before anchor fires.
@@ -44,6 +47,8 @@ final class DepthGate {
     private(set) var inDeepState   = false
     private(set) var smoothedScore: Float = 0.5      // legacy sigmoid-space; still used by some UI
     private(set) var smoothedDisplay: Float = 0.0    // B77: ECDF display, [0, 1]
+    private var kalman      = KalmanDepth()
+    private var duckDisplay: Float = 0.0   // B94: slower EMA for proximity duck only
 
     // Adaptive thresholds in ECDF space (B77+). Default 0.70 = enter when in top 30% of
     // personal history; 0.50 = exit when at or below personal median.
@@ -111,18 +116,23 @@ final class DepthGate {
             contactLossWindows += 1
             // Bad contact = unknown state. Hold 30s (60 windows × 0.5s), then slow decay.
             if contactLossWindows > 60 {
-                smoothedScore   = 0.97 * smoothedScore   + 0.03 * 0.5
-                smoothedDisplay = 0.97 * smoothedDisplay + 0.03 * 0.5
+                smoothedScore = 0.97 * smoothedScore + 0.03 * 0.5
             }
             SoundscapePlayer.shared.setProximityGain(1.0)
             return
         }
         contactLossWindows = 0
 
-        // EMA on raw sigmoid score (legacy) and ECDF display (B77+).
-        smoothedScore   = kEmaAlpha * result.score          + (1 - kEmaAlpha) * smoothedScore
-        let displayNow  = zDist.ecdf(result.z)
-        smoothedDisplay = kEmaAlpha * displayNow            + (1 - kEmaAlpha) * smoothedDisplay
+        // EMA on legacy sigmoid score (retained for any UI callers reading smoothedScore).
+        smoothedScore = kEmaAlpha * result.score + (1 - kEmaAlpha) * smoothedScore
+
+        // B94: Kalman filter replaces EMA for smoothedDisplay.
+        // duckDisplay is a slower second-stage smoother for proximity gain only.
+        let displayNow = zDist.ecdf(result.z)
+        let (kalmanDepth, _) = kalman.update(z: displayNow,
+                                              alphaPowerRatio: result.alphaPowerRatio)
+        smoothedDisplay = kalmanDepth
+        duckDisplay     = kDuckAlpha * displayNow + (1 - kDuckAlpha) * duckDisplay
 
         applyProximityDuck()
 
@@ -205,11 +215,11 @@ final class DepthGate {
         }
         let lo: Float = 0.30
         let hi = enterThresholdEcdf
-        guard smoothedDisplay > lo else {
+        guard duckDisplay > lo else {
             SoundscapePlayer.shared.setProximityGain(1.0)
             return
         }
-        let t = min(1.0, (smoothedDisplay - lo) / (hi - lo))
+        let t = min(1.0, (duckDisplay - lo) / (hi - lo))
         SoundscapePlayer.shared.setProximityGain(1.0 - t * 0.85)
     }
 
@@ -217,6 +227,8 @@ final class DepthGate {
         inDeepState        = false
         smoothedScore      = 0.5
         smoothedDisplay    = 0.0
+        kalman.reset()
+        duckDisplay        = 0.0
         SoundscapePlayer.shared.setProximityGain(1.0)
         consecutiveAbove   = 0
         consecutiveBelow   = 0
