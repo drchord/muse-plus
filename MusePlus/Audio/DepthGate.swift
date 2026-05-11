@@ -97,6 +97,8 @@ final class DepthGate {
     private let zDist = PersonalZDistribution.shared
 
     var frontalContactGood: Bool = true
+    // Set externally from pipeline.onITPFUpdate before each update() call.
+    var lastKnownITPF: Float? = nil
 
     func setEcdfThresholds(enter: Float, exit: Float) {
         enterThresholdEcdf = max(0.50, min(0.85, enter))
@@ -176,6 +178,10 @@ final class DepthGate {
                 deepStateEnteredAt = now
                 lastAnchorAboveTop = false
                 chime.playEnterDeep()
+                // B94: set iTPF-derived binaural frequency on entry; takes effect next buffer loop
+                if let iTPF = lastKnownITPF, iTPF > 4.0, iTPF < 9.0 {
+                    SoundscapePlayer.shared.setAdaptiveBinauralIfActive(hz: Double(iTPF))
+                }
             }
         } else {
             // Anchor re-fire on crossing into top-10% personal ECDF, with kAnchorCooldown

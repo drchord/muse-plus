@@ -623,7 +623,10 @@ final class Probe: ObservableObject {
         // to drive AperiodicCorrection. Probe doesn't need to consume it directly.
 
         pipeline.onITPFUpdate = { [weak self] iTPF in
-            DispatchQueue.main.async { self?.iTPFFrontal = iTPF }
+            DispatchQueue.main.async {
+                self?.iTPFFrontal = iTPF
+                self?.gate.lastKnownITPF = iTPF
+            }
         }
 
         // HRV: feed raw Optics7/8 mean samples to HRVPipeline on SDK callback thread.

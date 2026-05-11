@@ -281,6 +281,18 @@ final class SoundscapePlayer: ObservableObject {
         customBinauralHz = newHz
     }
 
+    /// Set binaural frequency from iTPF at deep state entry.
+    /// Only fires if binaural layer is active and new Hz differs by >0.3 from current.
+    /// Effect deferred to next buffer loop (≤120s latency) — no restart, no audible gap.
+    /// Valid iTPF range: 4.0–9.0 Hz (frontal theta band).
+    func setAdaptiveBinauralIfActive(hz: Double) {
+        guard activeLayers.contains(.binaural) else { return }
+        guard hz > 4.0, hz < 9.0 else { return }
+        let current = customBinauralHz ?? binauralPreset.beatHz
+        guard abs(hz - current) > 0.3 else { return }
+        customBinauralHz = hz
+    }
+
     // MARK: - Internals
 
     private var isDucked:      Bool  = false
