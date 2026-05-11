@@ -2406,6 +2406,7 @@ private struct SessionSummarySheet: View {
     let record: SessionRecord
     let onDismiss: () -> Void
     @State private var displayScore: Int = 0
+    @State private var showTrends = false
 
     var body: some View {
         NavigationStack {
@@ -2542,6 +2543,12 @@ private struct SessionSummarySheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { onDismiss() }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Trends") { showTrends = true }
+                }
+            }
+            .sheet(isPresented: $showTrends) {
+                NavigationStack { TrendsView() }
             }
         }
     }
