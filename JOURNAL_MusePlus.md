@@ -172,3 +172,85 @@ CI: run 25607452412 FAILED on `BowlAudioGenerator.swift:99` AVAudioFormat option
 If denoiser shows benefit on tap-marks: B84 wires live-signal replacement. If not: revert filter, investigate why.
 
 **Honest residual uncertainty.** mat4LogSymm failure rate not telemetered. Bowl audio quality not ear-tested. MainThreadStall captures post-recovery stack not blocking-stack (documented). EEGDenoiser tests written by agent against pre-round-3 surface — possible mismatch CI didn't catch (only one error surfaced; tests might silently skip).
+
+---
+
+## 2026-05-11 | Sparky (laptop) | ~4h | Build 94
+
+**Focus:** Full B94 implementation — 10 tasks via subagent-driven development. Kalman depth filter, FAA flow state, iTPF adaptive binaural, quality score, forecast banner, TrendsView.
+
+**Decided:**
+
+- **KalmanDepth replaces EMA for smoothedDisplay.** 2-state (depth + velocity), qD=2.16e-3, qV=1e-4, rBase=0.005, rNeutralQuality=0.6. Innovation clamped ±0.3, depth clamped [0,1]. Kalman frozen during contact loss — more honest than artificial decay. duckDisplay gets its own slower EMA (α=0.095) for proximity duck only — prevents audible volume pumping. Empirical: 76% fewer approach-zone threshold crossings vs raw smoothedDisplay.
+
+- **End-of-session gong fix.** Root cause: stopAll(4s) + immediate playSuccess() → full-volume overlap → DAC clip → buzzing. Fix: stopAll(2s) + 1.5s deferred gong. recordEvent() moved to before the asyncAfter because endSession() closes the NDJSON file synchronously — writing after closure was a race condition bug caught in quality review.
+
+- **FAA flow state.** inDeepState AND smoothedFaa > faaBaseline+0.25 sustained 5s (10 windows). Baseline locked at calibration end (population median −0.092). Exit: 3 consecutive below baseline+0.075 (1.5s hysteresis — single-sample exit would collapse genuine flow on FAA noise). playFlow() at 444 Hz (distinct from 528 Hz enter-deep, 432 Hz gong). Cooldown 120s.
+
+- **iTPF adaptive binaural.** setAdaptiveBinauralIfActive() called from App.swift AFTER updateAdaptiveDepth — critical ordering. If called inside DepthGate.update(), updateAdaptiveDepth runs immediately after in App.swift and overwrites with iTPF-2.0 formula. Caught by quality reviewer. lastKnownITPF reset on session end.
+
+- **Quality score.** 0-100: deep fraction (40pts, target 70%) + ECDF smoothness (25pts, ecdfStd/0.25) + contact quality (35pts, frontalGoodFraction). Main-phase samples only. Ring gauge in SessionSummarySheet with @State displayScore + .onAppear animation — original code animated against a constant Int (unreliable). Caught by quality reviewer.
+
+- **Forecast banner.** 60s after calibration, mean of last 60s ECDF → strong (>0.52) / building (>0.38) / slow. 15s display. recentEcdf capped at 120 entries. calibrationCompleted flag prevents re-fire on session restart.
+
+- **TrendsView.** Last 30 session_*.json files, async load, Swift Charts. TrendRecord decodes only top-level scalars (not sample arrays) for speed. durationSec field confirmed vs SessionRecorder schema. ContentUnavailableView safe — iOS 17 target confirmed in project.yml.
+
+- **Build infrastructure.** XcodeGen (project.yml) auto-includes all .swift in MusePlus/ — no pbxproj editing ever needed. Windows can't run xcodebuild; CI (GitHub Actions on Mac runner) is the only compile gate.
+
+**Build arc:**
+| Commit | Task |
+|--------|------|
+| BuildTag B94 + alphaPowerRatio + qualityScore field | Task 1 |
+| KalmanDepth 2-state filter | Task 2 |
+| Wire Kalman + duckDisplay into DepthGate | Task 3 |
+| Delay gong 1.5s after 2s fade | Task 4 |
+| FAA flow state + playFlow() 444Hz | Task 5 |
+| iTPF binaural after updateAdaptiveDepth | Task 6 |
+| Quality score ring gauge | Task 7 |
+| Early session forecast banner | Task 8 |
+| TrendsView Swift Charts | Task 9 |
+| STATUS.md B94 update | Task 10 |
+
+**Left off at.** B94 pushed (5802706). CI pending. STATUS.md updated with B94 build table entry + 16-item validation checklist.
+
+**Next session needs.**
+1. `gh run list --limit 5` — verify CI green (should be run_number 94 or next available).
+2. Install TestFlight build on device.
+3. Run B94 Validation Checklist (STATUS.md, 16 items): gong clean (no buzz), 444Hz flow chime distinct, forecast banner appears at 60s then dismisses at 75s, TrendsView loads without stall.
+4. alphaPowerRatio currently hardcoded 0.5 — B95 scope: wire actual denoiser signal quality to KalmanDepth adaptive measurement noise.
+
+---
+
+## 2026-05-12 | Sparky (laptop) | ~3h | Build 95
+
+**Focus:** Volume bounce fix (session 2026-05-12_0337, recoveredFromCrash=true, disconnected at ~32.6 min). Crash data preservation. Pre-existing audio bug sweep.
+
+**Decided:**
+
+- **Volume bounce root cause.** `applyProximityDuck()` called `setProximityGain(1.0)` every 0.5s while `inDeepState=true`, continuously replacing deepStateGain with proximity level. Fix: `guard !inDeepState else { return }` in applyProximityDuck. Gain composition everywhere changed to `min(proximityGain, deepStateGain)` — not multiply, which caused 0.0225 at threshold crossing (0.15 × 0.15).
+
+- **deepStateGain architecture.** New `SoundscapePlayer.deepStateGain: Float` (0.15 deep, 1.0 normal). `setDeepStateGain()` fades with `deepStateGeneration` counter — re-entry mid-exit-fade cancels the rising volume immediately. Entry fires immediately (removed 1.5s asyncAfter delay that was a workaround for the now-fixed isDucked bug). Exit volume rise IS the re-entry signal: user sees volume climbing → can deepen to cancel it.
+
+- **fade() smart isDucked.** `isActuallyDucking = min(multiplier, deepStateGain) < capturedEffective - 0.02`. At exit, chime duck target (0.18) > deepStateGain floor (0.15), so `isActuallyDucking = false` → `guard` return → zero competing writes against setDeepStateGain → exit signal flows cleanly from t=0. Without this, fade() steps capped the rising volume at 0.18 for 0.35s. With it: pure unimpeded rise from 0.15 to 1.0 over 3s.
+
+- **Crash data preservation.** `attachEnterThreshold()` now writes `{_type:"threshold", enterThreshold:…}` to NDJSON at calibration confirmation. `synthesiseRecord()` parses it and computes durationSec/deepFraction/qualityScore from crash-orphan NDJSON. Previously all three were lost on crash.
+
+- **7 pre-existing audio bugs fixed (all identified by ruthless self-audit):**
+  1. `unduckTimer` was declared but never assigned — `cancel()` always a no-op. Removed.
+  2. `fade()` had no cancellation: added `fadeGeneration` counter, stale steps now auto-cancel.
+  3. `startLayer()` ignored `isDucked`: new layer during chime now starts at duck level.
+  4. `resumeActiveLayers()` called `applyProximityGain()` which is blocked by `isDucked=true` — BT reconnect mid-chime caused audible full-volume surge. Fixed: explicit duck-level restore branch.
+  5. `resetDeepStateGain()` called `applyProximityGain()` blocked by `isDucked=true` — stuck-at-duck on session reset. Fixed: now clears `isDucked`, bumps `fadeGeneration`.
+  6. `fade()` used live `cur` per step — non-linear, non-monotonic. Fixed: captured `startVols` at call time for true linear interpolation.
+  7. `deepeningRing` off-by-one: `ring[(head+1)%N]` is second-oldest, not oldest — measured 29.5s window instead of 30s. Fixed: read `ring[head]` before overwrite.
+
+- **Audit discipline.** Each implementation round followed by explicit self-audit identifying every assumption, gap, and vague claim before rewriting. This surfaced the guard/isActuallyDucking gap (submitted code ran volume steps even when isActuallyDucking=false, creating competing writes at exit) and all 7 pre-existing bugs.
+
+**Build:** B95 pushed (4b47f59). CI pending.
+
+**Left off at.** B95 pushed. STATUS.md updated with B95 section + 8-item validation checklist + B95 architecture invariants.
+
+**Next session needs.**
+1. `gh run list --limit 5` — verify B95 CI green.
+2. Run B95 Validation Checklist (STATUS.md, 8 items): volume behavior at entry/exit, re-entry mid-fade, BT reconnect, new layer during chime, crash recovery, deepening cue timing.
+3. B96 scope: alphaPowerRatio wire-in (denoiser signal quality → KalmanDepth adaptive measurement noise). Currently hardcoded 0.5.
