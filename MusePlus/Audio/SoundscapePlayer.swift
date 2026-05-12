@@ -121,8 +121,7 @@ final class SoundscapePlayer: ObservableObject {
     // Brown noise loops every 2 min — infrequent enough to be imperceptible in practice.
     private let bufferSecs: Double = 120
 
-    // Volume ducking state
-    private var unduckTimer: DispatchWorkItem?
+    // Volume ducking state — no cancel token needed; fade() is re-entrant via fadeGeneration.
 
     init() {
         // Explicit stereo format — prevents crash after BT route change
@@ -201,10 +200,12 @@ final class SoundscapePlayer: ObservableObject {
     func setVolume(_ v: Float, for layer: SoundLayer) {
         layerVolumes[layer] = v
         guard !isDucked else { return }
-        nodes[layer]?.volume = v
+        nodes[layer]?.volume = v * min(proximityGain, deepStateGain)
     }
 
     /// Fade all active layers to silence, stop them, then clear activeLayers.
+    /// Captures effective gain at call time so fade starts from current audible level,
+    /// not from full base — prevents jarring volume surge when called during deep state.
     func stopAll(fadeSeconds: Double = 2.5) {
         isStopping = true
         guard !activeLayers.isEmpty else {
@@ -216,12 +217,13 @@ final class SoundscapePlayer: ObservableObject {
         let steps = 30
         let stepTime = fadeSeconds / Double(steps)
         let layersToStop = activeLayers
+        let effectiveAtStop = min(proximityGain, deepStateGain)  // capture now, not in closure
         for step in 1...steps {
             DispatchQueue.main.asyncAfter(deadline: .now() + stepTime * Double(step)) { [weak self] in
                 guard let self else { return }
                 let t = 1.0 - Float(step) / Float(steps)
                 for layer in layersToStop {
-                    self.nodes[layer]?.volume = (self.layerVolumes[layer] ?? 0.35) * t
+                    self.nodes[layer]?.volume = (self.layerVolumes[layer] ?? 0.35) * effectiveAtStop * t
                 }
                 if step == steps {
                     for layer in layersToStop {
@@ -250,20 +252,49 @@ final class SoundscapePlayer: ObservableObject {
 
     private func applyProximityGain() {
         guard !isDucked else { return }
+        let effective = min(proximityGain, deepStateGain)
         for layer in activeLayers {
-            nodes[layer]?.volume = (layerVolumes[layer] ?? 0.35) * proximityGain
+            nodes[layer]?.volume = (layerVolumes[layer] ?? 0.35) * effective
         }
+    }
+
+    /// Lower or raise soundscape for sustained deep-state feedback.
+    /// Entry: call with 0.15 — stays down until exit.
+    /// Exit:  call with 1.0 — slow fade-up IS the exit signal.
+    /// Re-entry mid-fade cancels the fade-up immediately via generation counter.
+    func setDeepStateGain(_ target: Float, fadeDuration: Double = 2.5) {
+        let clamped = max(0.10, min(1.0, target))
+        deepStateGeneration &+= 1
+        let gen = deepStateGeneration
+        let steps = max(1, Int(fadeDuration * 30))
+        let stepTime = fadeDuration / Double(steps)
+        let start = deepStateGain
+        for step in 1...steps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + stepTime * Double(step)) { [weak self] in
+                guard let self, self.deepStateGeneration == gen else { return }
+                let t = Float(step) / Float(steps)
+                self.deepStateGain = start + t * (clamped - start)
+                if !self.isDucked { self.applyProximityGain() }
+            }
+        }
+    }
+
+    func resetDeepStateGain() {
+        deepStateGeneration &+= 1
+        fadeGeneration &+= 1       // cancel any in-flight duck steps
+        deepStateGain = 1.0
+        isDucked = false
+        currentDuckMultiplier = 1.0
+        applyProximityGain()
     }
 
     /// Duck all layers to level (0.0–1.0 of user volume) over fadeDuration seconds.
     func duck(to level: Float = 0.25, fadeDuration: Double = 0.4) {
-        unduckTimer?.cancel()
         fade(to: level, over: fadeDuration)
     }
 
     /// Restore all layers to user-set volumes over fadeDuration seconds.
     func unduck(fadeDuration: Double = 1.0) {
-        unduckTimer?.cancel()
         fade(to: 1.0, over: fadeDuration)
     }
 
@@ -295,26 +326,53 @@ final class SoundscapePlayer: ObservableObject {
 
     // MARK: - Internals
 
-    private var isDucked:      Bool  = false
-    private var isStopping:    Bool  = false   // true during stopAll fade — blocks resumeActiveLayers
-    private var proximityGain: Float = 1.0     // set by DepthGate approach duck [0.10, 1.0]
+    private var isDucked:              Bool  = false
+    private var isStopping:            Bool  = false   // blocks resumeActiveLayers during session-end fade
+    private var proximityGain:         Float = 1.0     // set by DepthGate approach duck [0.10, 1.0]
+    private var deepStateGain:         Float = 1.0     // 0.15 while in deep state, 1.0 otherwise
+    private var deepStateGeneration:   Int   = 0       // cancels stale setDeepStateGain steps
+    private var fadeGeneration:        Int   = 0       // cancels stale fade() steps on new fade
+    private var currentDuckMultiplier: Float = 1.0     // last duck target; used to match new/resumed layers
 
     private func fade(to multiplier: Float, over duration: Double) {
-        isDucked = (multiplier < 1.0)
+        // isDucked only when chime actually lowers volume below current effective level.
+        // Exit case: deepStateGain=0.15, duck target=0.18 — target > floor, isActuallyDucking
+        // = false → guard return → setDeepStateGain rises unimpeded, preserving exit signal.
+        // Unduck after entry chime: deepStateGain=0.15, target=1.0 → same guard → snaps to 0.15.
+        let capturedEffective = min(proximityGain, deepStateGain)
+        let isActuallyDucking = min(multiplier, deepStateGain) < capturedEffective - 0.02
+        isDucked = isActuallyDucking
+        guard isActuallyDucking else {
+            applyProximityGain()   // snap to current floor (clears stale duck level from entry chime)
+            return
+        }
+        currentDuckMultiplier = multiplier
+        // Capture starting volumes synchronously — true linear interpolation regardless of
+        // any concurrent applyProximityGain calls between steps.
+        let startVols: [SoundLayer: Float] = Dictionary(
+            uniqueKeysWithValues: activeLayers.compactMap { layer in
+                nodes[layer].map { (layer, $0.volume) }
+            }
+        )
+        fadeGeneration &+= 1
+        let gen = fadeGeneration
         let steps = max(1, Int(duration * 30))
         let stepTime = duration / Double(steps)
         for step in 1...steps {
             DispatchQueue.main.asyncAfter(deadline: .now() + stepTime * Double(step)) { [weak self] in
-                guard let self else { return }
+                guard let self, self.fadeGeneration == gen else { return }
                 let t = Float(step) / Float(steps)
                 for layer in self.activeLayers {
-                    let base = self.layerVolumes[layer] ?? 0.35
-                    let cur  = self.nodes[layer]?.volume ?? base
-                    let target = base * multiplier
-                    self.nodes[layer]?.volume = cur + t * (target - cur)
+                    let base     = self.layerVolumes[layer] ?? 0.35
+                    let startVol = startVols[layer] ?? base
+                    // Deep state owns the floor: chime can never push volume below deepStateGain.
+                    let stepTarget = base * min(multiplier, self.deepStateGain)
+                    self.nodes[layer]?.volume = startVol + t * (stepTarget - startVol)
                 }
                 if step == steps {
-                    self.isDucked = (multiplier < 1.0)
+                    let finalWouldBe   = min(multiplier, self.deepStateGain)
+                    let finalEffective = min(self.proximityGain, self.deepStateGain)
+                    self.isDucked = finalWouldBe < finalEffective - 0.02
                     if !self.isDucked { self.applyProximityGain() }
                 }
             }
@@ -346,7 +404,10 @@ final class SoundscapePlayer: ObservableObject {
                 self.buffers[layer] = buf
                 guard self.activeLayers.contains(layer),
                       let node = self.nodes[layer] else { return }
-                node.volume = vol
+                // Match duck level when chime active — new layer must not sound louder than peers.
+                node.volume = self.isDucked
+                    ? vol * min(self.currentDuckMultiplier, self.deepStateGain)
+                    : vol * min(self.proximityGain, self.deepStateGain)
                 self.startNode(node, buffer: buf)
             }
         }
@@ -415,6 +476,16 @@ final class SoundscapePlayer: ObservableObject {
                   !node.isPlaying else { continue }
             node.scheduleBuffer(buf, at: nil, options: .loops)
             node.play()
+        }
+        // Restore correct gain after route change. If chime is active, applyProximityGain()
+        // would return early (isDucked guard) leaving nodes at AVAudioPlayerNode default
+        // (full volume) — audible surge. Restore duck level explicitly instead.
+        if isDucked {
+            for layer in activeLayers {
+                nodes[layer]?.volume = (layerVolumes[layer] ?? 0.35) * min(currentDuckMultiplier, deepStateGain)
+            }
+        } else {
+            applyProximityGain()
         }
     }
 

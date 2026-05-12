@@ -306,7 +306,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B94"
+    static let currentBuildTag = "B95"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -922,6 +922,7 @@ final class SessionRecorder: ObservableObject {
         var footerEndDate: Date?
         var lastDeep = false
         var eventLog: [String]         = []
+        var enterThresholdFromNDJSON: Float? = nil
 
         for line in lines {
             guard let data = line.data(using: .utf8),
@@ -986,6 +987,11 @@ final class SessionRecorder: ObservableObject {
                     footerEndDate = fmt.date(from: endStr)
                 }
 
+            case "threshold":
+                if let t = obj["enterThreshold"] as? Double {
+                    enterThresholdFromNDJSON = Float(t)
+                }
+
             case "appState":
                 if let state = obj["state"] as? String,
                    let time  = obj["time"] as? String {
@@ -1010,6 +1016,32 @@ final class SessionRecorder: ObservableObject {
         // endDate: use footer value, else synthesise from last sample + 1s
         let endDate = footerEndDate ?? startDate.addingTimeInterval(lastTime + 1)
 
+        // Compute summary scalars from samples (mirrors endSession logic — ensures
+        // crash-recovered sessions have analysis-ready fields, not nil stubs).
+        // Use lastTime (last sample timestamp) not endDate — endDate for crash sessions
+        // has a fabricated +1s padding that would overstate durationSec.
+        let mainSamples    = samples.filter { $0.phase == "main" }
+        let synthDuration  = footerEndDate != nil
+            ? endDate.timeIntervalSince(startDate)
+            : lastTime   // crash session: duration = last recorded sample, no padding
+        let synthDeepFraction: Double? = mainSamples.isEmpty ? nil
+            : Double(mainSamples.filter { $0.inDeep == true }.count) / Double(mainSamples.count)
+        let synthQuality: Int? = {
+            guard !mainSamples.isEmpty else { return nil }
+            let deepFrac  = synthDeepFraction ?? 0.0
+            let ecdfVals  = mainSamples.compactMap { $0.ecdfDisplay }
+            let contactOK = Double(mainSamples.filter { $0.frontalGood == true }.count) / Double(mainSamples.count)
+            guard !ecdfVals.isEmpty else { return nil }
+            let n        = Float(ecdfVals.count)
+            let mean     = ecdfVals.reduce(Float(0), +) / n
+            let variance = ecdfVals.map { ($0 - mean) * ($0 - mean) }.reduce(Float(0), +) / n
+            let std      = variance.squareRoot()
+            let deepPts    = min(40.0, 40.0 * (deepFrac / 0.7))
+            let smoothPts  = min(25.0, 25.0 * Double(max(Float(0), 1.0 - std / 0.25)))
+            let contactPts = min(35.0, 35.0 * contactOK)
+            return Int((deepPts + smoothPts + contactPts).rounded())
+        }()
+
         return SessionRecord(
             id:        hdr.id,
             startDate: startDate,
@@ -1024,7 +1056,12 @@ final class SessionRecorder: ObservableObject {
             recoveredFromCrash: footerEndDate == nil ? true : nil,
             ndjsonStateLog: eventLog.isEmpty ? nil : eventLog,
             diagnostics: nil,
-            eventStream: nil
+            eventStream: nil,
+            durationSec:          synthDuration,
+            summarySampleCount:   samples.count,
+            deepFraction:         synthDeepFraction,
+            enterThresholdAtSession: enterThresholdFromNDJSON,
+            qualityScore:         synthQuality
         )
     }
 
@@ -1110,8 +1147,15 @@ extension SessionRecorder {
 
     func attachEnterThreshold(_ threshold: Float) {
         queue.sync {
-            guard isRecording else { return }
+            guard isRecording, let rec = current else { return }
             current?.enterThresholdAtSession = threshold
+            struct NDJSONThreshold: Codable {
+                var _type = "threshold"
+                let time: Double
+                let enterThreshold: Float
+            }
+            let t = Date().timeIntervalSince(rec.startDate)
+            appendLine(NDJSONThreshold(time: t, enterThreshold: threshold))
         }
     }
 

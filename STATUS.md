@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-11 (B94 — Kalman depth filter, duckDisplay EMA, FAA flow state, iTPF adaptive binaural, quality score, early forecast banner, TrendsView)
+**Last updated:** 2026-05-12 (B95 — deep-state volume system overhaul + crash data preservation + 7 pre-existing audio fixes)
 
 ---
 
@@ -15,7 +15,58 @@
 | **89** | ScrollView layout — band chart visible, buttons normal size | ✅ CI green (run 25615473857) | Pushed 2026-05-09 |
 | **90** | Gong floor 0.85 + drone fix attempt (engine.stop in stopAll) + chime preview 0% warning + Anchor Tone label | ✅ CI green (run 25618431186) | Pushed 2026-05-09 |
 | **92** | Bowl audio fix + drone race fix (ordering + isStopping) + proximity approach duck + depth trace chart + warmup ECDF fix + buildTag | ⏳ Pending CI | Pushed 2026-05-10 |
-| **94** | Kalman depth filter + duckDisplay EMA + FAA flow state + iTPF adaptive binaural + quality score + forecast banner + TrendsView | ⏳ Pending CI | Local — push requires explicit "go" |
+| **94** | Kalman depth filter + duckDisplay EMA + FAA flow state + iTPF adaptive binaural + quality score + forecast banner + TrendsView | ⏳ Pending CI | Pushed 2026-05-10 |
+| **95** | Deep-state volume system overhaul + crash data preservation + 7 pre-existing audio fixes | ⏳ Pending CI | Pushed 2026-05-12 |
+
+---
+
+## B95 Changes
+
+### Deep-state volume bounce fix
+- Root cause: `applyProximityDuck()` called `setProximityGain(1.0)` on every 0.5s update while `inDeepState=true` — completely replaced deep-state gain with approach-zone gain. Fixed: `guard !inDeepState else { return }` (no explicit setProximityGain).
+- `SoundscapePlayer.deepStateGain: Float` — 0.15 while in deep, 1.0 otherwise. Gain composition: `min(proximityGain, deepStateGain)` everywhere (not multiply — prevents 0.0225 compound duck).
+- `SoundscapePlayer.setDeepStateGain(_ target:, fadeDuration:)` — fades deepStateGain with `deepStateGeneration` counter to cancel stale steps on re-entry mid-fade. Entry: fade to 0.15 over 2.0s. Exit: fade to 1.0 over 3.0s (the rise IS the exit signal).
+- `SoundscapePlayer.resetDeepStateGain()` — snaps to 1.0, clears isDucked, cancels in-flight steps.
+- Entry block: removed 1.5s asyncAfter delay (was workaround for old isDucked bug); now fires immediately.
+
+### fade() smart isDucked logic (prevents exit signal suppression)
+- `isActuallyDucking = min(multiplier, deepStateGain) < capturedEffective - 0.02` — chime at exit (target 0.18 > deepStateGain 0.15) is not actually ducking; isDucked stays false, setDeepStateGain rise flows unimpeded.
+- `guard isActuallyDucking else { applyProximityGain(); return }` — skips all volume steps on non-ducking path; eliminates concurrent writes fighting setDeepStateGain during exit chime.
+- Captured `startVols` dictionary for true linear interpolation (eliminates non-monotonic path from live-`cur` formula).
+- `fadeGeneration` counter cancels stale fade steps when new fade starts.
+- `currentDuckMultiplier` tracks last duck target for new/resumed layers.
+
+### Crash data preservation
+- `SessionRecorder.attachEnterThreshold()` now writes `{_type:"threshold", time:…, enterThreshold:…}` record to NDJSON immediately — survives crash.
+- `synthesiseRecord()` parses `"threshold"` type, reconstructs `enterThresholdAtSession`.
+- Crash synthesis computes `durationSec`, `deepFraction`, `qualityScore` from available samples (uses `lastTime` not fabricated endDate for duration).
+
+### 7 pre-existing audio bugs fixed
+1. `unduckTimer` removed — was declared but never assigned; `cancel()` was always a no-op.
+2. `startLayer()`: new layer during chime now starts at duck level (`currentDuckMultiplier × deepStateGain`) not proximity level.
+3. `resumeActiveLayers()`: BT reconnect mid-chime now restores duck level explicitly (previously `applyProximityGain()` was blocked by `isDucked=true` → audible surge).
+4. `resetDeepStateGain()`: now clears `isDucked` and bumps `fadeGeneration` — prevents stuck-at-duck-level on session reset.
+5. `deepeningRing` off-by-one: was reading `ring[(head+1)%N]` (second-oldest) — measured 29.5s window instead of 30s. Now reads `ring[head]` before overwrite.
+6. `setVolume()` and `stopAll()` updated to respect `deepStateGain` in gain composition.
+7. `startVols` capture in fade() — true linear interpolation, immune to any concurrent write.
+
+---
+
+## B95 Validation Checklist
+
+**Volume system:**
+1. Enter deep state with soundscape active → volume fades smoothly to ~15% over 2s; stays down
+2. No bounce: volume does not snap back to full while in deep state
+3. Exit deep state → volume rises 0.15→1.0 over 3s (the rise itself is the exit signal)
+4. Re-enter during exit fade → volume falls back to 0.15, rise cancels
+5. BT headphones disconnect/reconnect mid-chime → volume at duck level after reconnect (no surge)
+6. New layer activated during chime → starts at same duck level as existing layers
+
+**Crash recovery:**
+7. Kill app mid-session while in deep state → on relaunch, JSON synthesised with correct `enterThresholdAtSession`, `durationSec`, `deepFraction`
+
+**Deepening cue:**
+8. Sustained 0.08+ ECDF rise over 30s in deep state triggers deepening chime (was off by one sample)
 
 ---
 
@@ -215,11 +266,21 @@
 - `SessionRecord.qualityScore: Int?` — populated at endSession(), nil for pre-B94 sessions.
 - `recordEvent(kind:"session-end-success")` called synchronously before asyncAfter in endSessionGracefully — NDJSON file closes synchronously; event must precede closure.
 
+**B95+:**
+- `SoundscapePlayer.deepStateGain` — 0.15 in deep state, 1.0 otherwise. Gain = `min(proximityGain, deepStateGain)`. Never multiply.
+- `SoundscapePlayer.setDeepStateGain()` has `deepStateGeneration` counter — re-entry mid-exit-fade cancels fade-up immediately.
+- `SoundscapePlayer.fade()` isActuallyDucking guard — returns early when chime target ≥ deepStateGain floor (exit case). Prevents exit signal suppression.
+- `SoundscapePlayer.fadeGeneration` — cancels stale fade steps on new fade call. Never remove.
+- `SoundscapePlayer.currentDuckMultiplier` — tracks duck level for new/resumed layers during active chime.
+- `DepthGate.applyProximityDuck()` guard `!inDeepState` — never writes proximityGain while in deep state. Load-bearing.
+- `SessionRecorder.attachEnterThreshold()` writes NDJSON threshold record — must be called before session end for crash recovery.
+- `deepeningRing`: read `ring[head]` BEFORE overwriting (not `ring[(head+1)%N]`). Load-bearing for correct 30s window.
+
 ---
 
-## Pending (B95+)
+## Pending (B96+)
 
-1. **alphaPowerRatio wire-in (B95)** — `DepthResult.alphaPowerRatio` currently hardcoded 0.5. Wire actual denoiser signal quality from pipeline → DepthScore → KalmanDepth adaptive measurement noise.
+1. **alphaPowerRatio wire-in (B96)** — `DepthResult.alphaPowerRatio` currently hardcoded 0.5. Wire actual denoiser signal quality from pipeline → DepthScore → KalmanDepth adaptive measurement noise.
 2. **Phase-continuous iTPF binaural ramp** — smooth ramp requires short-buffer scheduling (120s pre-gen deferred in B94).
 3. **EEGDenoiser live-signal wire-in** — replace raw EEG with cleaned signal in MuseClient.handleEEG. Gated by `eegDenoiseLiveSignal` UserDefault.
 4. **`playTimerEnd()` cleanup** — dead code in ChimeEngine (preview row calls EndGongPlayer.playSuccess()). Remove.

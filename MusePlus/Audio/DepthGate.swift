@@ -177,6 +177,8 @@ final class DepthGate {
                 lastEnterChime     = now
                 deepStateEnteredAt = now
                 lastAnchorAboveTop = false
+                SoundscapePlayer.shared.setProximityGain(1.0)
+                SoundscapePlayer.shared.setDeepStateGain(0.15, fadeDuration: 2.0)
                 chime.playEnterDeep()
             }
         } else {
@@ -197,10 +199,12 @@ final class DepthGate {
             // even when the user is already pegged in deep — addresses B76's "no
             // increment chimes" feedback. Ring buffer: write current, compute rate from
             // oldest before write, then advance head.
-            let oldestIdx = (deepeningRingHead + 1) % kDeepeningWindow
-            let oldestVal = deepeningRing[oldestIdx]
+            // Read before overwrite: ring[head] is the value from kDeepeningWindow steps ago
+            // (the slot we're about to replace). (head+1)%N was the pre-fix read target —
+            // that was the second-oldest, giving a 29.5s window instead of 30s.
+            let oldestVal = deepeningRing[deepeningRingHead]
             deepeningRing[deepeningRingHead] = smoothedDisplay
-            deepeningRingHead = oldestIdx
+            deepeningRingHead = (deepeningRingHead + 1) % kDeepeningWindow
             deepeningRingFilled = min(deepeningRingFilled + 1, kDeepeningWindow)
             if deepeningRingFilled >= kDeepeningWindow {
                 let rise = smoothedDisplay - oldestVal
@@ -223,6 +227,7 @@ final class DepthGate {
                 inDeepState      = false
                 consecutiveBelow = 0
                 lastExitChime    = now
+                SoundscapePlayer.shared.setDeepStateGain(1.0, fadeDuration: 3.0)
                 chime.playExitDeep()
                 inFlowState         = false
                 consecutiveFlow     = 0
@@ -257,12 +262,9 @@ final class DepthGate {
     // Silently reduce soundscape as duckDisplay approaches enterThresholdEcdf.
     // Called after every EMA update. Must be called on main thread (same as update()).
     // Gain 1.0 at display ≤ 0.30, 0.15 at display ≥ enterThresholdEcdf.
-    // While inDeepState: restores full gain (chime duck system takes over).
+    // While inDeepState: deepStateGain owns the level — don't touch proximityGain.
     private func applyProximityDuck() {
-        guard !inDeepState else {
-            SoundscapePlayer.shared.setProximityGain(1.0)
-            return
-        }
+        guard !inDeepState else { return }
         let lo: Float = 0.30
         let hi = enterThresholdEcdf
         guard duckDisplay > lo else {
@@ -280,6 +282,7 @@ final class DepthGate {
         kalman.reset()
         duckDisplay        = 0.0
         SoundscapePlayer.shared.setProximityGain(1.0)
+        SoundscapePlayer.shared.resetDeepStateGain()
         consecutiveAbove   = 0
         consecutiveBelow   = 0
         lastEnterChime     = .distantPast
