@@ -87,6 +87,9 @@ final class Probe: ObservableObject {
     @Published var bandUpdateCount: Int = 0
     @Published var bandHistory: [BandSample] = []
     @Published var heartRate: Double = 0
+    // B96: 5-sample rolling buffer for HR artifact rejection.
+    // Median of last 5 values; reject incoming if |value - median| > 35 BPM.
+    private var heartRateBuffer: [Float] = []
     @Published var aperiodicSlope: Float? = nil  // IRASA mean χ; nil when R² quality gate fails
     @Published var iTPFFrontal: Float?    = nil  // frontal theta peak Hz; nil until reliable
 
@@ -576,7 +579,7 @@ final class Probe: ObservableObject {
                 beta:  self.frontBeta,  delta: self.frontDelta,
                 gamma: self.frontGamma, depth: self.depth.score,
                 inDeep: self.gate.inDeepState,
-                heartRateBPM: self.heartRate > 0 ? Float(self.heartRate) : nil,
+                heartRateBPM: self.filteredHeartRate(),
                 faa: self.depth.faa,
                 aperiodicSlopeMean: self.aperiodicSlope,
                 iTPFFrontal: self.iTPFFrontal,
@@ -646,6 +649,7 @@ final class Probe: ObservableObject {
                 self.recordingStartWork?.cancel()
                 self.recordingStartedAt = Date()
                 self.marks.reset()
+                self.heartRateBuffer.removeAll()
                 ElementsTracker.shared.reset()
                 PersonalZDistribution.shared.resetSessionRing()
                 SessionRecorder.shared.startSession(
@@ -816,6 +820,19 @@ final class Probe: ObservableObject {
     // D3: Published flag observed by MeditationView to show "Session saved" toast.
     @Published var sessionSavedToast: String? = nil
 
+    /// B96: Rolling-median HR filter. Rejects values where |bpm - median5| > 35.
+    /// Physiologically impossible values (30, 192 BPM seen in session data) are sensor artifacts.
+    private func filteredHeartRate() -> Float? {
+        guard heartRate > 0 else { return nil }
+        let raw = Float(heartRate)
+        heartRateBuffer.append(raw)
+        if heartRateBuffer.count > 5 { heartRateBuffer.removeFirst() }
+        guard heartRateBuffer.count >= 3 else { return raw }   // not enough history yet
+        let sorted = heartRateBuffer.sorted()
+        let median = sorted[sorted.count / 2]
+        return abs(raw - median) <= 35 ? raw : nil
+    }
+
     // D1+D2+D3: Graceful session end — plays gong, fades soundscape, saves recording, shows toast.
     // reason: "timer-completed" | "manual" | "timer-during-reconnect"
     // Cross-agent note: Agent B may add isPausedForReconnect to Probe.
@@ -836,6 +853,10 @@ final class Probe: ObservableObject {
         // B94: shorten fade to 2s; delay gong 1.5s so it fires into near-silence (soundscape ≈25%).
         // Root cause of buzzing: async stopAll + immediate gong → full-volume overlap → DAC clip.
         SoundscapePlayer.shared.stopAll(fadeSeconds: 2.0)
+        // B96: configure AVAudioSession NOW (synchronously) so the category change fires before
+        // the soundscape fade is in progress. Previously inside asyncAfter — the category change
+        // at t=1.5s could trigger AVAudioEngineConfigurationChange mid-fade causing audio glitch.
+        EndGongPlayer.shared.prepareAudioSession()
         // B83 — record session-end event NOW (before endSession closes the NDJSON file).
         recordEvent(kind: "session-end-success", detail: effectiveReason)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -2471,7 +2492,7 @@ private struct SessionSummarySheet: View {
                     }
                     LabeledContent("Deep Episodes", value: "\(record.episodes.count)")
                 }
-                if chiMean != nil || itpfMean != nil || rmssdMean != nil {
+                if chiMean != nil || itpfMean != nil || rmssdMean != nil || record.meditationIndexCorrelation != nil {
                     Section("Biomarkers") {
                         if let chi = chiMean {
                             LabeledContent("Mean χ (1/f slope)", value: String(format: "%.2f", chi))
@@ -2482,8 +2503,25 @@ private struct SessionSummarySheet: View {
                         if let rmssd = rmssdMean {
                             LabeledContent("RMSSD", value: String(format: "%.0f ms", rmssd))
                         }
+                        if let delta = rmssdDepthDelta {
+                            let arrow = delta.high >= delta.low ? "↑" : "↓"
+                            LabeledContent("RMSSD high/low depth",
+                                           value: String(format: "%.0f / %.0f ms %@", delta.high, delta.low, arrow))
+                        }
                         if let lfhf = lfhfMean {
                             LabeledContent("LF/HF Ratio", value: String(format: "%.2f", lfhf))
+                        }
+                        if let r = record.meditationIndexCorrelation {
+                            let label: String
+                            switch r {
+                            case 0.7...: label = "strong"
+                            case 0.4..<0.7: label = "moderate"
+                            case 0..<0.4: label = "weak"
+                            default: label = "weak"
+                            }
+                            LabeledContent("MI/Depth Correlation",
+                                           value: String(format: "r = %.2f (%@)", r, label))
+                                .foregroundStyle(r >= 0.4 ? .primary : .orange)
                         }
                     }
                 }
@@ -2568,6 +2606,17 @@ private struct SessionSummarySheet: View {
         return v.isEmpty ? nil : v.reduce(0, +) / Float(v.count)
     }
 
+    // B96: RMSSD when ecdfDisplay ≥ 0.50 vs < 0.25. Non-nil only when ≥5 samples in each bucket.
+    // Positive delta (high > low) = parasympathetic activation tracks with depth signal = system working.
+    private var rmssdDepthDelta: (high: Float, low: Float)? {
+        let highSamples = record.samples.filter { ($0.ecdfDisplay ?? 0) >= 0.50 }.compactMap(\.rmssd)
+        let lowSamples  = record.samples.filter { ($0.ecdfDisplay ?? 1) <  0.25 }.compactMap(\.rmssd)
+        guard highSamples.count >= 5, lowSamples.count >= 5 else { return nil }
+        let hi = highSamples.reduce(0, +) / Float(highSamples.count)
+        let lo = lowSamples.reduce(0, +)  / Float(lowSamples.count)
+        return (hi, lo)
+    }
+
     private var lfhfMean: Float? {
         let v = record.samples.compactMap(\.lfhfRatio)
         return v.isEmpty ? nil : v.reduce(0, +) / Float(v.count)
@@ -2602,10 +2651,51 @@ private struct SessionSummarySheet: View {
             let peak = scores.max() ?? 0
             let thresh = record.enterThresholdAtSession ?? 0.55
             if peak >= thresh * 0.88 {
-                let gap = Int(((thresh - peak) * 100).rounded())
                 let peakPct = Int((peak * 100).rounded())
                 let threshPct = Int((thresh * 100).rounded())
+                var maxRun = 0; var run = 0
+                for s in scores { if s >= thresh { run += 1; maxRun = max(maxRun, run) } else { run = 0 } }
+                if peak >= thresh {
+                    // Peak exceeded threshold but sustained < 10s — gate never fired
+                    let heldSec = maxRun / 2
+                    return "Peak depth \(peakPct)% — above the \(threshPct)% threshold for \(heldSec)s (10s needed to confirm). The signal was there. Sustaining it, not chasing it, is the only remaining step."
+                }
+                // Peak below threshold — near-miss approach
+                let gap = Int(((thresh - peak) * 100).rounded())
+                if maxRun < 20 {
+                    return "Peak depth \(peakPct)% — \(gap) percentile point\(gap == 1 ? "" : "s") from \(threshPct)% threshold. Brief approach, didn't hold. The depth is present — the challenge is sustaining without monitoring."
+                }
                 return "Peak depth \(peakPct)% — \(gap) percentile point\(gap == 1 ? "" : "s") from the \(threshPct)% threshold. The approach is there. You arrived without crossing. Less monitoring of state, more surrender to the breath."
+            }
+            // B96: trajectory pattern classifier for no-deep-state sessions.
+            let durationMin = record.durationMinutes
+            if durationMin > 10 && scores.count > 20 {
+                let windowSize = max(1, scores.count / 5)   // 20% of session = one window
+                // Segment ECDF into fifths; find peak window index
+                let windowPeaks: [Float] = (0..<5).map { w in
+                    let slice = Array(scores[(w * windowSize)..<min((w+1) * windowSize, scores.count)])
+                    return slice.max() ?? 0
+                }
+                let peakWindow = windowPeaks.enumerated().max(by: { $0.element < $1.element })?.offset ?? 4
+                let mean = scores.reduce(0, +) / Float(scores.count)
+                // Two-attempt: a peak in first window AND a peak in last two windows, with valley between
+                let earlyPeak = windowPeaks[0..<2].max() ?? 0
+                let latePeak  = windowPeaks[3...4].max() ?? 0
+                let midValley = windowPeaks[2]
+                if earlyPeak >= thresh * 0.70 && latePeak >= thresh * 0.70 && midValley < earlyPeak * 0.70 {
+                    let earlyMinStr = fmtMins(Double(windowSize) / 2.0 / 120.0)
+                    let lateMinStr  = fmtMins(Double(scores.count - windowSize / 2) / 120.0)
+                    return "Two approaches — near the threshold at \(earlyMinStr) and again at \(lateMinStr), with a long middle section below. The capacity showed twice. The challenge is not depth, it is continuity."
+                }
+                // Flat-low: mean below 20% and max below threshold
+                if mean < 0.20 && peak < thresh * 0.70 {
+                    let durStr = fmtMins(durationMin)
+                    return "Mind stayed active throughout \(durStr). Try a 20-min session tomorrow — shorter duration builds the habit before the length."
+                }
+                // Late peak only
+                if peakWindow >= 3 && earlyPeak < thresh * 0.50 {
+                    return "Depth arrived late — the peak came in the final third. The settling took most of the session. This pattern often shortens with consistent practice."
+                }
             }
             return "No confirmed deep state. Soften jaw, eyes, and shoulders — the gate opens through release, not effort."
         }

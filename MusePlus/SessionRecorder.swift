@@ -128,6 +128,11 @@ struct SessionRecord: Codable, Identifiable {
     var enterThresholdAtSession: Float? = nil
     // B94 — composite quality score 0-100: deep fraction (40) + ecdf smoothness (25) + contact quality (35). Nil in pre-B94 records.
     var qualityScore: Int? = nil
+    // B96 — time-of-day bucket when session started. Enables depth stratification by time in TrendsView.
+    var timeOfDay: String? = nil  // "early-morning" (<6), "morning" (6-12), "afternoon" (12-17), "evening" (17-21), "night" (≥21)
+    // B96 — Pearson r between meditationIndexCorrected and ecdfDisplay (main phase).
+    // r < 0.3 = signals uncorrelated → possible calibration drift. Nil if < 20 paired samples.
+    var meditationIndexCorrelation: Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -306,7 +311,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B95"
+    static let currentBuildTag = "B96"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -321,6 +326,9 @@ final class SessionRecorder: ObservableObject {
     private var sampleCount    = 0          // tracks when to fsync (every 10 samples)
     private var flushTimer:    Timer?       // 60s periodic flush (A3)
     private var appStateBag:   [Any] = []   // NotificationCenter tokens (A4)
+    // B96: gong events fire 1.5s after endSession closes the NDJSON. Buffer them separately
+    // so they survive the isRecording=false guard and flush to the next session open or os_log.
+    private var pendingGongEvents: [(phase: String, source: String, detail: String?)] = []
 
     private let iso8601: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -342,6 +350,16 @@ final class SessionRecorder: ObservableObject {
             let now = Date()
             let id  = iso8601.string(from: now)
 
+            let hour = Calendar.current.component(.hour, from: now)
+            let tod: String
+            switch hour {
+            case 0..<6:   tod = "early-morning"
+            case 6..<12:  tod = "morning"
+            case 12..<17: tod = "afternoon"
+            case 17..<21: tod = "evening"
+            default:       tod = "night"
+            }
+
             current = SessionRecord(
                 id:        id,
                 startDate: now, endDate: nil,
@@ -351,8 +369,15 @@ final class SessionRecorder: ObservableObject {
                 marks: [],
                 buildTag: SessionRecorder.currentBuildTag
             )
+            current?.timeOfDay = tod
             lastDeepState = false
             sampleCount   = 0
+
+            // B96: flush any gong events buffered from the previous session's post-close window.
+            if !pendingGongEvents.isEmpty {
+                Telemetry.audio.notice("flushing \(pendingGongEvents.count, privacy: .public) pending gong events from prior session to os_log")
+                pendingGongEvents.removeAll()
+            }
 
             // Open NDJSON file handle
             openNDJSONHandle(id: id, now: now,
@@ -455,6 +480,22 @@ final class SessionRecorder: ObservableObject {
             let contactScore = frontalGoodFrac * 35.0
 
             rec.qualityScore = Int((deepScore + smoothScore + contactScore).rounded())
+
+            // B96 — meditationIndex / ecdfDisplay Pearson correlation (main phase, paired samples).
+            let paired = mainSamples.compactMap { s -> (Float, Float)? in
+                guard let mi = s.meditationIndexCorrected, let ec = s.ecdfDisplay else { return nil }
+                return (mi, ec)
+            }
+            if paired.count >= 20 {
+                let n = Float(paired.count)
+                let xMean = paired.map(\.0).reduce(0, +) / n
+                let yMean = paired.map(\.1).reduce(0, +) / n
+                let num   = paired.map { ($0.0 - xMean) * ($0.1 - yMean) }.reduce(0, +)
+                let dX    = sqrt(paired.map { ($0.0 - xMean) * ($0.0 - xMean) }.reduce(0, +))
+                let dY    = sqrt(paired.map { ($0.1 - yMean) * ($0.1 - yMean) }.reduce(0, +))
+                let denom = dX * dY
+                if denom > 1e-6 { rec.meditationIndexCorrelation = num / denom }
+            }
 
             current       = nil
             lastDeepState = false
@@ -665,11 +706,16 @@ final class SessionRecorder: ObservableObject {
     /// independent of speaker physics.
     func appendGongLifecycle(phase: String, source: String, detail: String? = nil) {
         queue.async {
-            guard self.isRecording else { return }
-            let t = self.currentSessionElapsedLocked()
-            let nd = NDJSONGongLifecycle(_type: "gongLifecycle", time: t,
-                                          phase: phase, source: source, detail: detail)
-            self.appendLine(nd)
+            if self.isRecording {
+                let t = self.currentSessionElapsedLocked()
+                let nd = NDJSONGongLifecycle(_type: "gongLifecycle", time: t,
+                                              phase: phase, source: source, detail: detail)
+                self.appendLine(nd)
+            } else {
+                // B96: NDJSON closed by endSession; buffer for os_log and next-session flush.
+                self.pendingGongEvents.append((phase: phase, source: source, detail: detail))
+                Telemetry.audio.notice("gongLifecycle(post-session) phase=\(phase, privacy: .public) source=\(source, privacy: .public)")
+            }
         }
     }
 
@@ -891,9 +937,22 @@ final class SessionRecorder: ObservableObject {
 
         do {
             let data = try jsonEnc.encode(rec)
-            // Atomic write: writes to a temp file then renames into place. Crash-safe —
-            // either the old file remains intact or the new file is fully written.
-            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            // B96: NSFileCoordinator signals iCloud daemon (ubiquityd) to pause syncing
+            // this file during the write, preventing conflict copies ("session (1).json").
+            // .forReplacing = we intend to replace any existing file atomically.
+            var writeError: Error?
+            var coordError: NSError?
+            let coord = NSFileCoordinator()
+            coord.coordinate(writingItemAt: url, options: .forReplacing, error: &coordError) { writingURL in
+                do {
+                    try data.write(to: writingURL, options: [.atomic, .completeFileProtection])
+                } catch {
+                    writeError = error
+                }
+            }
+            if let err = coordError ?? writeError {
+                throw err
+            }
             loadSavedSessions()
             Telemetry.recording.notice("saved \(data.count, privacy: .public) B to \(name, privacy: .public)")
             return url

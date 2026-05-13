@@ -3,7 +3,12 @@ import Foundation
 // MARK: - Tuning constants (file-level, never change per-instance)
 
 // Score must hold above/below threshold for this many 0.5s windows before chiming.
-private let kEnterSustained: Int    = 20   // 20 × 0.5 s = 10 s
+// B96: kEnterSustainedWindows UserDefault allows tuning 6–24 (3s–12s) without code deploy.
+// Default 20 (10s). Lower values reward shorter depth holds; useful for users rarely crossing threshold.
+private let kEnterSustained: Int    = {
+    let v = UserDefaults.standard.integer(forKey: "kEnterSustainedWindows")
+    return v >= 6 && v <= 24 ? v : 20
+}()
 private let kExitSustained:  Int    = 20
 // Minimum gap between two enter/exit chimes (same direction).
 private let kCooldown: TimeInterval = 90   // 1.5 minutes

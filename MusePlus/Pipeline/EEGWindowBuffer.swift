@@ -49,6 +49,10 @@ final class EEGWindowBuffer {
     private let denoiser = EEGDenoiser(sampleRate: 256.0)
     private let windowSize = 256                  // 1 sec @ 256 Hz
     private var buffers: [[Float]] = [[], [], [], []]
+    // B96: latest denoiser quality — read by DepthScore to wire real alphaPowerRatio into Kalman.
+    // Written on queue, read cross-thread; Float reads are atomic on ARM64, benign race acceptable
+    // given 1s update cadence and the value being a smoothed quality metric (not a control flow gate).
+    private(set) var latestAlphaPowerRatio: Float = 0.5
 
     private init() {}
 
@@ -124,6 +128,7 @@ final class EEGWindowBuffer {
 
         let result = denoiser.denoise(window: window)
         let s = result.stats
+        latestAlphaPowerRatio = s.alphaPowerRatio
 
         // B83 — direct field access; Potato + rASR fields confirmed present in struct.
         SessionRecorder.shared.appendDenoiseStats(

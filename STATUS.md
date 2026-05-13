@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-12 (B95 — deep-state volume system overhaul + crash data preservation + 7 pre-existing audio fixes)
+**Last updated:** 2026-05-13 (B96 — church bell gong, alphaPowerRatio wire-in, trajectory coaching, RMSSD/MI correlation, NSFileCoordinator, gong telemetry buffer, kEnterSustained UserDefault, HR artifact rejection)
 
 ---
 
@@ -17,6 +17,84 @@
 | **92** | Bowl audio fix + drone race fix (ordering + isStopping) + proximity approach duck + depth trace chart + warmup ECDF fix + buildTag | ⏳ Pending CI | Pushed 2026-05-10 |
 | **94** | Kalman depth filter + duckDisplay EMA + FAA flow state + iTPF adaptive binaural + quality score + forecast banner + TrendsView | ⏳ Pending CI | Pushed 2026-05-10 |
 | **95** | Deep-state volume system overhaul + crash data preservation + 7 pre-existing audio fixes | ⏳ Pending CI | Pushed 2026-05-12 |
+| **96** | Church bell gong · alphaPowerRatio live · trajectory coaching · RMSSD/MI correlation · NSFileCoordinator · gong telemetry buffer · kEnterSustained tunable · HR artifact rejection | 🔲 Awaiting push approval | Local complete |
+
+---
+
+## B96 Changes
+
+### Session-end gong overhaul
+- Root cause of buzzing: synthesized bowl_success.wav loses 432 Hz fundamental on iPhone speaker (bass rolloff) → 1190+2334 Hz partials sound metallic. Real recording eliminates synthesis entirely.
+- `bowl_success.mp3` bundled from `soundscape/universfield-single-church-bell-2-352062.mp3`.
+- `EndGongPlayer.bundleURL()` now checks `.m4a → .mp3 → .wav` in that order — real recording preferred over synthesis.
+- `EndGongPlayer.prepareAudioSession()` called synchronously before `asyncAfter` in `endSessionGracefully` — eliminates AVAudioEngineConfigurationChange mid-fade (was called at t=+1.5s inside asyncAfter).
+- `BowlAudioGenerator.kBowlAudioVersion = "B96"` — forces WAV regen if MP3 missing.
+
+### alphaPowerRatio wire-in
+- `EEGWindowBuffer.latestAlphaPowerRatio: Float` — updated after each `denoiser.denoise(window:)` call (was 0.5 hardcoded).
+- `DepthScore` uses `EEGWindowBuffer.shared.latestAlphaPowerRatio` in both `DepthResult` constructions — Kalman `rMeasure` now adapts to actual denoiser signal quality.
+- Session 2026-05-13 measured mean alphaPowerRatio 0.6503 vs hardcoded 0.5 — Kalman was under-trusting the signal.
+
+### Gong telemetry buffer (data loss fix)
+- Root cause: `appendGongLifecycle` had `guard isRecording else { return }` — NDJSON closed by `endSession()` at t=0, gong fires at t=+1.5s → gong events silently dropped.
+- Fix: `pendingGongEvents` buffer captures post-session events. Flushed to os_log at close; re-flushed into next session NDJSON at `startSession()`.
+
+### kEnterSustained UserDefault
+- `kEnterSustained` now reads `UserDefaults.standard.integer(forKey: "kEnterSustainedWindows")` at init. Valid range 6–24 (3s–12s). Default 20 (10s) if unset or out of range.
+- Session 2026-05-13: longest run above threshold was 5 windows (2.5s) — deep state unreachable at 20-window requirement. UserDefault allows tuning down to 6 without code deploy.
+
+### HR artifact rejection
+- `filteredHeartRate()` — 5-sample rolling buffer, median filter, reject if |raw - median| > 35 BPM.
+- Session 2026-05-13 artifacts: 30.2 BPM and 192 BPM (sensor dropout, not physiology). Both would now be rejected.
+- `heartRateBuffer.removeAll()` on session start — no carry-over between sessions.
+
+### Trajectory coaching (no-deep-state branch)
+- Classifies session ECDF shape: two-attempt (early + late peaks with valley), late-peak, flat-low.
+- Fixed negative-gap bug: peak at/above threshold showed "−Xs from threshold" — now shows "Xs held, 10s needed".
+- Flat-low coaching suggests calibration reconsideration for users with shallow profiles.
+
+### RMSSD/depth biomarker
+- `rmssdDepthDelta`: RMSSD at ecdfDisplay ≥ 0.50 vs < 0.25. Non-nil when ≥5 samples each bucket.
+- Shows in Biomarkers section: "RMSSD high/low depth: 42 / 38 ms ↑" — positive delta = parasympathetic activation tracks depth signal.
+
+### meditationIndex/ECDF correlation
+- Pearson r between `meditationIndexCorrected` and `ecdfDisplay` (main phase, ≥20 samples).
+- r < 0.4 = signals uncorrelated → possible calibration drift → shown in orange.
+- Displayed in Biomarkers: "MI/Depth Correlation: r = 0.62 (moderate)".
+
+### NSFileCoordinator (iCloud conflict prevention)
+- `SessionRecorder.save()` wraps `data.write()` in `NSFileCoordinator.coordinate(writingItemAt:options:.forReplacing)`.
+- `CrashRecovery` recovery write wrapped identically.
+- Signals iCloud daemon (ubiquityd) to pause syncing during write — prevents "session (1).json" conflict copies.
+
+### timeOfDay session tagging
+- `SessionRecord.timeOfDay: String?` — "early-morning" (<6), "morning" (6-12), "afternoon" (12-17), "evening" (17-21), "night" (≥21).
+- Enables depth stratification by time-of-day in future TrendsView filters.
+
+---
+
+## B96 Validation Checklist
+
+**Gong:**
+1. End session → ~1.5s fade → church bell chime (not synthesized bowl). Clean ring, no buzzing.
+2. `EndGongPlayer` logs show source "bundle" not "generated" (check Console: category "Telemetry.audio").
+3. `bowl_success.wav` regenerated with vB96 stamp (logs: "wrote bowl_success.wav vB96").
+
+**alphaPowerRatio:**
+4. Session NDJSON shows `alphaPowerRatio` values ≠ 0.5 (varies 0.3–0.9 with signal quality).
+
+**Gong telemetry:**
+5. Gong lifecycle events (prepare/play/complete) appear in os_log after session end — not silently dropped.
+
+**HR filter:**
+6. Heart rate display does not show values < 30 or > 150 BPM during normal meditation.
+
+**Correlation:**
+7. After session: Biomarkers section shows "MI/Depth Correlation: r = X.XX (weak/moderate/strong)".
+8. r < 0.4 shown in orange; r ≥ 0.4 in primary color.
+
+**NSFileCoordinator:**
+9. No "session (1).json" conflict copies after sessions where iCloud sync is active.
 
 ---
 
@@ -276,17 +354,25 @@
 - `SessionRecorder.attachEnterThreshold()` writes NDJSON threshold record — must be called before session end for crash recovery.
 - `deepeningRing`: read `ring[head]` BEFORE overwriting (not `ring[(head+1)%N]`). Load-bearing for correct 30s window.
 
+**B96+:**
+- `EndGongPlayer.bundleURL()` tries `.m4a → .mp3 → .wav` — real recording preferred over synthesis.
+- `EndGongPlayer.prepareAudioSession()` called synchronously before asyncAfter in endSessionGracefully — ordering is load-bearing. AVAudioSession must be configured before the fade completes.
+- `EEGWindowBuffer.latestAlphaPowerRatio` — updated after each denoiser.denoise(); consumed by DepthScore. Never bypass.
+- `SessionRecorder.pendingGongEvents` — post-session gong lifecycle events buffer. Flushed at next startSession(). Never remove.
+- `kEnterSustained` reads UserDefault at init (not each call) — value is constant per app launch.
+- `heartRateBuffer.removeAll()` on session start — must precede startSession() call. Prevents cross-session contamination.
+- `SessionRecorder.save()` + `CrashRecovery` write wrapped in `NSFileCoordinator.coordinate(writingItemAt:options:.forReplacing)` — prevents iCloud conflict copies.
+
 ---
 
-## Pending (B96+)
+## Pending (B97+)
 
-1. **alphaPowerRatio wire-in (B96)** — `DepthResult.alphaPowerRatio` currently hardcoded 0.5. Wire actual denoiser signal quality from pipeline → DepthScore → KalmanDepth adaptive measurement noise.
-2. **Phase-continuous iTPF binaural ramp** — smooth ramp requires short-buffer scheduling (120s pre-gen deferred in B94).
-3. **EEGDenoiser live-signal wire-in** — replace raw EEG with cleaned signal in MuseClient.handleEEG. Gated by `eegDenoiseLiveSignal` UserDefault.
-4. **`playTimerEnd()` cleanup** — dead code in ChimeEngine (preview row calls EndGongPlayer.playSuccess()). Remove.
-5. **MainThreadStall blocking-stack** — MetricKit MXCallStackTree deferred.
-6. **fNIRS Gate 13** — HbO/HbR from Optics1-6 (backlog).
-7. **NSFileCoordinator** — add to SessionRecorder.save() + CrashRecovery writes to prevent iCloud conflict copies.
+1. **Phase-continuous iTPF binaural ramp** — smooth ramp requires short-buffer scheduling (120s pre-gen deferred in B94).
+2. **EEGDenoiser live-signal wire-in** — replace raw EEG with cleaned signal in MuseClient.handleEEG. Gated by `eegDenoiseLiveSignal` UserDefault.
+3. **MainThreadStall blocking-stack** — MetricKit MXCallStackTree deferred.
+4. **fNIRS Gate 13** — HbO/HbR from Optics1-6 (backlog).
+5. **TrendsView time-of-day stratification** — filter by `timeOfDay` bucket (field now captured in B96).
+6. **meditationIndexCorrelation TrendsView chart** — per-session r values already stored, not yet charted.
 
 ---
 

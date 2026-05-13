@@ -64,7 +64,18 @@ final class CrashRecovery: ObservableObject {
                 let jsonURL = ndjsonURL.deletingPathExtension().appendingPathExtension("json")
                 do {
                     let data = try enc.encode(rec)
-                    try data.write(to: jsonURL, options: [.atomic, .completeFileProtection])
+                    // B96: NSFileCoordinator prevents iCloud conflict copies during recovery write.
+                    var writeError: Error?
+                    var coordError: NSError?
+                    let coord = NSFileCoordinator()
+                    coord.coordinate(writingItemAt: jsonURL, options: .forReplacing, error: &coordError) { writingURL in
+                        do {
+                            try data.write(to: writingURL, options: [.atomic, .completeFileProtection])
+                        } catch {
+                            writeError = error
+                        }
+                    }
+                    if let err = coordError ?? writeError { throw err }
                     recoveredCount += 1
                     if rec.startDate < oldestDate { oldestDate = rec.startDate }
                     let mins = String(format: "%.1f", rec.durationMinutes)

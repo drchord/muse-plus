@@ -196,21 +196,6 @@ final class ChimeEngine {
         }
     }
 
-    /// Timer end: three descending gong strikes.
-    /// B83: fundamental raised 84 → 432 Hz (iPhone speaker passband).
-    func playTimerEnd() {
-        Telemetry.audio.notice("ChimeEngine.playTimerEnd scheduled fundamental=432Hz")
-        reverb.wetDryMix = 35
-        scheduleGong(fundamental: 432, decayRate: 0.20, duration: 7.0, amplitude: 0.70)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            self?.scheduleGong(fundamental: 432, decayRate: 0.20, duration: 7.0, amplitude: 0.50)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
-            self?.scheduleGong(fundamental: 432, decayRate: 0.20, duration: 7.0, amplitude: 0.35)
-        }
-        scheduleDuck(over: 13.0)
-    }
-
     // MARK: - Binaural pulse (pure sine stereo — two frequencies, no partials)
 
     private func scheduleBinauralPulse(carrierHz: Double, beatHz: Double,

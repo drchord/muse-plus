@@ -57,8 +57,14 @@ public final class EndGongPlayer: NSObject, AVAudioPlayerDelegate {
 
     // MARK: - Public API
 
+    /// Pre-configure AVAudioSession before the asyncAfter delay so the category change does not
+    /// fire mid-fade. Call this synchronously at session-end before scheduling the gong delay.
+    public func prepareAudioSession() {
+        configureAudioSession()
+    }
+
     /// Play the success bowl gong.
-    /// Tries `bowl_success.m4a` (then `.wav`) from Bundle; falls back to `ChimeEngine.shared.playGong()`.
+    /// Tries `bowl_success.m4a` (then `.wav`, then `.mp3`) from Bundle; falls back to `ChimeEngine.shared.playGong()`.
     public func playSuccess() {
         play(resourceName: "bowl_success", fallback: {
             Telemetry.audio.notice("EndGongPlayer: falling back to ChimeEngine.playGong() for success")
@@ -103,9 +109,6 @@ public final class EndGongPlayer: NSObject, AVAudioPlayerDelegate {
 
         let detail = fileURL.lastPathComponent
         currentDetail = detail
-
-        // Configure AVAudioSession defensively
-        configureAudioSession()
 
         // Schedule event
         emitEvent(kind: "gongScheduled", detail: detail)
@@ -175,6 +178,9 @@ public final class EndGongPlayer: NSObject, AVAudioPlayerDelegate {
             return url
         }
         if let url = Bundle.main.url(forResource: resourceName, withExtension: "wav") {
+            return url
+        }
+        if let url = Bundle.main.url(forResource: resourceName, withExtension: "mp3") {
             return url
         }
         // B83 — Documents/Sounds fallback. BowlAudioGenerator.generateIfNeeded() writes

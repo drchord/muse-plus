@@ -92,11 +92,10 @@ final class DepthScore {
                 let frontalBeta = frontal.map(\.beta).reduce(0, +) / Float(frontal.count)
                 calibrationBetaSamplesInternal.append(frontalBeta)
             }
-            // TODO(B95): replace alphaPowerRatio: 0.5 with actual denoiser signal quality
             onResult?(DepthResult(score: 0.5, z: 0, meditationIndex: idxRaw,
                                   meditationIndexCorrected: idxCorrected,
                                   isCalibrated: false, calibrationProgress: progress,
-                                  faa: faa, alphaPowerRatio: 0.5))
+                                  faa: faa, alphaPowerRatio: EEGWindowBuffer.shared.latestAlphaPowerRatio))
             return
         }
 
@@ -111,11 +110,10 @@ final class DepthScore {
         let z = max(-3.0, min(8.0, (idx - baselineMean) / max(baselineStd, 0.01)))
         let score = sigmoid(z)  // legacy field; ECDF display uses z directly via PersonalZDistribution
 
-        // TODO(B95): replace alphaPowerRatio: 0.5 with actual denoiser signal quality
         onResult?(DepthResult(score: score, z: z, meditationIndex: idxRaw,
                               meditationIndexCorrected: idxCorrected,
                               isCalibrated: true, calibrationProgress: 1.0,
-                              faa: faa, alphaPowerRatio: 0.5))
+                              faa: faa, alphaPowerRatio: EEGWindowBuffer.shared.latestAlphaPowerRatio))
     }
 
     private func finalizeBaseline() {
