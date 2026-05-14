@@ -389,7 +389,7 @@ final class SessionRecorder: ObservableObject {
             // Must run AFTER openNDJSONHandle — appendLine() requires a live handle.
             // time = -1.0 marks these as prior-session records for offline analysis.
             if !pendingGongEvents.isEmpty {
-                Telemetry.audio.notice("flushing \(pendingGongEvents.count, privacy: .public) pending gong events from prior session")
+                Telemetry.audio.notice("flushing \(self.pendingGongEvents.count, privacy: .public) pending gong events from prior session")
                 for ev in pendingGongEvents {
                     let nd = NDJSONGongLifecycle(_type: "gongLifecycle", time: -1.0,
                                                   phase: ev.phase, source: ev.source,

@@ -2710,13 +2710,7 @@ private struct SessionSummarySheet: View {
                     LabeledContent("LF/HF Ratio", value: String(format: "%.2f", lfhf))
                 }
                 if let r = record.meditationIndexCorrelation {
-                    let label: String
-                    switch r {
-                    case 0.7...: label = "strong"
-                    case 0.4..<0.7: label = "moderate"
-                    case 0..<0.4: label = "weak"
-                    default: label = "weak"
-                    }
+                    let label = r >= 0.7 ? "strong" : r >= 0.4 ? "moderate" : "weak"
                     LabeledContent("MI/Depth Correlation",
                                    value: String(format: "r = %.2f (%@)", r, label))
                         .foregroundStyle(r >= 0.4 ? .primary : .orange)
