@@ -2467,93 +2467,15 @@ private struct SessionSummarySheet: View {
                     }
                 }
 
-                Section("This Session") {
-                    LabeledContent("Duration",   value: fmtMins(record.durationMinutes))
-                    LabeledContent("Deep Time",  value: fmtMins(record.deepMinutes))
-                    if let latency = record.episodes.first?.enterTime {
-                        let avg = UserDefaults.standard.double(forKey: "avgInductionLatency")
-                        HStack {
-                            Text("First Deep")
-                            Spacer()
-                            Text(fmtSecs(latency))
-                                .foregroundStyle(avg > 0 ? (latency < avg ? .green : .secondary) : .secondary)
-                            if avg > 0 {
-                                let pct = Int(((avg - latency) / avg * 100).rounded())
-                                if abs(pct) >= 10 {
-                                    Text(pct > 0 ? "+\(pct)%" : "\(pct)%")
-                                        .font(.caption2)
-                                        .foregroundStyle(pct > 0 ? .green : .orange)
-                                }
-                            }
-                        }
-                    }
-                    if let longest = record.episodes.compactMap(\.duration).max() {
-                        LabeledContent("Longest Deep", value: fmtMins(longest / 60))
-                    }
-                    LabeledContent("Deep Episodes", value: "\(record.episodes.count)")
-                }
-                if chiMean != nil || itpfMean != nil || rmssdMean != nil || record.meditationIndexCorrelation != nil {
-                    Section("Biomarkers") {
-                        if let chi = chiMean {
-                            LabeledContent("Mean χ (1/f slope)", value: String(format: "%.2f", chi))
-                        }
-                        if let itpf = itpfMean {
-                            LabeledContent("θ Peak (iTPF)", value: String(format: "%.1f Hz", itpf))
-                        }
-                        if let rmssd = rmssdMean {
-                            LabeledContent("RMSSD", value: String(format: "%.0f ms", rmssd))
-                        }
-                        if let delta = rmssdDepthDelta {
-                            let arrow = delta.high >= delta.low ? "↑" : "↓"
-                            LabeledContent("RMSSD high/low depth",
-                                           value: String(format: "%.0f / %.0f ms %@", delta.high, delta.low, arrow))
-                        }
-                        if let lfhf = lfhfMean {
-                            LabeledContent("LF/HF Ratio", value: String(format: "%.2f", lfhf))
-                        }
-                        if let r = record.meditationIndexCorrelation {
-                            let label: String
-                            switch r {
-                            case 0.7...: label = "strong"
-                            case 0.4..<0.7: label = "moderate"
-                            case 0..<0.4: label = "weak"
-                            default: label = "weak"
-                            }
-                            LabeledContent("MI/Depth Correlation",
-                                           value: String(format: "r = %.2f (%@)", r, label))
-                                .foregroundStyle(r >= 0.4 ? .primary : .orange)
-                        }
-                    }
-                }
+                thisSessionSection
+                biomarkersSection
                 let streak = UserDefaults.standard.integer(forKey: "meditationStreak")
                 if streak > 0 {
                     Section("Practice") {
                         LabeledContent("Streak", value: "\(streak) day\(streak == 1 ? "" : "s")")
                     }
                 }
-                // B77: subjective marks agreement. <70% triggers recalibration suggestion.
-                if let marks = record.marks, !marks.isEmpty {
-                    let scores = record.samples.compactMap(\.ecdfDisplay)
-                    let agreement = MarkAgreement.compute(marks: marks, sessionScores: scores)
-                    Section("Marks Agreement") {
-                        LabeledContent("Marks logged", value: "\(marks.count)")
-                        if agreement.deepestCount > 0 {
-                            LabeledContent("Deepest in top-25%",
-                                           value: "\(agreement.deepestInTop25)/\(agreement.deepestCount)")
-                        }
-                        if agreement.shallowestCount > 0 {
-                            LabeledContent("Shallowest in bottom-25%",
-                                           value: "\(agreement.shallowestInBottom25)/\(agreement.shallowestCount)")
-                        }
-                        let pct = Int((agreement.agreementPct * 100).rounded())
-                        LabeledContent("Agreement", value: "\(pct)%")
-                            .foregroundStyle(pct >= 70 ? .green : .orange)
-                        if pct < 70 {
-                            Text("Gauge disagrees with subjective experience on >30% of marks. Consider resetting the personal ECDF (Settings → Training) and recalibrating with a longer eyes-closed pre-meditation period.")
-                                .font(.caption).foregroundStyle(.orange)
-                        }
-                    }
-                }
+                marksAgreementSection
                 if !depthPoints.isEmpty {
                     Section {
                         DepthTraceChart(
@@ -2737,6 +2659,95 @@ private struct SessionSummarySheet: View {
         }
 
         return "Deep state confirmed. Neural encoding begins from the first episode. Consistency from here determines whether this transfers to eyes-open, unaided practice."
+    }
+
+    @ViewBuilder private var thisSessionSection: some View {
+        Section("This Session") {
+            LabeledContent("Duration",   value: fmtMins(record.durationMinutes))
+            LabeledContent("Deep Time",  value: fmtMins(record.deepMinutes))
+            if let latency = record.episodes.first?.enterTime {
+                let avg = UserDefaults.standard.double(forKey: "avgInductionLatency")
+                HStack {
+                    Text("First Deep")
+                    Spacer()
+                    Text(fmtSecs(latency))
+                        .foregroundStyle(avg > 0 ? (latency < avg ? .green : .secondary) : .secondary)
+                    if avg > 0 {
+                        let pct = Int(((avg - latency) / avg * 100).rounded())
+                        if abs(pct) >= 10 {
+                            Text(pct > 0 ? "+\(pct)%" : "\(pct)%")
+                                .font(.caption2)
+                                .foregroundStyle(pct > 0 ? .green : .orange)
+                        }
+                    }
+                }
+            }
+            if let longest = record.episodes.compactMap(\.duration).max() {
+                LabeledContent("Longest Deep", value: fmtMins(longest / 60))
+            }
+            LabeledContent("Deep Episodes", value: "\(record.episodes.count)")
+        }
+    }
+
+    @ViewBuilder private var biomarkersSection: some View {
+        if chiMean != nil || itpfMean != nil || rmssdMean != nil || record.meditationIndexCorrelation != nil {
+            Section("Biomarkers") {
+                if let chi = chiMean {
+                    LabeledContent("Mean χ (1/f slope)", value: String(format: "%.2f", chi))
+                }
+                if let itpf = itpfMean {
+                    LabeledContent("θ Peak (iTPF)", value: String(format: "%.1f Hz", itpf))
+                }
+                if let rmssd = rmssdMean {
+                    LabeledContent("RMSSD", value: String(format: "%.0f ms", rmssd))
+                }
+                if let delta = rmssdDepthDelta {
+                    let arrow = delta.high >= delta.low ? "↑" : "↓"
+                    LabeledContent("RMSSD high/low depth",
+                                   value: String(format: "%.0f / %.0f ms %@", delta.high, delta.low, arrow))
+                }
+                if let lfhf = lfhfMean {
+                    LabeledContent("LF/HF Ratio", value: String(format: "%.2f", lfhf))
+                }
+                if let r = record.meditationIndexCorrelation {
+                    let label: String
+                    switch r {
+                    case 0.7...: label = "strong"
+                    case 0.4..<0.7: label = "moderate"
+                    case 0..<0.4: label = "weak"
+                    default: label = "weak"
+                    }
+                    LabeledContent("MI/Depth Correlation",
+                                   value: String(format: "r = %.2f (%@)", r, label))
+                        .foregroundStyle(r >= 0.4 ? .primary : .orange)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var marksAgreementSection: some View {
+        if let marks = record.marks, !marks.isEmpty {
+            let scores = record.samples.compactMap(\.ecdfDisplay)
+            let agreement = MarkAgreement.compute(marks: marks, sessionScores: scores)
+            Section("Marks Agreement") {
+                LabeledContent("Marks logged", value: "\(marks.count)")
+                if agreement.deepestCount > 0 {
+                    LabeledContent("Deepest in top-25%",
+                                   value: "\(agreement.deepestInTop25)/\(agreement.deepestCount)")
+                }
+                if agreement.shallowestCount > 0 {
+                    LabeledContent("Shallowest in bottom-25%",
+                                   value: "\(agreement.shallowestInBottom25)/\(agreement.shallowestCount)")
+                }
+                let pct = Int((agreement.agreementPct * 100).rounded())
+                LabeledContent("Agreement", value: "\(pct)%")
+                    .foregroundStyle(pct >= 70 ? .green : .orange)
+                if pct < 70 {
+                    Text("Gauge disagrees with subjective experience on >30% of marks. Consider resetting the personal ECDF (Settings → Training) and recalibrating with a longer eyes-closed pre-meditation period.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+        }
     }
 
     private func fmtMins(_ m: Double) -> String {
