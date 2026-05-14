@@ -133,6 +133,9 @@ struct SessionRecord: Codable, Identifiable {
     // B96 — Pearson r between meditationIndexCorrected and ecdfDisplay (main phase).
     // r < 0.3 = signals uncorrelated → possible calibration drift. Nil if < 20 paired samples.
     var meditationIndexCorrelation: Float? = nil
+    // B97 — RMSSD delta: mean RMSSD at ecdfDisplay ≥ 0.50 minus mean at ecdfDisplay < 0.25.
+    // Positive = deeper states have higher HRV. Nil if either bucket has < 5 samples.
+    var rmssdDepthDelta: Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -168,6 +171,10 @@ private struct NDJSONFooter: Codable {
     let episodeCount: Int
     let sampleCount: Int
     let endReason: String
+    let qualityScore: Int?
+    let timeOfDay: String?
+    let rmssdDepthDelta: Float?
+    let meditationIndexCorrelation: Float?
 }
 
 private struct NDJSONAppState: Codable {
@@ -311,7 +318,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B96"
+    static let currentBuildTag = "B97"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -373,16 +380,24 @@ final class SessionRecorder: ObservableObject {
             lastDeepState = false
             sampleCount   = 0
 
-            // B96: flush any gong events buffered from the previous session's post-close window.
-            if !pendingGongEvents.isEmpty {
-                Telemetry.audio.notice("flushing \(pendingGongEvents.count, privacy: .public) pending gong events from prior session to os_log")
-                pendingGongEvents.removeAll()
-            }
-
             // Open NDJSON file handle
             openNDJSONHandle(id: id, now: now,
                              calibrationIndexMean: calibrationIndexMean,
                              calibrationIndexStd:  calibrationIndexStd)
+
+            // B97: flush gong events buffered from the previous session's post-close window.
+            // Must run AFTER openNDJSONHandle — appendLine() requires a live handle.
+            // time = -1.0 marks these as prior-session records for offline analysis.
+            if !pendingGongEvents.isEmpty {
+                Telemetry.audio.notice("flushing \(pendingGongEvents.count, privacy: .public) pending gong events from prior session")
+                for ev in pendingGongEvents {
+                    let nd = NDJSONGongLifecycle(_type: "gongLifecycle", time: -1.0,
+                                                  phase: ev.phase, source: ev.source,
+                                                  detail: ev.detail)
+                    appendLine(nd)
+                }
+                pendingGongEvents.removeAll()
+            }
 
             DispatchQueue.main.async { self.isRecording = true }
 
@@ -416,7 +431,63 @@ final class SessionRecorder: ObservableObject {
                 rec.episodes[rec.episodes.count - 1].exitTime = t
             }
 
-            // Write NDJSON footer
+            // Populate B88+ summary scalars and biomarkers BEFORE appendFooter()
+            // so the NDJSON footer captures all computed values.
+            let durSec = (rec.endDate ?? Date()).timeIntervalSince(rec.startDate)
+            rec.durationSec        = durSec
+            rec.summarySampleCount = rec.samples.count
+            rec.deepFraction       = durSec > 0 ? rec.deepMinutes * 60.0 / durSec : 0
+
+            // B94 — quality score: deep fraction (40) + ecdf smoothness (25) + contact (35).
+            // frontalGoodFrac uses mainSamples only — warmup contact noise excluded.
+            let mainSamples  = rec.samples.filter { $0.phase == "main" }
+            let ecdfVals     = mainSamples.compactMap(\.ecdfDisplay)
+            let deepFrac     = Float(rec.deepFraction ?? 0)
+
+            let deepScore: Float = min(40.0, deepFrac / 0.70 * 40.0)
+
+            let smoothScore: Float
+            if ecdfVals.count > 1 {
+                let mean     = ecdfVals.reduce(0, +) / Float(ecdfVals.count)
+                let variance = ecdfVals.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(ecdfVals.count)
+                let std      = sqrt(variance)
+                smoothScore  = max(0.0, (1.0 - std / 0.25)) * 25.0
+            } else {
+                smoothScore = 0.0
+            }
+
+            let frontalGoodFrac: Float = mainSamples.isEmpty ? 0.0 :
+                Float(mainSamples.filter { $0.frontalGood == true }.count) / Float(mainSamples.count)
+            let contactScore = frontalGoodFrac * 35.0
+
+            rec.qualityScore = Int((deepScore + smoothScore + contactScore).rounded())
+
+            // B96 — meditationIndex / ecdfDisplay Pearson correlation (main phase, paired samples).
+            let paired = mainSamples.compactMap { s -> (Float, Float)? in
+                guard let mi = s.meditationIndexCorrected, let ec = s.ecdfDisplay else { return nil }
+                return (mi, ec)
+            }
+            if paired.count >= 20 {
+                let n = Float(paired.count)
+                let xMean = paired.map(\.0).reduce(0, +) / n
+                let yMean = paired.map(\.1).reduce(0, +) / n
+                let num   = paired.map { ($0.0 - xMean) * ($0.1 - yMean) }.reduce(0, +)
+                let dX    = sqrt(paired.map { ($0.0 - xMean) * ($0.0 - xMean) }.reduce(0, +))
+                let dY    = sqrt(paired.map { ($0.1 - yMean) * ($0.1 - yMean) }.reduce(0, +))
+                let denom = dX * dY
+                if denom > 1e-6 { rec.meditationIndexCorrelation = num / denom }
+            }
+
+            // B97 — rmssdDepthDelta: RMSSD difference between high-depth (ecdf ≥ 0.50)
+            // and low-depth (ecdf < 0.25) states. Requires ≥ 5 samples in each bucket.
+            let highRMSSD = mainSamples.filter { ($0.ecdfDisplay ?? 0) >= 0.50 }.compactMap(\.rmssd)
+            let lowRMSSD  = mainSamples.filter { ($0.ecdfDisplay ?? 1) < 0.25 }.compactMap(\.rmssd)
+            if highRMSSD.count >= 5 && lowRMSSD.count >= 5 {
+                rec.rmssdDepthDelta = highRMSSD.reduce(0, +) / Float(highRMSSD.count)
+                                    - lowRMSSD.reduce(0, +)  / Float(lowRMSSD.count)
+            }
+
+            // Write NDJSON footer — all biomarkers populated above.
             appendFooter(rec: rec, reason: reason)
             closeNDJSONHandle()
 
@@ -450,51 +521,6 @@ final class SessionRecorder: ObservableObject {
                 Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) duration=\(String(format: "%.1f", times.last ?? 0), privacy: .public)s gap_mean=\(String(format: "%.3f", mean), privacy: .public)s gap_p95=\(String(format: "%.3f", p95), privacy: .public)s gap_max=\(String(format: "%.3f", maxGap), privacy: .public)s")
             } else {
                 Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) (too few to compute gaps)")
-            }
-
-            // Populate B88 summary scalars before serialisation.
-            let durSec = (rec.endDate ?? Date()).timeIntervalSince(rec.startDate)
-            rec.durationSec        = durSec
-            rec.summarySampleCount = rec.samples.count
-            rec.deepFraction       = durSec > 0 ? rec.deepMinutes * 60.0 / durSec : 0
-
-            // B94 — quality score: deep fraction (40) + ecdf smoothness (25) + contact (35)
-            let mainSamples  = rec.samples.filter { $0.phase == "main" }
-            let ecdfVals     = mainSamples.compactMap(\.ecdfDisplay)
-            let deepFrac     = Float(rec.deepFraction ?? 0)
-
-            let deepScore: Float = min(40.0, deepFrac / 0.70 * 40.0)
-
-            let smoothScore: Float
-            if ecdfVals.count > 1 {
-                let mean     = ecdfVals.reduce(0, +) / Float(ecdfVals.count)
-                let variance = ecdfVals.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(ecdfVals.count)
-                let std      = sqrt(variance)
-                smoothScore  = max(0.0, (1.0 - std / 0.25)) * 25.0
-            } else {
-                smoothScore = 0.0
-            }
-
-            let frontalGoodFrac: Float = rec.samples.isEmpty ? 0.0 :
-                Float(rec.samples.filter { $0.frontalGood == true }.count) / Float(rec.samples.count)
-            let contactScore = frontalGoodFrac * 35.0
-
-            rec.qualityScore = Int((deepScore + smoothScore + contactScore).rounded())
-
-            // B96 — meditationIndex / ecdfDisplay Pearson correlation (main phase, paired samples).
-            let paired = mainSamples.compactMap { s -> (Float, Float)? in
-                guard let mi = s.meditationIndexCorrected, let ec = s.ecdfDisplay else { return nil }
-                return (mi, ec)
-            }
-            if paired.count >= 20 {
-                let n = Float(paired.count)
-                let xMean = paired.map(\.0).reduce(0, +) / n
-                let yMean = paired.map(\.1).reduce(0, +) / n
-                let num   = paired.map { ($0.0 - xMean) * ($0.1 - yMean) }.reduce(0, +)
-                let dX    = sqrt(paired.map { ($0.0 - xMean) * ($0.0 - xMean) }.reduce(0, +))
-                let dY    = sqrt(paired.map { ($0.1 - yMean) * ($0.1 - yMean) }.reduce(0, +))
-                let denom = dX * dY
-                if denom > 1e-6 { rec.meditationIndexCorrelation = num / denom }
             }
 
             current       = nil
@@ -860,14 +886,18 @@ final class SessionRecorder: ObservableObject {
     private func appendFooter(rec: SessionRecord, reason: String) {
         let footer = NDJSONFooter(
             _type: "footer",
-            endDate: iso8601.string(from: rec.endDate ?? Date()),
+            endDate:    iso8601.string(from: rec.endDate ?? Date()),
             episodeCount: rec.episodes.count,
             sampleCount:  rec.samples.count,
-            endReason:    reason
+            endReason:    reason,
+            qualityScore: rec.qualityScore,
+            timeOfDay:    rec.timeOfDay,
+            rmssdDepthDelta: rec.rmssdDepthDelta,
+            meditationIndexCorrelation: rec.meditationIndexCorrelation
         )
         appendLine(footer)
         ndjsonHandle?.synchronizeFile()
-        Telemetry.recording.notice("NDJSON footer written: samples=\(rec.samples.count, privacy: .public) reason=\(reason, privacy: .public)")
+        Telemetry.recording.notice("NDJSON footer written: samples=\(rec.samples.count, privacy: .public) quality=\(rec.qualityScore.map(String.init) ?? "nil", privacy: .public) reason=\(reason, privacy: .public)")
     }
 
     private func closeNDJSONHandle() {
