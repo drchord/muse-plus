@@ -318,7 +318,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B97"
+    static let currentBuildTag = "B98"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -415,11 +415,12 @@ final class SessionRecorder: ObservableObject {
         }
     }
 
-    /// Synchronous save — file is on disk before this returns.
-    /// Order: stop accepting new samples → close any open episode → feed personal ECDF
-    /// → write NDJSON footer → close handle → synthesise .json → refresh saved list.
+    /// Synchronous session end. Returns the completed SessionRecord so callers can populate
+    /// the summary sheet without re-decoding from disk (which uses try? and silently discards
+    /// any decode error, producing an empty record). Returns nil only if no session was active.
+    /// The canonical .json is saved as a side effect; save failures are logged via Telemetry.
     @discardableResult
-    func endSession(reason: String = "normal") -> URL? {
+    func endSession(reason: String = "normal") -> SessionRecord? {
         queue.sync {
             guard isRecording, var rec = current else { return nil }
             // Stop accepting new samples FIRST.
@@ -527,11 +528,10 @@ final class SessionRecorder: ObservableObject {
             lastDeepState = false
             sampleCount   = 0
 
-            // Synthesise canonical .json from in-memory record (no need to re-parse NDJSON
-            // since record is complete in memory at normal end).
-            let url = save(rec)
+            // Synthesise canonical .json from in-memory record. save() logs its own failures.
+            save(rec)
 
-            return url
+            return rec
         }
     }
 
@@ -985,6 +985,20 @@ final class SessionRecorder: ObservableObject {
             }
             loadSavedSessions()
             Telemetry.recording.notice("saved \(data.count, privacy: .public) B to \(name, privacy: .public)")
+            // B98: verify round-trip decode to surface the silent JSONDecoder error that caused
+            // Duration:0s in B97 sessions. Uses already-encoded data — no disk re-read needed.
+            let verifyData = data
+            let verifyName = name
+            DispatchQueue.global(qos: .background).async {
+                let dec = JSONDecoder()
+                dec.dateDecodingStrategy = .iso8601
+                do {
+                    _ = try dec.decode(SessionRecord.self, from: verifyData)
+                    Telemetry.recording.notice("decode-verify OK: \(verifyName, privacy: .public)")
+                } catch {
+                    Telemetry.recording.error("decode-verify FAILED for \(verifyName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
             return url
         } catch {
             Telemetry.recording.error("SAVE FAILED for \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")

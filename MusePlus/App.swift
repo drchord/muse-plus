@@ -320,28 +320,18 @@ final class Probe: ObservableObject {
                         SessionRecorder.shared.attachEventStream(s.sessionEvents)
                     }
                     Telemetry.recording.error("endSession reason=disconnect")
-                    let recUrl = SessionRecorder.shared.endSession(reason: "disconnect")
+                    let completedRec = SessionRecorder.shared.endSession(reason: "disconnect")
                     self?.pipeline.endSession()
                     self?.hrv.reset()
                     self?.rmssd     = nil
                     self?.lfhfRatio = nil
-                    // Decode saved session on main thread. Typical session JSON ≤ 400 KB
-                    // (2 Hz × 3600 s × ~50 B/sample) → decode < 20 ms. Acceptable at session end.
-                    // Backgrounding would race with scheduleReconnect (fires 3 s later) which
-                    // clears sessionSummary — synchronous decode is simpler and safe here.
-                    if let url = recUrl,
-                       let data = try? Data(contentsOf: url) {
-                        let dec = JSONDecoder()
-                        dec.dateDecodingStrategy = .iso8601
-                        if let rec = try? dec.decode(SessionRecord.self, from: data) {
-                            self?.sessionSummary = rec
-                            // Successful = had deep state AND ≥5 min recorded.
-                            if !rec.episodes.isEmpty && rec.durationMinutes >= 5.0 {
-                                SoundscapePlayer.shared.decrementBinauralFade(
-                                    latencyToFirstDeep: rec.episodes.first?.enterTime)
-                            }
-                            self?.computeSessionAnalytics()
+                    if let rec = completedRec {
+                        self?.sessionSummary = rec
+                        if !rec.episodes.isEmpty && rec.durationMinutes >= 5.0 {
+                            SoundscapePlayer.shared.decrementBinauralFade(
+                                latencyToFirstDeep: rec.episodes.first?.enterTime)
                         }
+                        self?.computeSessionAnalytics()
                     }
                     self?.scheduleReconnect()
                 default: break
@@ -874,22 +864,25 @@ final class Probe: ObservableObject {
         SessionRecorder.shared.attachEventStream(sessionEvents)
         SessionRecorder.shared.attachEnterThreshold(gate.enterThresholdEcdf)
         Telemetry.recording.notice("endSession reason=\(effectiveReason, privacy: .public)")
-        let recUrl = SessionRecorder.shared.endSession(reason: effectiveReason)
+        // B98: endSession() returns the completed SessionRecord directly — eliminates the
+        // prior file-decode path (try? dec.decode silently returned nil, showing Duration:0s).
+        let completedRec = SessionRecorder.shared.endSession(reason: effectiveReason)
         pipeline.endSession()
         hrv.reset()
         rmssd     = nil
         lfhfRatio = nil
-        if let url = recUrl,
-           let data = try? Data(contentsOf: url) {
-            let dec = JSONDecoder()
-            dec.dateDecodingStrategy = .iso8601
-            if let rec = try? dec.decode(SessionRecord.self, from: data) {
-                sessionSummary = rec
-                sessionSavedToast = "Session saved"
-                return
+        if let rec = completedRec {
+            sessionSummary = rec
+            sessionSavedToast = "Session saved"
+            if !rec.episodes.isEmpty && rec.durationMinutes >= 5.0 {
+                SoundscapePlayer.shared.decrementBinauralFade(
+                    latencyToFirstDeep: rec.episodes.first?.enterTime)
             }
+            computeSessionAnalytics()
+            return
         }
-        // Recording hadn't started — show empty summary + toast
+        // No active session was recording — show empty summary.
+        Telemetry.recording.error("endSessionGracefully: endSession returned nil (no active session?)")
         let now = Date()
         sessionSummary = SessionRecord(id: UUID().uuidString, startDate: now, endDate: now,
                                        samples: [], episodes: [], fitEvents: [])
@@ -1073,23 +1066,18 @@ final class Probe: ObservableObject {
         diagnosticsTimer?.invalidate()
         diagnosticsTimer = nil
         Telemetry.recording.error("endSession reason=grace-expired")
-        let recUrl = SessionRecorder.shared.endSession(reason: "grace-expired")
+        let completedRec = SessionRecorder.shared.endSession(reason: "grace-expired")
         pipeline.endSession()
         hrv.reset()
         rmssd     = nil
         lfhfRatio = nil
-        if let url = recUrl,
-           let data = try? Data(contentsOf: url) {
-            let dec = JSONDecoder()
-            dec.dateDecodingStrategy = .iso8601
-            if let rec = try? dec.decode(SessionRecord.self, from: data) {
-                sessionSummary = rec
-                if !rec.episodes.isEmpty && rec.durationMinutes >= 5.0 {
-                    SoundscapePlayer.shared.decrementBinauralFade(
-                        latencyToFirstDeep: rec.episodes.first?.enterTime)
-                }
-                computeSessionAnalytics()
+        if let rec = completedRec {
+            sessionSummary = rec
+            if !rec.episodes.isEmpty && rec.durationMinutes >= 5.0 {
+                SoundscapePlayer.shared.decrementBinauralFade(
+                    latencyToFirstDeep: rec.episodes.first?.enterTime)
             }
+            computeSessionAnalytics()
         }
     }
 
