@@ -59,13 +59,16 @@ enum SessionForecast {
 // MARK: - Warmup FAA Readiness
 
 enum WarmupFAAReadiness {
-    case ready(faa: Float)    // ≤ -0.05: right-frontal dominant → predicts deep session (r=-0.76)
-    case neutral(faa: Float)  // (-0.05, 0.05): unsettled
-    case caution(faa: Float)  // ≥  0.05: left-frontal arousal → harder session predicted
+    case ready(faa: Float)    // ≤ -0.08: right-frontal dominant → predicts deep session (r=-0.76)
+    case neutral(faa: Float)  // (-0.08, 0.02): unsettled
+    case caution(faa: Float)  // ≥  0.02: left-frontal arousal → harder session predicted
 
     init(faa: Float) {
-        if faa <= -0.05        { self = .ready(faa: faa) }
-        else if faa < 0.05     { self = .neutral(faa: faa) }
+        // Derived from data: warmup FAA ≤-0.10 → deepFraction≥0.85 in 4/4 sessions (n=8, r=-0.76).
+        // Using -0.08 as conservative threshold to account for measurement noise at n=8.
+        // Positive FAA sessions had mean deepFraction 0.20 in observed data.
+        if faa <= -0.08        { self = .ready(faa: faa) }
+        else if faa < 0.02     { self = .neutral(faa: faa) }
         else                   { self = .caution(faa: faa) }
     }
 
@@ -588,12 +591,17 @@ final class Probe: ObservableObject {
                 } else if ph == "main" && !self.warmupTransitionFired {
                     self.warmupTransitionFired = true
                     let samples = self.warmupFAASamples
-                    if !samples.isEmpty {
+                    // ≥30 samples = ~15s of valid frontal FAA — anything less is noise
+                    if samples.count >= 30 {
                         let mean = samples.reduce(0, +) / Float(samples.count)
                         let readiness = WarmupFAAReadiness(faa: mean)
-                        Telemetry.recording.notice("warmup-FAA mean=\(mean, privacy: .public) → \(readiness.label, privacy: .public)")
+                        Telemetry.recording.notice("warmup-FAA mean=\(mean, privacy: .public) n=\(samples.count, privacy: .public) → \(readiness.label, privacy: .public)")
+                        // Dispatch to main: recordEvent is not thread-safe (appends to sessionEvents array)
                         DispatchQueue.main.async { [weak self] in
-                            withAnimation(.easeIn(duration: 0.5)) { self?.warmupFAAReadiness = readiness }
+                            guard let self else { return }
+                            self.recordEvent(kind: "warmup-faa-readiness",
+                                             detail: String(format: "%.3f_%@", mean, readiness.label))
+                            withAnimation(.easeIn(duration: 0.5)) { self.warmupFAAReadiness = readiness }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
                                 withAnimation(.easeOut(duration: 0.5)) { self?.warmupFAAReadiness = nil }
                             }
@@ -675,10 +683,13 @@ final class Probe: ObservableObject {
             let wasDeep = self.gate.inDeepState
             self.gate.update(result)
             SoundscapePlayer.shared.updateAdaptiveDepth(result.score, iTPF: self.iTPFFrontal)
-            // B99: mark first deep entry; cancel induction-stall timer (no longer needed)
+            // B100: dispatch to main — stall work item also runs on main, so this
+            // write serializes correctly and avoids a cross-thread race on hasEverEnteredDeep.
             if !wasDeep && self.gate.inDeepState {
-                self.hasEverEnteredDeep = true
-                self.inductionStallTimer?.cancel()
+                DispatchQueue.main.async { [weak self] in
+                    self?.hasEverEnteredDeep = true
+                    self?.inductionStallTimer?.cancel()
+                }
             }
             // B94: at deep state entry, set binaural to raw iTPF (after updateAdaptiveDepth which uses iTPF-2.0)
             if !wasDeep && self.gate.inDeepState, let iTPF = self.gate.lastKnownITPF {
@@ -721,17 +732,18 @@ final class Probe: ObservableObject {
                 self.hasEverEnteredDeep    = false
                 self.inductionStallTimer?.cancel()
                 let stallWork = DispatchWorkItem { [weak self] in
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self,
-                              SessionRecorder.shared.isRecording,
-                              !self.hasEverEnteredDeep else { return }
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        ChimeEngine.shared.playInductionNudge()
-                        Telemetry.recording.notice("induction-stall alert fired at 360s")
-                        withAnimation { self.showInductionStall = true }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
-                            withAnimation { self?.showInductionStall = false }
-                        }
+                    // Runs on main (via DispatchQueue.main.asyncAfter below) — no inner dispatch needed.
+                    guard let self,
+                          SessionRecorder.shared.isRecording,
+                          !self.hasEverEnteredDeep,
+                          !self.isPausedForReconnect else { return }
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    ChimeEngine.shared.playInductionNudge()
+                    self.recordEvent(kind: "induction-stall", detail: "360s-no-deep")
+                    Telemetry.recording.notice("induction-stall alert fired at 360s")
+                    withAnimation { self.showInductionStall = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                        withAnimation { self?.showInductionStall = false }
                     }
                 }
                 self.inductionStallTimer = stallWork
@@ -1063,6 +1075,7 @@ final class Probe: ObservableObject {
             dec.dateDecodingStrategy = .iso8601
             var sessionMeans: [Float]    = []
             var latencies:    [Double]   = []
+            var betaHistory:  [Double]   = []   // B100: rolling beta for trend display
 
             for url in allUrls.prefix(30) {
                 guard let data = try? Data(contentsOf: url),
@@ -1070,6 +1083,7 @@ final class Probe: ObservableObject {
                       !rec.episodes.isEmpty else { continue }
                 sessionMeans.append(rec.meanDepth)
                 if let lat = rec.episodes.first?.enterTime { latencies.append(lat) }
+                if let b = rec.mainBetaMean { betaHistory.append(Double(b)) }
             }
 
             // 1. Adaptive ECDF-space threshold. Computes 75th pct of per-session mean ECDF
@@ -1119,6 +1133,12 @@ final class Probe: ObservableObject {
                     UserDefaults.standard.set(avg, forKey: "avgInductionLatency")
                 }
                 UserDefaults.standard.set(streak, forKey: "meditationStreak")
+                // B100: store beta history for trend display in SessionSummarySheet.
+                // Stored newest-first (matching allUrls sort order). Sheet reads this,
+                // drops current session (index 0), compares current beta vs the rest.
+                if !betaHistory.isEmpty {
+                    UserDefaults.standard.set(betaHistory, forKey: "betaPowerHistory")
+                }
             }
         }
     }
@@ -2852,11 +2872,22 @@ private struct SessionSummarySheet: View {
                         .foregroundStyle(r >= 0.4 ? Color.primary : Color.orange)
                 }
                 if let beta = record.mainBetaMean {
-                    // Lower beta = less cortical arousal = better meditation (improving trend p=.03)
-                    let alpha = record.mainAlphaMean
-                    let theta = record.mainThetaMean
-                    LabeledContent("β Power (main phase)", value: String(format: "%.3f", beta))
-                    if let a = alpha, let t = theta, t > 0 {
+                    // Compare to rolling mean of last N sessions (stored by computeSessionAnalytics).
+                    // history[0] = current session; compare current vs history[1...].
+                    let history = (UserDefaults.standard.array(forKey: "betaPowerHistory") as? [Double]) ?? []
+                    let prior = Array(history.dropFirst())
+                    if prior.count >= 3 {
+                        let mean   = Float(prior.reduce(0, +) / Double(prior.count))
+                        let delta  = beta - mean
+                        let arrow  = delta < -0.005 ? "↓" : delta > 0.005 ? "↑" : "→"
+                        let color: Color = delta < -0.005 ? .green : delta > 0.005 ? .orange : .secondary
+                        LabeledContent("β Power (main)",
+                                       value: String(format: "%.3f %@ hist %.3f", beta, arrow, mean))
+                            .foregroundStyle(color)
+                    } else {
+                        LabeledContent("β Power (main)", value: String(format: "%.3f (first sessions)", beta))
+                    }
+                    if let a = record.mainAlphaMean, let t = record.mainThetaMean, t > 0 {
                         LabeledContent("α/θ Ratio", value: String(format: "%.2f", a / t))
                     }
                 }

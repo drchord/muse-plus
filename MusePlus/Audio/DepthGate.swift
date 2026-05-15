@@ -88,7 +88,7 @@ final class DepthGate {
     // B94 — FAA flow state
     private var smoothedFaa:       Float = 0.0
     private let kFaaAlpha:         Float = 0.10          // tau ≈ 5s at 0.5s update rate
-    private var faaBaseline:       Float = -0.092        // population median; overwritten at calib end
+    private(set) var faaBaseline:  Float = -0.092        // population median; overwritten at calib end
     private var faaBaselineLocked: Bool  = false
     private let kFaaFlowMargin:    Float = 0.25          // ≈ top 25% of session FAA distribution
     private let kFaaSustained:     Int   = 10            // 5s at 0.5s update rate

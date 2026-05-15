@@ -141,6 +141,8 @@ struct SessionRecord: Codable, Identifiable {
     var mainAlphaMean: Float? = nil
     var mainThetaMean: Float? = nil
     var mainBetaMean:  Float? = nil
+    // B100 — warmup-phase mean FAA. Prospective predictor (r=-0.76, n=8). Nil if <30 valid samples.
+    var warmupFAAMean: Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -180,6 +182,8 @@ private struct NDJSONFooter: Codable {
     let timeOfDay: String?
     let rmssdDepthDelta: Float?
     let meditationIndexCorrelation: Float?
+    let warmupFAAMean: Float?        // B100: warmup mean FAA; nil if <30 valid samples
+    let mainBetaMean:  Float?        // B100: main-phase mean frontal beta
 }
 
 private struct NDJSONAppState: Codable {
@@ -323,7 +327,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B99"
+    static let currentBuildTag = "B100"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -503,6 +507,14 @@ final class SessionRecorder: ObservableObject {
                 rec.mainThetaMean = mainSamples.map(\.theta).reduce(0, +) / n
                 rec.mainBetaMean  = mainSamples.map(\.beta).reduce(0, +)  / n
                 Telemetry.recording.notice("mainBeta=\(rec.mainBetaMean ?? 0, privacy: .public) mainAlpha=\(rec.mainAlphaMean ?? 0, privacy: .public) n=\(mainSamples.count, privacy: .public)")
+            }
+
+            // B100 — warmup FAA mean stored for analysis (prospective predictor r=-0.76).
+            // Requires ≥30 non-zero FAA samples (~15s of clean frontal signal).
+            let warmupFAASamples = rec.samples.filter { $0.phase == "warmup" }.compactMap(\.faa).filter { $0 != 0 }
+            if warmupFAASamples.count >= 30 {
+                rec.warmupFAAMean = warmupFAASamples.reduce(0, +) / Float(warmupFAASamples.count)
+                Telemetry.recording.notice("warmupFAAMean=\(rec.warmupFAAMean ?? 0, privacy: .public) n=\(warmupFAASamples.count, privacy: .public)")
             }
 
             // Write NDJSON footer — all biomarkers populated above.
@@ -910,7 +922,9 @@ final class SessionRecorder: ObservableObject {
             qualityScore: rec.qualityScore,
             timeOfDay:    rec.timeOfDay,
             rmssdDepthDelta: rec.rmssdDepthDelta,
-            meditationIndexCorrelation: rec.meditationIndexCorrelation
+            meditationIndexCorrelation: rec.meditationIndexCorrelation,
+            warmupFAAMean: rec.warmupFAAMean,
+            mainBetaMean:  rec.mainBetaMean
         )
         appendLine(footer)
         ndjsonHandle?.synchronizeFile()
