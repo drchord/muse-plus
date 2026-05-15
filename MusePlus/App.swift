@@ -2671,7 +2671,7 @@ private struct SessionSummarySheet: View {
                     Text("First Deep")
                     Spacer()
                     Text(fmtSecs(latency))
-                        .foregroundStyle(avg > 0 ? (latency < avg ? .green : .secondary) : .secondary)
+                        .foregroundStyle(avg > 0 ? (latency < avg ? Color.green : Color.secondary) : Color.secondary)
                     if avg > 0 {
                         let pct = Int(((avg - latency) / avg * 100).rounded())
                         if abs(pct) >= 10 {
@@ -2713,7 +2713,7 @@ private struct SessionSummarySheet: View {
                     let label = r >= 0.7 ? "strong" : r >= 0.4 ? "moderate" : "weak"
                     LabeledContent("MI/Depth Correlation",
                                    value: String(format: "r = %.2f (%@)", r, label))
-                        .foregroundStyle(r >= 0.4 ? .primary : .orange)
+                        .foregroundStyle(r >= 0.4 ? Color.primary : Color.orange)
                 }
             }
         }
