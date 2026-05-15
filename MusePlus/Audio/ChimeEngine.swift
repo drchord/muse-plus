@@ -117,6 +117,14 @@ final class ChimeEngine {
         // No duck — cue is soft enough and very brief
     }
 
+    /// Induction-stall nudge: 396 Hz gentle bowl at low amplitude — fires at 360s if user
+    /// has not entered deep state. Softer than enterDeep; cues refocus without jarring.
+    func playInductionNudge() {
+        reverb.wetDryMix = 18
+        scheduleBowl(fundamental: 396, decayRate: 2.0, duration: 2.5, amplitude: 0.06, attackDuration: 0.25)
+        scheduleDuck(over: 3.0)
+    }
+
     /// In-session guidance check-in: 396 Hz gentle bowl — soft reminder, non-disruptive.
     func playCheckIn() {
         reverb.wetDryMix = 20

@@ -56,6 +56,47 @@ enum SessionForecast {
     }
 }
 
+// MARK: - Warmup FAA Readiness
+
+enum WarmupFAAReadiness {
+    case ready(faa: Float)    // ≤ -0.05: right-frontal dominant → predicts deep session (r=-0.76)
+    case neutral(faa: Float)  // (-0.05, 0.05): unsettled
+    case caution(faa: Float)  // ≥  0.05: left-frontal arousal → harder session predicted
+
+    init(faa: Float) {
+        if faa <= -0.05        { self = .ready(faa: faa) }
+        else if faa < 0.05     { self = .neutral(faa: faa) }
+        else                   { self = .caution(faa: faa) }
+    }
+
+    var label: String {
+        switch self {
+        case .ready:   return "Brain ready"
+        case .neutral: return "Brain settling"
+        case .caution: return "High arousal — breathe slowly"
+        }
+    }
+    var iconName: String {
+        switch self {
+        case .ready:   return "brain"
+        case .neutral: return "circle.dotted"
+        case .caution: return "exclamationmark.circle"
+        }
+    }
+    var color: Color {
+        switch self {
+        case .ready:   return .green
+        case .neutral: return Color.orange.opacity(0.8)
+        case .caution: return .orange
+        }
+    }
+    var faaValue: Float {
+        switch self {
+        case .ready(let f), .neutral(let f), .caution(let f): return f
+        }
+    }
+}
+
 // MARK: - Probe
 
 final class Probe: ObservableObject {
@@ -163,6 +204,13 @@ final class Probe: ObservableObject {
     // Session summary shown after disconnect if session was recorded.
     @Published var sessionSummary: SessionRecord? = nil
     @Published var sessionForecast: SessionForecast? = nil
+    // B99: warmup FAA readiness + induction-stall alert state
+    @Published var warmupFAAReadiness: WarmupFAAReadiness? = nil
+    @Published var showInductionStall: Bool = false
+    private var warmupFAASamples:    [Float] = []
+    private var warmupTransitionFired = false
+    private var hasEverEnteredDeep    = false
+    private var inductionStallTimer:  DispatchWorkItem? = nil
     // B76 had a 300s recording delay after calibration; B77 records from calibration end and
     // tags first 300s as "warmup" instead. No data loss; analysis can still filter warmup.
     private var recordingStartWork: DispatchWorkItem?  // legacy field; kept to avoid wider refactor
@@ -532,6 +580,28 @@ final class Probe: ObservableObject {
                 guard let started = self.recordingStartedAt else { return nil }
                 return Date().timeIntervalSince(started) < 300 ? "warmup" : "main"
             }()
+            // B99: accumulate FAA during warmup; emit readiness banner at warmup→main transition
+            if let ph = phase {
+                let liveFAA = self.depth.faa
+                if ph == "warmup" && liveFAA != 0 {
+                    self.warmupFAASamples.append(liveFAA)
+                } else if ph == "main" && !self.warmupTransitionFired {
+                    self.warmupTransitionFired = true
+                    let samples = self.warmupFAASamples
+                    if !samples.isEmpty {
+                        let mean = samples.reduce(0, +) / Float(samples.count)
+                        let readiness = WarmupFAAReadiness(faa: mean)
+                        Telemetry.recording.notice("warmup-FAA mean=\(mean, privacy: .public) → \(readiness.label, privacy: .public)")
+                        DispatchQueue.main.async { [weak self] in
+                            withAnimation(.easeIn(duration: 0.5)) { self?.warmupFAAReadiness = readiness }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+                                withAnimation(.easeOut(duration: 0.5)) { self?.warmupFAAReadiness = nil }
+                            }
+                        }
+                    }
+                    self.warmupFAASamples = []
+                }
+            }
             let elem = self.elements.values
             // B83 — read from lastValidHsi (retainer) instead of hsiRaw (Combine race).
             // hsi index: [0]=TP9 [1]=AF7 [2]=AF8 [3]=TP10. Round to integer (1/2/4 tiers).
@@ -605,6 +675,11 @@ final class Probe: ObservableObject {
             let wasDeep = self.gate.inDeepState
             self.gate.update(result)
             SoundscapePlayer.shared.updateAdaptiveDepth(result.score, iTPF: self.iTPFFrontal)
+            // B99: mark first deep entry; cancel induction-stall timer (no longer needed)
+            if !wasDeep && self.gate.inDeepState {
+                self.hasEverEnteredDeep = true
+                self.inductionStallTimer?.cancel()
+            }
             // B94: at deep state entry, set binaural to raw iTPF (after updateAdaptiveDepth which uses iTPF-2.0)
             if !wasDeep && self.gate.inDeepState, let iTPF = self.gate.lastKnownITPF {
                 SoundscapePlayer.shared.setAdaptiveBinauralIfActive(hz: Double(iTPF))
@@ -640,6 +715,27 @@ final class Probe: ObservableObject {
                 self.recordingStartedAt = Date()
                 self.marks.reset()
                 self.heartRateBuffer.removeAll()
+                // B99: reset warmup FAA tracking and schedule induction-stall alert at 360s
+                self.warmupFAASamples = []
+                self.warmupTransitionFired = false
+                self.hasEverEnteredDeep    = false
+                self.inductionStallTimer?.cancel()
+                let stallWork = DispatchWorkItem { [weak self] in
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self,
+                              SessionRecorder.shared.isRecording,
+                              !self.hasEverEnteredDeep else { return }
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        ChimeEngine.shared.playInductionNudge()
+                        Telemetry.recording.notice("induction-stall alert fired at 360s")
+                        withAnimation { self.showInductionStall = true }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                            withAnimation { self?.showInductionStall = false }
+                        }
+                    }
+                }
+                self.inductionStallTimer = stallWork
+                DispatchQueue.main.asyncAfter(deadline: .now() + 360, execute: stallWork)
                 ElementsTracker.shared.reset()
                 PersonalZDistribution.shared.resetSessionRing()
                 SessionRecorder.shared.startSession(
@@ -834,6 +930,8 @@ final class Probe: ObservableObject {
         let effectiveReason = reason  // simplified until Agent B lands isPausedForReconnect
         Telemetry.recording.notice("endSessionGracefully reason=\(effectiveReason, privacy: .public)")
         SessionTimer.shared.cancel()
+        inductionStallTimer?.cancel()   // B99: kill stall alert if session ends before 360s
+        inductionStallTimer = nil
         // B83 — capture audio state at gong time. The MOST important snapshot for
         // debugging audibility; without this we can't tell whether the speaker had
         // output enabled when the gong fired.
@@ -1539,6 +1637,20 @@ private struct MeditationView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .overlay(alignment: .top) {
+            if let readiness = probe.warmupFAAReadiness {
+                WarmupFAABannerView(readiness: readiness)
+                    .padding(.top, 60)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .top) {
+            if probe.showInductionStall {
+                InductionStallBannerView()
+                    .padding(.top, 60)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
         // D3: "Session saved" toast — driven by probe.sessionSavedToast (set in endSessionGracefully).
         .toast(message: $toastMessage)
         .onChange(of: probe.sessionSavedToast) { _, newVal in
@@ -1547,6 +1659,42 @@ private struct MeditationView: View {
                 probe.sessionSavedToast = nil  // reset so next save can fire again
             }
         }
+    }
+}
+
+// MARK: - Warmup FAA Banner
+
+private struct WarmupFAABannerView: View {
+    let readiness: WarmupFAAReadiness
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: readiness.iconName)
+            Text(readiness.label)
+            Text(String(format: "FAA %.2f", readiness.faaValue))
+                .font(.caption2)
+                .opacity(0.7)
+        }
+        .font(.subheadline.weight(.medium))
+        .foregroundStyle(readiness.color)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+    }
+}
+
+// MARK: - Induction Stall Banner
+
+private struct InductionStallBannerView: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle")
+            Text("Soften your focus")
+        }
+        .font(.subheadline.weight(.medium))
+        .foregroundStyle(.white.opacity(0.85))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
     }
 }
 
@@ -2678,7 +2826,7 @@ private struct SessionSummarySheet: View {
     }
 
     @ViewBuilder private var biomarkersSection: some View {
-        if chiMean != nil || itpfMean != nil || rmssdMean != nil || record.meditationIndexCorrelation != nil {
+        if chiMean != nil || itpfMean != nil || rmssdMean != nil || record.meditationIndexCorrelation != nil || record.mainBetaMean != nil {
             Section("Biomarkers") {
                 if let chi = chiMean {
                     LabeledContent("Mean χ (1/f slope)", value: String(format: "%.2f", chi))
@@ -2702,6 +2850,15 @@ private struct SessionSummarySheet: View {
                     LabeledContent("MI/Depth Correlation",
                                    value: String(format: "r = %.2f (%@)", r, label))
                         .foregroundStyle(r >= 0.4 ? Color.primary : Color.orange)
+                }
+                if let beta = record.mainBetaMean {
+                    // Lower beta = less cortical arousal = better meditation (improving trend p=.03)
+                    let alpha = record.mainAlphaMean
+                    let theta = record.mainThetaMean
+                    LabeledContent("β Power (main phase)", value: String(format: "%.3f", beta))
+                    if let a = alpha, let t = theta, t > 0 {
+                        LabeledContent("α/θ Ratio", value: String(format: "%.2f", a / t))
+                    }
                 }
             }
         }

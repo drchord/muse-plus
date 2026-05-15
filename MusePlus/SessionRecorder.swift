@@ -136,6 +136,11 @@ struct SessionRecord: Codable, Identifiable {
     // B97 — RMSSD delta: mean RMSSD at ecdfDisplay ≥ 0.50 minus mean at ecdfDisplay < 0.25.
     // Positive = deeper states have higher HRV. Nil if either bucket has < 5 samples.
     var rmssdDepthDelta: Float? = nil
+    // B99 — main-phase mean frontal band powers for cross-session trend tracking (p=.03 for beta).
+    // Nil in pre-B99 sessions; derive from samples array if needed.
+    var mainAlphaMean: Float? = nil
+    var mainThetaMean: Float? = nil
+    var mainBetaMean:  Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -318,7 +323,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B98"
+    static let currentBuildTag = "B99"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -479,13 +484,25 @@ final class SessionRecorder: ObservableObject {
                 if denom > 1e-6 { rec.meditationIndexCorrelation = num / denom }
             }
 
-            // B97 — rmssdDepthDelta: RMSSD difference between high-depth (ecdf ≥ 0.50)
-            // and low-depth (ecdf < 0.25) states. Requires ≥ 5 samples in each bucket.
-            let highRMSSD = mainSamples.filter { ($0.ecdfDisplay ?? 0) >= 0.50 }.compactMap(\.rmssd)
-            let lowRMSSD  = mainSamples.filter { ($0.ecdfDisplay ?? 1) < 0.25 }.compactMap(\.rmssd)
+            // B99 fix (was B97): was mainSamples — early deep entry during warmup leaves
+            // near-zero low-depth samples in mainSamples, so count≥5 never fired (0/16 sessions).
+            // ecdfDisplay thresholds already distinguish deep vs shallow; phase filter not needed.
+            let highRMSSD = rec.samples.filter { ($0.ecdfDisplay ?? 0) >= 0.50 }.compactMap(\.rmssd)
+            let lowRMSSD  = rec.samples.filter { ($0.ecdfDisplay ?? 1) < 0.25 }.compactMap(\.rmssd)
+            Telemetry.recording.notice("rmssdDepthDelta buckets: high=\(highRMSSD.count, privacy: .public) low=\(lowRMSSD.count, privacy: .public)")
             if highRMSSD.count >= 5 && lowRMSSD.count >= 5 {
                 rec.rmssdDepthDelta = highRMSSD.reduce(0, +) / Float(highRMSSD.count)
                                     - lowRMSSD.reduce(0, +)  / Float(lowRMSSD.count)
+            }
+
+            // B99 — main-phase mean band powers (frontal). Stored for cross-session trend analysis.
+            // Beta is the only band showing significant improvement trend (p=.03, n=13 sessions).
+            if !mainSamples.isEmpty {
+                let n = Float(mainSamples.count)
+                rec.mainAlphaMean = mainSamples.map(\.alpha).reduce(0, +) / n
+                rec.mainThetaMean = mainSamples.map(\.theta).reduce(0, +) / n
+                rec.mainBetaMean  = mainSamples.map(\.beta).reduce(0, +)  / n
+                Telemetry.recording.notice("mainBeta=\(rec.mainBetaMean ?? 0, privacy: .public) mainAlpha=\(rec.mainAlphaMean ?? 0, privacy: .public) n=\(mainSamples.count, privacy: .public)")
             }
 
             // Write NDJSON footer — all biomarkers populated above.
