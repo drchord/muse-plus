@@ -9,6 +9,7 @@ final class ChimeEngine {
     private let sampleRate: Double = 44100
     // 53-sample Haas delay on R channel: ~1.2 ms — stereo width without comb filtering
     private let haasSamples: Int = 53
+    private let synthesizer = AVSpeechSynthesizer()
 
     init() {
         // Explicit stereo format — MUST be explicit to survive BT route changes
@@ -123,6 +124,81 @@ final class ChimeEngine {
         reverb.wetDryMix = 18
         scheduleBowl(fundamental: 396, decayRate: 2.0, duration: 2.5, amplitude: 0.06, attackDuration: 0.25)
         scheduleDuck(over: 3.0)
+    }
+
+    // MARK: - B102 coaching audio
+
+    /// Spoken coaching via TTS. Ducks soundscape during speech, unduckes after estimated duration.
+    /// Rate 0.42 = slower than default (0.5), appropriate for closed-eye instruction.
+    /// estimatedDuration: 0.09s/char + 1.5s buffer; underducks rather than overducks to be safe.
+    func speak(_ text: String) {
+        SoundscapePlayer.shared.duck(to: 0.12, fadeDuration: 0.5)
+        let u = AVSpeechUtterance(string: text)
+        u.rate   = 0.42
+        u.volume = 0.85
+        u.voice  = AVSpeechSynthesisVoice(language: "en-US")
+        u.preUtteranceDelay = 0.3
+        synthesizer.speak(u)
+        let estimatedDuration = TimeInterval(text.count) * 0.09 + 1.5
+        DispatchQueue.main.asyncAfter(deadline: .now() + estimatedDuration) {
+            SoundscapePlayer.shared.unduck(fadeDuration: 1.5)
+        }
+    }
+
+    /// Approach zone: user is in 50–100% of gate threshold, not yet in deep state.
+    /// 360 Hz — between exit-deep (288 Hz) and enter-deep (432 Hz). Subliminally signals
+    /// "getting closer." Amplitude 0.05: should not pull attention out of practice.
+    func playApproachZone() {
+        reverb.wetDryMix = 26
+        scheduleBowl(fundamental: 360, decayRate: 1.8, duration: 2.5, amplitude: 0.05, attackDuration: 0.30)
+        scheduleDuck(over: 3.0)
+    }
+
+    /// Return nudge: fires 5s after exiting deep state. Sequential 288 → 396 Hz ascending pair.
+    /// Ascending interval subliminally invites return toward the state just left.
+    func playReturnNudge() {
+        reverb.wetDryMix = 20
+        scheduleBowl(fundamental: 288, decayRate: 2.0, duration: 2.0, amplitude: 0.04, attackDuration: 0.20)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            self?.reverb.wetDryMix = 20
+            self?.scheduleBowl(fundamental: 396, decayRate: 1.6, duration: 2.2, amplitude: 0.05, attackDuration: 0.25)
+        }
+        scheduleDuck(over: 3.8)
+    }
+
+    /// Breath pacer: frequency-modulated sine, one cycle = 10s (5s inhale, 5s exhale).
+    /// Frequency rises 200→300 Hz on inhale (auditory cue to breathe in), falls 300→200 Hz
+    /// on exhale. Targets 6 breaths/min = respiratory sinus arrhythmia zone, which maximally
+    /// increases RMSSD and alpha power — both leading indicators of depth entry.
+    /// Phase accumulation used (not sin(2π*freq*t)) to avoid discontinuities at freq transitions.
+    func playBreathPacer(cycles: Int = 3) {
+        let cycleSecs = 10.0
+        let totalDuration = Double(cycles) * cycleSecs
+        guard let buf = stereoBuffer(duration: totalDuration) else { return }
+        let L = buf.floatChannelData![0]
+        let R = buf.floatChannelData![1]
+        let n = Int(buf.frameLength)
+        let amplitude = 0.07
+        let fadeSamples = Int(sampleRate)   // 1s fade in/out
+        let cycleFrames = cycleSecs * sampleRate
+        var phase = 0.0
+        for i in 0..<n {
+            let cyclePos = (Double(i).truncatingRemainder(dividingBy: cycleFrames)) / cycleFrames
+            // Inhale 0→0.5: linear sweep 200→300 Hz; exhale 0.5→1: 300→200 Hz
+            let freq: Double = cyclePos < 0.5
+                ? 200.0 + 200.0 * cyclePos
+                : 300.0 - 200.0 * (cyclePos - 0.5)
+            phase += 2.0 * .pi * freq / sampleRate
+            if phase > 2 * .pi { phase -= 2 * .pi }
+            let env: Double
+            if i < fadeSamples          { env = Double(i) / Double(fadeSamples) }
+            else if i > n - fadeSamples { env = Double(n - i) / Double(fadeSamples) }
+            else                         { env = 1.0 }
+            let s = Float(sin(phase) * env * amplitude)
+            L[i] = s; R[i] = s
+        }
+        schedule(buf)
+        scheduleDuck(over: totalDuration)
     }
 
     /// In-session guidance check-in: 396 Hz gentle bowl — soft reminder, non-disruptive.

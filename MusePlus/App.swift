@@ -75,8 +75,8 @@ enum WarmupFAAReadiness {
     var label: String {
         switch self {
         case .ready:   return "Brain ready"
-        case .neutral: return "Brain settling"
-        case .caution: return "High arousal — breathe slowly"
+        case .neutral: return "Settling — 3 slow breaths, release effort"
+        case .caution: return "High arousal — 5 × 6s exhales, drop shoulders"
         }
     }
     var iconName: String {
@@ -213,7 +213,14 @@ final class Probe: ObservableObject {
     private var warmupFAASamples:    [Float] = []
     private var warmupTransitionFired = false
     private var hasEverEnteredDeep    = false
-    private var inductionStallTimer:  DispatchWorkItem? = nil
+    private var inductionStallTimer:   DispatchWorkItem? = nil
+    // B102: escalating stall coaching at 600s and 900s
+    private var inductionStallTimer600: DispatchWorkItem? = nil
+    private var inductionStallTimer900: DispatchWorkItem? = nil
+    // B102: approach zone tracking — 50–100% of gate threshold, sustained 20s
+    private var approachWindowCount   = 0
+    private var lastApproachChimeDate = Date.distantPast
+    private let approachChimeCooldown: TimeInterval = 120.0
     // B76 had a 300s recording delay after calibration; B77 records from calibration end and
     // tags first 300s as "warmup" instead. No data loss; analysis can still filter warmup.
     private var recordingStartWork: DispatchWorkItem?  // legacy field; kept to avoid wider refactor
@@ -602,7 +609,23 @@ final class Probe: ObservableObject {
                             self.recordEvent(kind: "warmup-faa-readiness",
                                              detail: String(format: "%.3f_%@", mean, readiness.label))
                             withAnimation(.easeIn(duration: 0.5)) { self.warmupFAAReadiness = readiness }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+                            // B102: spoken coaching — primary channel for closed-eye users.
+                            switch readiness {
+                            case .ready:
+                                ChimeEngine.shared.speak("Brain ready. Settle in.")
+                            case .neutral:
+                                ChimeEngine.shared.speak("Brain still settling. Take three slow breaths. Release any effort.")
+                            case .caution:
+                                ChimeEngine.shared.speak("High arousal detected. Five slow exhales, six seconds each. Drop your shoulders completely.")
+                            }
+                            // Extended display for neutral/caution: user needs time to act on guidance.
+                            let displayDuration: TimeInterval
+                            switch readiness {
+                            case .ready:   displayDuration = 10
+                            case .neutral: displayDuration = 22
+                            case .caution: displayDuration = 22
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + displayDuration) { [weak self] in
                                 withAnimation(.easeOut(duration: 0.5)) { self?.warmupFAAReadiness = nil }
                             }
                         }
@@ -682,6 +705,33 @@ final class Probe: ObservableObject {
             self.depth = result
             let wasDeep = self.gate.inDeepState
             self.gate.update(result)
+
+            // B102: approach zone — ecdfDisplay in [0.5×gdt, gdt), not in deep, sustained 20s.
+            // Fires 360 Hz bowl so user knows they are close without disrupting concentration.
+            // Cooldown 120s prevents over-firing during prolonged approach-zone hovering.
+            if result.isCalibrated && !gate.inDeepState {
+                let inApproach = gate.smoothedDisplay >= 0.5 * gate.enterThresholdEcdf
+                              && gate.smoothedDisplay <  gate.enterThresholdEcdf
+                if inApproach {
+                    approachWindowCount += 1
+                    if approachWindowCount >= 40,
+                       Date().timeIntervalSince(lastApproachChimeDate) >= approachChimeCooldown {
+                        lastApproachChimeDate = Date()
+                        approachWindowCount = 0
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            ChimeEngine.shared.playApproachZone()
+                            self.recordEvent(kind: "approach-zone",
+                                             detail: String(format: "ecdf=%.2f", self.gate.smoothedDisplay))
+                        }
+                    }
+                } else {
+                    approachWindowCount = 0
+                }
+            } else {
+                approachWindowCount = 0
+            }
+
             SoundscapePlayer.shared.updateAdaptiveDepth(result.score, iTPF: self.iTPFFrontal)
             // B100: dispatch to main — stall work item also runs on main, so this
             // write serializes correctly and avoids a cross-thread race on hasEverEnteredDeep.
@@ -689,6 +739,37 @@ final class Probe: ObservableObject {
                 DispatchQueue.main.async { [weak self] in
                     self?.hasEverEnteredDeep = true
                     self?.inductionStallTimer?.cancel()
+                    self?.inductionStallTimer600?.cancel()
+                    self?.inductionStallTimer900?.cancel()
+                    // B102: single soft haptic 5s after entry — interoceptive registration.
+                    // Fires after enter chime has fully decayed; prompts user to consciously
+                    // notice the state they are in without disrupting it.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                        guard let self, self.gate.inDeepState else { return }
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    }
+                }
+            }
+            // B102: exit recovery — 5s after exiting deep, gentle haptic×3 + return nudge chime.
+            // The 5s delay lets the exit chime fully decay before new audio fires.
+            // Guard checks user is still outside deep state (didn't immediately re-enter).
+            if wasDeep && !self.gate.inDeepState {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                    guard let self,
+                          !self.gate.inDeepState,
+                          SessionRecorder.shared.isRecording else { return }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        ChimeEngine.shared.playReturnNudge()
+                        // Spoken cue after nudge chime and its 3.8s unduck fully complete (5.5s buffer).
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) {
+                            ChimeEngine.shared.speak("Return gently. Soften your gaze. Let it find you.")
+                        }
+                    }
                 }
             }
             // B94: at deep state entry, set binaural to raw iTPF (after updateAdaptiveDepth which uses iTPF-2.0)
@@ -731,6 +812,10 @@ final class Probe: ObservableObject {
                 self.warmupTransitionFired = false
                 self.hasEverEnteredDeep    = false
                 self.inductionStallTimer?.cancel()
+                self.inductionStallTimer600?.cancel()
+                self.inductionStallTimer900?.cancel()
+                self.approachWindowCount   = 0
+                self.lastApproachChimeDate = .distantPast
                 let stallWork = DispatchWorkItem { [weak self] in
                     // Runs on main (via DispatchQueue.main.asyncAfter below) — no inner dispatch needed.
                     guard let self,
@@ -739,6 +824,10 @@ final class Probe: ObservableObject {
                           !self.isPausedForReconnect else { return }
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     ChimeEngine.shared.playInductionNudge()
+                    // B102: spoken coaching fires after nudge chime + its 3s unduck settle.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+                        ChimeEngine.shared.speak("Soften your focus. Stop trying to meditate.")
+                    }
                     self.recordEvent(kind: "induction-stall", detail: "360s-no-deep")
                     Telemetry.recording.notice("induction-stall alert fired at 360s")
                     withAnimation { self.showInductionStall = true }
@@ -748,6 +837,46 @@ final class Probe: ObservableObject {
                 }
                 self.inductionStallTimer = stallWork
                 DispatchQueue.main.asyncAfter(deadline: .now() + 360, execute: stallWork)
+
+                // B102: 600s stall — breath pacer (3×10s cycles at 6 breaths/min).
+                // Spoken prompt first, then 3s delay for speech to finish before pacer starts.
+                // Rationale: 6 breaths/min maximally increases RMSSD + alpha, both leading
+                // indicators of depth entry. Only fires if user never entered deep state.
+                let stallWork600 = DispatchWorkItem { [weak self] in
+                    guard let self,
+                          SessionRecorder.shared.isRecording,
+                          !self.hasEverEnteredDeep,
+                          !self.isPausedForReconnect else { return }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    ChimeEngine.shared.speak("Follow your breath. Breathe in slowly for five seconds, then out for five.")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                        ChimeEngine.shared.playBreathPacer(cycles: 3)
+                    }
+                    self.recordEvent(kind: "induction-stall", detail: "600s-breath-pacer")
+                    Telemetry.recording.notice("induction-stall 600s: breath pacer fired")
+                }
+                self.inductionStallTimer600 = stallWork600
+                DispatchQueue.main.asyncAfter(deadline: .now() + 600, execute: stallWork600)
+
+                // B102: 900s stall — release-effort cue. By 15 minutes with no deep entry
+                // the user is likely gripping. Spoken instruction targets the most common
+                // block: effortful trying. Nudge chime follows speech.
+                let stallWork900 = DispatchWorkItem { [weak self] in
+                    guard let self,
+                          SessionRecorder.shared.isRecording,
+                          !self.hasEverEnteredDeep,
+                          !self.isPausedForReconnect else { return }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    ChimeEngine.shared.speak("Let go of trying. You are already here. Just rest.")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                        ChimeEngine.shared.playInductionNudge()
+                    }
+                    self.recordEvent(kind: "induction-stall", detail: "900s-no-deep")
+                    Telemetry.recording.notice("induction-stall 900s fired")
+                }
+                self.inductionStallTimer900 = stallWork900
+                DispatchQueue.main.asyncAfter(deadline: .now() + 900, execute: stallWork900)
+
                 ElementsTracker.shared.reset()
                 PersonalZDistribution.shared.resetSessionRing()
                 SessionRecorder.shared.startSession(
@@ -942,8 +1071,12 @@ final class Probe: ObservableObject {
         let effectiveReason = reason  // simplified until Agent B lands isPausedForReconnect
         Telemetry.recording.notice("endSessionGracefully reason=\(effectiveReason, privacy: .public)")
         SessionTimer.shared.cancel()
-        inductionStallTimer?.cancel()   // B99: kill stall alert if session ends before 360s
+        inductionStallTimer?.cancel()    // B99: kill stall alert if session ends before 360s
         inductionStallTimer = nil
+        inductionStallTimer600?.cancel() // B102
+        inductionStallTimer600 = nil
+        inductionStallTimer900?.cancel() // B102
+        inductionStallTimer900 = nil
         // B83 — capture audio state at gong time. The MOST important snapshot for
         // debugging audibility; without this we can't tell whether the speaker had
         // output enabled when the gong fired.
@@ -991,11 +1124,27 @@ final class Probe: ObservableObject {
             computeSessionAnalytics()
             return
         }
-        // No active session was recording — show empty summary.
-        Telemetry.recording.error("endSessionGracefully: endSession returned nil (no active session?)")
-        let now = Date()
-        sessionSummary = SessionRecord(id: UUID().uuidString, startDate: now, endDate: now,
-                                       samples: [], episodes: [], fitEvents: [])
+        // endSession() returned nil — session may already have ended or closure return was dropped.
+        // Attempt disk recovery from the most recently saved session file before showing zeros.
+        Telemetry.recording.error("endSessionGracefully: endSession returned nil (reason=\(effectiveReason)) — attempting disk recovery")
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir  = docs.appendingPathComponent("MuseSessions")
+        let dec  = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        let candidates = ((try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.creationDateKey])) ?? [])
+            .filter { $0.pathExtension == "json" }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        if let latestURL = candidates.first,
+           let data = try? Data(contentsOf: latestURL),
+           let recovered = try? dec.decode(SessionRecord.self, from: data) {
+            Telemetry.recording.notice("endSessionGracefully: disk recovery OK from \(latestURL.lastPathComponent, privacy: .public)")
+            sessionSummary = recovered
+            sessionSavedToast = "Session saved"
+            computeSessionAnalytics()
+            return
+        }
+        Telemetry.recording.error("endSessionGracefully: disk recovery failed — showing toast only")
         sessionSavedToast = "Session saved"
     }
 

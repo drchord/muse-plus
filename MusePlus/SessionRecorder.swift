@@ -327,7 +327,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B100"
+    static let currentBuildTag = "B102"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -430,7 +430,7 @@ final class SessionRecorder: ObservableObject {
     /// The canonical .json is saved as a side effect; save failures are logged via Telemetry.
     @discardableResult
     func endSession(reason: String = "normal") -> SessionRecord? {
-        queue.sync {
+        return queue.sync {
             guard isRecording, var rec = current else { return nil }
             // Stop accepting new samples FIRST.
             DispatchQueue.main.async { self.isRecording = false }
