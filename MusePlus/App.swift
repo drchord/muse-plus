@@ -736,6 +736,7 @@ final class Probe: ObservableObject {
             // B100: dispatch to main — stall work item also runs on main, so this
             // write serializes correctly and avoids a cross-thread race on hasEverEnteredDeep.
             if !wasDeep && self.gate.inDeepState {
+                SpotifyManager.shared.onEnterDeep()     // B103: duck to 25% in deep state
                 DispatchQueue.main.async { [weak self] in
                     self?.hasEverEnteredDeep = true
                     self?.inductionStallTimer?.cancel()
@@ -754,6 +755,7 @@ final class Probe: ObservableObject {
             // The 5s delay lets the exit chime fully decay before new audio fires.
             // Guard checks user is still outside deep state (didn't immediately re-enter).
             if wasDeep && !self.gate.inDeepState {
+                SpotifyManager.shared.onExitDeep()      // B103: restore to 60% on exit
                 DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
                     guard let self,
                           !self.gate.inDeepState,
@@ -807,6 +809,7 @@ final class Probe: ObservableObject {
                 self.recordingStartedAt = Date()
                 self.marks.reset()
                 self.heartRateBuffer.removeAll()
+                SpotifyManager.shared.sessionStart()    // B103: set 60% volume at calibration end
                 // B99: reset warmup FAA tracking and schedule induction-stall alert at 360s
                 self.warmupFAASamples = []
                 self.warmupTransitionFired = false
@@ -1071,6 +1074,7 @@ final class Probe: ObservableObject {
         let effectiveReason = reason  // simplified until Agent B lands isPausedForReconnect
         Telemetry.recording.notice("endSessionGracefully reason=\(effectiveReason, privacy: .public)")
         SessionTimer.shared.cancel()
+        SpotifyManager.shared.sessionEnd()               // B103: restore full volume
         inductionStallTimer?.cancel()    // B99: kill stall alert if session ends before 360s
         inductionStallTimer = nil
         inductionStallTimer600?.cancel() // B102
@@ -1646,7 +1650,8 @@ private struct MeditationView: View {
 
     @State private var showEndConfirm = false
     @ObservedObject private var sessionTimer = SessionTimer.shared
-    @ObservedObject private var sound = SoundscapePlayer.shared
+    @ObservedObject private var sound   = SoundscapePlayer.shared
+    @ObservedObject private var spotify = SpotifyManager.shared
     // D3: toast message — auto-cleared by ToastModifier after 3s
     @State private var toastMessage: String? = nil
 
@@ -1677,6 +1682,25 @@ private struct MeditationView: View {
                     Label("\(Int(probe.battery))%", systemImage: "battery.75")
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.45))
+                }
+                // B103: Spotify one-tap shortcut. Tap = Connect if unlinked; Play/Pause if linked.
+                // Green = connected+playing. Dim green = connected+paused. Gray = not connected.
+                Button {
+                    if spotify.isConnected {
+                        spotify.isPaused ? spotify.play() : spotify.pause()
+                    } else {
+                        spotify.authorize()
+                    }
+                } label: {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 16))
+                        .foregroundStyle(
+                            spotify.isConnected && !spotify.isPaused
+                                ? Color(red: 0.20, green: 0.85, blue: 0.45)
+                                : spotify.isConnected
+                                    ? Color(red: 0.20, green: 0.85, blue: 0.45).opacity(0.4)
+                                    : .white.opacity(0.25)
+                        )
                 }
                 Button { showSettings = true } label: {
                     Image(systemName: "gear")
@@ -2421,8 +2445,8 @@ private struct SoundscapeSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                if spotify.isConnected {
-                    Section("Spotify") {
+                Section("Spotify") {
+                    if spotify.isConnected {
                         if !spotify.currentTrack.isEmpty {
                             Text(spotify.currentTrack)
                                 .font(.subheadline)
@@ -2435,6 +2459,12 @@ private struct SoundscapeSheet: View {
                             Label(spotify.isPaused ? "Play" : "Pause",
                                   systemImage: spotify.isPaused ? "play.fill" : "pause.fill")
                         }
+                        Button("Disconnect", role: .destructive) { spotify.disconnect() }
+                    } else {
+                        Text("Start your T4 playlist in Spotify, then tap Connect.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Connect Spotify") { spotify.authorize() }
                     }
                 }
                 SoundscapeLayerView()

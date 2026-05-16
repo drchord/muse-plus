@@ -133,13 +133,16 @@ final class ChimeEngine {
     /// estimatedDuration: 0.09s/char + 1.5s buffer; underducks rather than overducks to be safe.
     func speak(_ text: String) {
         SoundscapePlayer.shared.duck(to: 0.12, fadeDuration: 0.5)
+        let estimatedDuration = TimeInterval(text.count) * 0.09 + 1.5
+        // Restore Spotify at estimatedDuration+0.5: starts rising just as soundscape begins
+        // its 1.5s unduck fade. Both rise together; prevents double-step jump at end of speech.
+        SpotifyManager.shared.duckForChime(restoreAfter: estimatedDuration + 0.5)
         let u = AVSpeechUtterance(string: text)
         u.rate   = 0.42
         u.volume = 0.85
         u.voice  = AVSpeechSynthesisVoice(language: "en-US")
         u.preUtteranceDelay = 0.3
         synthesizer.speak(u)
-        let estimatedDuration = TimeInterval(text.count) * 0.09 + 1.5
         DispatchQueue.main.asyncAfter(deadline: .now() + estimatedDuration) {
             SoundscapePlayer.shared.unduck(fadeDuration: 1.5)
         }
@@ -408,6 +411,7 @@ final class ChimeEngine {
     /// Duck soundscape while chime plays; unduck after it finishes.
     private func scheduleDuck(over duration: Double) {
         SoundscapePlayer.shared.duck(to: 0.18, fadeDuration: 0.35)
+        SpotifyManager.shared.duckForChime(restoreAfter: duration + 1.5)
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
             SoundscapePlayer.shared.unduck(fadeDuration: 1.5)
         }

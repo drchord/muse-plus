@@ -24,6 +24,28 @@ final class SpotifyManager: NSObject, ObservableObject {
     private var codeVerifier: String?
     private var pollTimer:    Timer?
 
+    // MARK: - Session-aware volume state
+    // All properties below are main-thread-only. Methods that are called from
+    // background threads (onEnterDeep, onExitDeep, duckForChime) dispatch
+    // their state mutations to main internally.
+    //
+    // Volume levels — tunable constants:
+    //   sessionVol = 60%  — comfortable background level during meditation
+    //   deepVol    = 25%  — reduced when in deep state; music shouldn't compete
+    //   chimeVol   = 15%  — duck floor during active chime/TTS
+    // These are provisional; no empirical validation yet. Adjust in UserDefaults future build.
+    private let sessionVol: Int = 60
+    private let deepVol:    Int = 25
+    private let chimeVol:   Int = 15
+
+    private var preSessionVol:           Int = 100  // captured before first setVolume; restored on end
+    private var targetVol:               Int = 100  // session restore target (sessionVol or deepVol)
+    private var isInSession:             Bool = false
+    private var chimeRestoreWork:        DispatchWorkItem?
+    // Spotify Premium required for volume API. On 403, disable silently for session.
+    // Reset to true on disconnect so reconnection gets a fresh attempt.
+    private var volumeManagementEnabled: Bool = true
+
     // MARK: - Public API
 
     func authorize() {
@@ -61,10 +83,130 @@ final class SpotifyManager: NSObject, ObservableObject {
         isPaused     = true
         pollTimer?.invalidate()
         pollTimer = nil
+        // Reset volume session state. If reconnected mid-session, sessionStart() won't
+        // fire again (calibrationFiredRecording stays true) — volume management won't
+        // resume until next session. Acceptable: reconnect mid-session is rare.
+        isInSession             = false
+        targetVol               = 100
+        preSessionVol           = 100
+        volumeManagementEnabled = true  // re-enable; 403 may not apply to reconnected account
+        chimeRestoreWork?.cancel()
+        chimeRestoreWork = nil
     }
 
     func play()  { command("play")  }
     func pause() { command("pause") }
+
+    // MARK: - Depth-responsive volume control
+
+    // Called at calibration end — capture user's pre-session volume, then set to sessionVol.
+    // fetchDeviceVolume is async (GET /v1/me/player); setVolume fires in its completion
+    // so the pre-session level is captured before we overwrite it.
+    func sessionStart() {
+        guard isConnected, volumeManagementEnabled else { return }
+        fetchDeviceVolume { [weak self] captured in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.preSessionVol = captured
+                self.isInSession   = true
+                self.targetVol     = self.sessionVol
+            }
+            self.setVolume(self.sessionVol)
+        }
+    }
+
+    // Called at endSessionGracefully — restore user's actual pre-session volume.
+    // MUST be called on main thread (endSessionGracefully is always on main).
+    func sessionEnd() {
+        let restore = preSessionVol
+        preSessionVol   = 100
+        isInSession     = false
+        targetVol       = 100
+        chimeRestoreWork?.cancel()
+        chimeRestoreWork = nil
+        setVolume(restore)
+    }
+
+    // Called on deep-state entry. May be called from background (scorer.onResult);
+    // state mutations dispatched to main. setVolume is thread-safe (URLSession).
+    func onEnterDeep() {
+        guard isConnected, volumeManagementEnabled else { return }
+        DispatchQueue.main.async { [self] in
+            guard isInSession else { return }
+            targetVol = deepVol
+        }
+        setVolume(deepVol)
+    }
+
+    // Called on deep-state exit. Same thread contract as onEnterDeep.
+    func onExitDeep() {
+        guard isConnected, volumeManagementEnabled else { return }
+        DispatchQueue.main.async { [self] in
+            guard isInSession else { return }
+            targetVol = sessionVol
+        }
+        setVolume(sessionVol)
+    }
+
+    // Duck to chimeVol while a chime or TTS plays, then restore to targetVol.
+    // Debounced: concurrent calls cancel the prior restore, extending the duck window.
+    // Called from ChimeEngine (may be on background); all state mutations on main.
+    func duckForChime(restoreAfter duration: TimeInterval) {
+        guard isConnected, volumeManagementEnabled else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isInSession else { return }
+            self.chimeRestoreWork?.cancel()
+            self.setVolume(self.chimeVol)
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.setVolume(self.targetVol)
+                self.chimeRestoreWork = nil
+            }
+            self.chimeRestoreWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+        }
+    }
+
+    // PUT /v1/me/player/volume — checks 403 to detect free-tier and disable gracefully.
+    // Thread-safe: URLSession.shared is safe from any thread.
+    private func setVolume(_ percent: Int) {
+        guard volumeManagementEnabled else { return }
+        withToken { [weak self] token in
+            guard let self, let token,
+                  let url = URL(string: "https://api.spotify.com/v1/me/player/volume?volume_percent=\(percent)") else { return }
+            var req = URLRequest(url: url)
+            req.httpMethod = "PUT"
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            URLSession.shared.dataTask(with: req) { [weak self] _, resp, _ in
+                // 403 = Spotify Premium required. Disable for session; re-enables on disconnect/reconnect.
+                if (resp as? HTTPURLResponse)?.statusCode == 403 {
+                    DispatchQueue.main.async { self?.volumeManagementEnabled = false }
+                }
+            }.resume()
+        }
+    }
+
+    // GET /v1/me/player to read current device volume before session overwrites it.
+    // Calls completion with captured volume, or 100 as safe fallback.
+    private func fetchDeviceVolume(_ completion: @escaping (Int) -> Void) {
+        withToken { [weak self] token in
+            guard let self, let token else { completion(100); return }
+            var req = URLRequest(url: URL(string: "https://api.spotify.com/v1/me/player")!)
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            URLSession.shared.dataTask(with: req) { data, resp, _ in
+                let vol: Int
+                if let data, (resp as? HTTPURLResponse)?.statusCode == 200,
+                   let json   = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let device = json["device"] as? [String: Any],
+                   let v      = device["volume_percent"] as? Int {
+                    vol = v
+                } else {
+                    vol = 100  // over-restore (100%) less jarring than under-restore (near-0%)
+                }
+                completion(vol)
+            }.resume()
+        }
+    }
 
     // MARK: - Playback commands
 
