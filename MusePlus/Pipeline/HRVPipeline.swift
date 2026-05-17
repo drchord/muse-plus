@@ -134,9 +134,10 @@ final class HRVPipeline {
 
         let lfhf   = computeLFHF(cleanRR)
 
-        let sdnn = Self.computeSDNN(cleanRR)
-        let sd1  = Self.computeSD1(cleanRR) ?? rmssd / sqrt(2.0)
-        let sd2  = Self.computeSD2(cleanRR)
+        // B107: convert seconds→ms to match rmssd units (SessionRecord stores all HRV in ms)
+        let sdnn = Self.computeSDNN(cleanRR) * 1000.0
+        let sd1  = (Self.computeSD1(cleanRR) ?? 0.0) * 1000.0
+        let sd2  = Self.computeSD2(cleanRR).map { $0 * 1000.0 }
         latestSDNN = sdnn
         latestSD1  = sd1
         latestSD2  = sd2
