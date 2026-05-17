@@ -16,7 +16,7 @@ final class HRVPipeline {
     private(set) var latestSD2:  Double?
 
     // B107: fires with extended HRV metrics (alongside onRMSSD)
-    var onHRVExtended: ((sdnn: Double, sd1: Double, sd2: Double?) -> Void)?
+    var onHRVExtended: ((Double, Double, Double?) -> Void)?
 
     private static let sampleRate:    Double = 64.0
     private static let windowSamples: Int    = 19200   // 5 * 60 * 64
@@ -149,7 +149,7 @@ final class HRVPipeline {
             guard let self else { return }
             self.onRMSSD?(rmssd, lfhf)
             if let sd2 = sd2 {
-                self.onHRVExtended?((sdnn: sdnn, sd1: sd1, sd2: sd2))
+                self.onHRVExtended?(sdnn, sd1, sd2)
             }
         }
     }
