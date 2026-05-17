@@ -348,11 +348,15 @@ final class HRVPipeline {
     }
 
     /// Called from App.swift to mark calibration phase boundaries.
-    /// When phase ends (active → false), freezes calibrationRmssd from accumulated RR.
+    /// When phase ends (active → false), computes and freezes calibrationRmssd synchronously
+    /// so the caller can read calibrationRmssd immediately after return.
     func setCalibrationPhase(_ active: Bool) {
-        queue.async { [self] in
-            isInCalibration = active
-            if !active && !calibrationRR.isEmpty {
+        if active {
+            queue.async { [self] in isInCalibration = true }
+        } else {
+            queue.sync { [self] in      // sync: caller reads calibrationRmssd right after return
+                isInCalibration = false
+                guard calibrationRR.count >= 2 else { calibrationRR.removeAll(); return }
                 let diffs = zip(calibrationRR.dropFirst(), calibrationRR).map { pow($0 - $1, 2) }
                 calibrationRmssd = sqrt(diffs.reduce(0, +) / Double(diffs.count)) * 1000.0
                 calibrationRR.removeAll()
