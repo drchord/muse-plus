@@ -105,6 +105,12 @@ final class DepthGate {
     // Set externally from pipeline.onITPFUpdate before each update() call.
     var lastKnownITPF: Float? = nil
 
+    /// B107: set adaptive Kalman process noise from calibration ECDF variance.
+    /// Clamped to [0.0005, 0.020] by caller; method trusts caller but re-clamps for safety.
+    func setQD(_ qD: Float) {
+        kalman.qD = max(0.0005, min(0.020, qD))
+    }
+
     func setEcdfThresholds(enter: Float, exit: Float) {
         enterThresholdEcdf = max(0.50, min(0.85, enter))
         exitThresholdEcdf  = max(0.40, min(enterThresholdEcdf - 0.10, exit))

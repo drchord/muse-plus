@@ -20,7 +20,7 @@ struct KalmanDepth {
     private var Pvv: Float = 0.05
 
     private let dt:             Float = 0.5      // update interval seconds
-    private let qD:             Float = 0.0022   // process noise: depth
+    var qD:                      Float = 0.0022   // process noise: depth; mutable for adaptive calibration (B107)
     private let qV:             Float = 0.00010  // process noise: velocity
     private let rBase:          Float = 0.005    // base measurement noise (approach-zone residual var)
     private let rNeutralQuality: Float = 0.6     // reference quality level for R scaling

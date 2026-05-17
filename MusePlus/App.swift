@@ -805,6 +805,11 @@ final class Probe: ObservableObject {
             // in addSample so analysis can still filter, but data is preserved.
             if result.isCalibrated && !self.calibrationFiredRecording {
                 self.calibrationFiredRecording = true
+                // B107: adaptive Kalman qD from calibration variance.
+                // Clamped to [0.0005, 0.020]: prevents over-smoothing and runaway tracking.
+                let adaptiveQD = min(max(self.scorer.calibrationEcdfVariance * 0.01, 0.0005), 0.020)
+                self.gate.setQD(adaptiveQD)
+                Telemetry.recording.notice("B107 adaptiveQD=\(adaptiveQD, privacy: .public) ecdfVar=\(self.scorer.calibrationEcdfVariance, privacy: .public)")
                 self.recordingStartWork?.cancel()
                 self.recordingStartedAt = Date()
                 self.marks.reset()

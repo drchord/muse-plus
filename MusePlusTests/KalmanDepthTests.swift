@@ -34,4 +34,23 @@ final class KalmanDepthTests: XCTestCase {
         XCTAssertEqual(k.depth, 0.5, accuracy: 0.001)
         XCTAssertEqual(k.vel,   0.0, accuracy: 0.001)
     }
+
+    func testQDMutable() {
+        var k = KalmanDepth()
+        let originalQD = k.qD
+        k.qD = 0.010
+        XCTAssertEqual(k.qD, 0.010, accuracy: 0.0001, "qD must be mutable")
+        XCTAssertNotEqual(k.qD, originalQD)
+    }
+
+    func testHigherQDTracksFaster() {
+        var kSlow = KalmanDepth()
+        kSlow.qD = 0.0005
+        var kFast = KalmanDepth()
+        kFast.qD = 0.015
+        for _ in 0..<10 { _ = kSlow.update(z: 0.9) }
+        for _ in 0..<10 { _ = kFast.update(z: 0.9) }
+        XCTAssertGreaterThan(kFast.depth, kSlow.depth,
+                             "Higher qD should track faster (closer to 0.9 after 10 steps)")
+    }
 }
