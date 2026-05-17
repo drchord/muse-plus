@@ -340,8 +340,8 @@ final class Probe: ObservableObject {
                         // Fade soundscape to silence — abrupt stop would be jarring
                         SoundscapePlayer.shared.stopAll(fadeSeconds: 2.0)
                         AlertCoordinator.shared.sessionPaused(reason: .bleDrop)
-                        Telemetry.connection.notice("entering 30s grace period")
-                        // Schedule 30s grace expiry
+                        Telemetry.connection.notice("entering 45s grace period")
+                        // Schedule 45s grace expiry
                         let gracework = DispatchWorkItem { [weak self] in
                             guard let self, self.isPausedForReconnect else { return }
                             self.isPausedForReconnect = false
