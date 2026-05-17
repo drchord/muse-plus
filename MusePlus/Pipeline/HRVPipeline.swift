@@ -331,6 +331,10 @@ final class HRVPipeline {
     private var sessionRR: [Double] = []
 
     // MARK: - Calibration-phase RR accumulator (T11)
+    // NOTE: AMPD requires windowSamples=19200 (5 min) before emitting any RR. Calibration
+    // typically completes in <90s, so calibrationRR will be empty at calibration end and
+    // calibrationRmssd stays nil. physiologicalScore.rmssdResponse (0-30) will contribute 0
+    // until a sub-window RMSSD estimator is added (future build).
 
     private var isInCalibration: Bool = false
     private var calibrationRR:   [Double] = []

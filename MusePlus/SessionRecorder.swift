@@ -202,6 +202,11 @@ private struct NDJSONFooter: Codable {
     let mainBetaMean:  Float?        // B100: main-phase mean frontal beta
     let enterThresholdAtSession: Float?   // B107: entry threshold active for this session
     let physiologicalScore: Int?          // B107: signal-quality score independent of deep gate
+    let stallCount:          Int?         // B107: BLE grace-period stalls
+    let bleReconnectCount:   Int?         // B107: successful BLE reconnects
+    let rmssd:               Double?      // B107: main-phase RMSSD (ms)
+    let calibrationRmssd:    Double?      // B107: calibration-phase RMSSD baseline (ms)
+    let dfaAlpha1:           Double?      // B107: DFA α1 short-range scaling exponent
 }
 
 private struct NDJSONAppState: Codable {
@@ -986,7 +991,12 @@ final class SessionRecorder: ObservableObject {
             warmupFAAMean: rec.warmupFAAMean,
             mainBetaMean:  rec.mainBetaMean,
             enterThresholdAtSession: rec.enterThresholdAtSession,
-            physiologicalScore: rec.physiologicalScore
+            physiologicalScore: rec.physiologicalScore,
+            stallCount:         rec.stallCount,
+            bleReconnectCount:  rec.bleReconnectCount,
+            rmssd:              rec.rmssd,
+            calibrationRmssd:   rec.calibrationRmssd,
+            dfaAlpha1:          rec.dfaAlpha1
         )
         appendLine(footer)
         ndjsonHandle?.synchronizeFile()
@@ -1365,7 +1375,7 @@ extension SessionRecorder {
     }
 
     func attachCalibrationRmssd(_ rmssd: Double) {
-        queue.async { [self] in
+        queue.sync { [self] in
             guard isRecording else { return }
             current?.calibrationRmssd = rmssd
             Telemetry.recording.notice("calibrationRmssd=\(rmssd, privacy: .public) ms")
@@ -1374,7 +1384,7 @@ extension SessionRecorder {
 
     // B107: attach Poincaré / SDNN scalars captured at session end from HRVPipeline.latestX properties.
     func attachHRVScalars(sdnn: Double, sd1: Double, sd2: Double?) {
-        queue.async { [self] in
+        queue.sync { [self] in
             guard isRecording else { return }
             current?.sdnn = sdnn
             current?.sd1  = sd1
@@ -1384,7 +1394,7 @@ extension SessionRecorder {
     }
 
     func attachDFAAlpha1(_ alpha: Double) {
-        queue.async { [self] in
+        queue.sync { [self] in
             guard isRecording else { return }
             current?.dfaAlpha1 = alpha
             Telemetry.recording.notice("dfaAlpha1=\(alpha, privacy: .public)")
