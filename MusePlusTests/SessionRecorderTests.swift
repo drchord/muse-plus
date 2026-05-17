@@ -214,4 +214,8 @@ final class SessionRecorderTests: XCTestCase {
         XCTAssertTrue(footer?.keys.contains("physiologicalScore") == true,
                       "Footer must contain physiologicalScore in B107 sessions")
     }
+
+    func testAttachCalibrationBeta() throws {
+        throw XCTSkip("Requires live session — verify manually post-B107")
+    }
 }

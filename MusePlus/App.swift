@@ -812,6 +812,11 @@ final class Probe: ObservableObject {
                 let adaptiveQD = min(max(self.scorer.calibrationEcdfVariance * 0.15, 0.0005), 0.020)
                 self.gate.setQD(adaptiveQD)
                 Telemetry.recording.notice("B107 adaptiveQD=\(adaptiveQD, privacy: .public) ecdfVar=\(self.scorer.calibrationEcdfVariance, privacy: .public)")
+                // B107: capture calibration beta baseline for physiologicalScore
+                SessionRecorder.shared.attachCalibrationBeta(
+                    mean: self.scorer.calibrationBetaMean,
+                    std:  self.scorer.calibrationBetaStd
+                )
                 self.recordingStartWork?.cancel()
                 self.recordingStartedAt = Date()
                 self.marks.reset()

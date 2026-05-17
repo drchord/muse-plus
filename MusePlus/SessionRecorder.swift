@@ -145,6 +145,9 @@ struct SessionRecord: Codable, Identifiable {
     var warmupFAAMean: Float? = nil
     // B107 — signal-quality score independent of deep-gate binary.
     var physiologicalScore: Int? = nil
+    // B107 — calibration-phase beta baseline for physiologicalScore betaZ computation.
+    var calibrationBetaMean: Float? = nil
+    var calibrationBetaStd:  Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -1296,6 +1299,15 @@ extension SessionRecorder {
             }
             let t = Date().timeIntervalSince(rec.startDate)
             appendLine(NDJSONThreshold(time: t, enterThreshold: threshold))
+        }
+    }
+
+    func attachCalibrationBeta(mean: Float, std: Float) {
+        queue.sync {
+            guard isRecording else { return }
+            current?.calibrationBetaMean = mean
+            current?.calibrationBetaStd  = std
+            Telemetry.recording.notice("calibrationBeta attached: mean=\(mean, privacy: .public) std=\(std, privacy: .public)")
         }
     }
 
