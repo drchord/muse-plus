@@ -51,9 +51,8 @@ final class EEGWindowBuffer {
     private let windowSize = 256                  // 1 sec @ 256 Hz
     private var buffers: [[Float]] = [[], [], [], []]
     // B96: latest denoiser quality — read by DepthScore to wire real alphaPowerRatio into Kalman.
-    // Written on queue, read cross-thread; Float reads are atomic on ARM64, benign race acceptable
-    // given 1s update cadence and the value being a smoothed quality metric (not a control flow gate).
-    private(set) var latestAlphaPowerRatio: Float = 0.5
+    private var _latestAlphaPowerRatio: Float = 0.5
+    var latestAlphaPowerRatio: Float { queue.sync { _latestAlphaPowerRatio } }
 
     // B107: emits the cleaned 4-channel × 256-sample window on the denoiser queue.
     // Subscribers that set `eegDenoiseLiveSignal=true` at session start will receive these
@@ -136,7 +135,7 @@ final class EEGWindowBuffer {
         let s = result.stats
         // Write alphaPowerRatio BEFORE send so main-thread subscribers always read window N's value,
         // not a stale prior-window value (C1: eliminates the send-before-write ordering issue).
-        latestAlphaPowerRatio = s.alphaPowerRatio
+        _latestAlphaPowerRatio = s.alphaPowerRatio
         cleanedBatch.send(result.cleaned)   // B107: emit for live-path subscribers
 
         // B83 — direct field access; Potato + rASR fields confirmed present in struct.
