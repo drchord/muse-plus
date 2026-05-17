@@ -135,6 +135,8 @@ final class HRVPipeline {
         // RMSSD (ms) — ESC/NASPE formula
         let diffs  = zip(cleanRR.dropFirst(), cleanRR).map { ($0 - $1) * ($0 - $1) }
         let rmssd  = sqrt(diffs.reduce(0, +) / Double(diffs.count)) * 1000.0
+        // C4: first valid AMPD window = HRV baseline (calibrationRR always empty; AMPD needs 5-min window).
+        if calibrationRmssd == nil { calibrationRmssd = rmssd }
 
         let lfhf   = computeLFHF(cleanRR)
 
@@ -148,9 +150,7 @@ final class HRVPipeline {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.onRMSSD?(rmssd, lfhf)
-            if let sd2 = sd2 {
-                self.onHRVExtended?(sdnn, sd1, sd2)
-            }
+            self.onHRVExtended?(sdnn, sd1, sd2)   // sd2 is Double? — emit unconditionally (I4)
         }
     }
 
@@ -351,6 +351,15 @@ final class HRVPipeline {
         return rr
     }
 
+    /// Atomically reads latestSDNN/SD1/SD2 from the HRV queue.
+    /// Use instead of reading the properties directly from the main thread to avoid
+    /// reading an inconsistent triple when a concurrent runAMPD window is in flight.
+    func drainLatestHRVScalars() -> (sdnn: Double, sd1: Double, sd2: Double?) {
+        var result: (sdnn: Double, sd1: Double, sd2: Double?) = (0.0, 0.0, nil)
+        queue.sync { result = (self.latestSDNN, self.latestSD1, self.latestSD2) }
+        return result
+    }
+
     /// Called from App.swift to mark calibration phase boundaries.
     /// When phase ends (active → false), computes and freezes calibrationRmssd synchronously
     /// so the caller can read calibrationRmssd immediately after return.
@@ -358,7 +367,9 @@ final class HRVPipeline {
         if active {
             queue.async { [self] in isInCalibration = true }
         } else {
-            queue.sync { [self] in      // sync: caller reads calibrationRmssd right after return
+            // Must be called from outside the HRV queue — sync from own queue = deadlock.
+            dispatchPrecondition(condition: .notOnQueue(queue))
+            queue.sync { [self] in
                 isInCalibration = false
                 guard calibrationRR.count >= 2 else { calibrationRR.removeAll(); return }
                 let diffs = zip(calibrationRR.dropFirst(), calibrationRR).map { pow($0 - $1, 2) }

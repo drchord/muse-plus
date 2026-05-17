@@ -455,148 +455,129 @@ final class SessionRecorder: ObservableObject {
     func endSession(reason: String = "normal") -> SessionRecord? {
         return queue.sync { () -> SessionRecord? in
             guard isRecording, var rec = current else { return nil }
-            // Stop accepting new samples FIRST.
             DispatchQueue.main.async { self.isRecording = false }
-
-            rec.endDate = Date()
-            if lastDeepState && !rec.episodes.isEmpty {
-                let t = rec.endDate!.timeIntervalSince(rec.startDate)
-                rec.episodes[rec.episodes.count - 1].exitTime = t
-            }
-
-            // Populate B88+ summary scalars and biomarkers BEFORE appendFooter()
-            // so the NDJSON footer captures all computed values.
-            let durSec = (rec.endDate ?? Date()).timeIntervalSince(rec.startDate)
-            rec.durationSec        = durSec
-            rec.summarySampleCount = rec.samples.count
-            rec.deepFraction       = durSec > 0 ? rec.deepMinutes * 60.0 / durSec : 0
-
-            // B94 — quality score: deep fraction (40) + ecdf smoothness (25) + contact (35).
-            // frontalGoodFrac uses mainSamples only — warmup contact noise excluded.
-            let mainSamples  = rec.samples.filter { $0.phase == "main" }
-            let ecdfVals     = mainSamples.compactMap(\.ecdfDisplay)
-            let deepFrac     = Float(rec.deepFraction ?? 0)
-
-            let deepScore: Float = min(40.0, deepFrac / 0.70 * 40.0)
-
-            let smoothScore: Float
-            if ecdfVals.count > 1 {
-                let mean     = ecdfVals.reduce(0, +) / Float(ecdfVals.count)
-                let variance = ecdfVals.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(ecdfVals.count)
-                let std      = sqrt(variance)
-                smoothScore  = max(0.0, (1.0 - std / 0.25)) * 25.0
-            } else {
-                smoothScore = 0.0
-            }
-
-            let frontalGoodFrac: Float = mainSamples.isEmpty ? 0.0 :
-                Float(mainSamples.filter { $0.frontalGood == true }.count) / Float(mainSamples.count)
-            let contactScore = frontalGoodFrac * 35.0
-
-            rec.qualityScore = Int((deepScore + smoothScore + contactScore).rounded())
-
-            // B96 — meditationIndex / ecdfDisplay Pearson correlation (main phase, paired samples).
-            let paired = mainSamples.compactMap { s -> (Float, Float)? in
-                guard let mi = s.meditationIndexCorrected, let ec = s.ecdfDisplay else { return nil }
-                return (mi, ec)
-            }
-            if paired.count >= 20 {
-                let n = Float(paired.count)
-                let xMean = paired.map(\.0).reduce(0, +) / n
-                let yMean = paired.map(\.1).reduce(0, +) / n
-                let num   = paired.map { ($0.0 - xMean) * ($0.1 - yMean) }.reduce(0, +)
-                let dX    = sqrt(paired.map { ($0.0 - xMean) * ($0.0 - xMean) }.reduce(0, +))
-                let dY    = sqrt(paired.map { ($0.1 - yMean) * ($0.1 - yMean) }.reduce(0, +))
-                let denom = dX * dY
-                if denom > 1e-6 { rec.meditationIndexCorrelation = num / denom }
-            }
-
-            // B99 fix (was B97): was mainSamples — early deep entry during warmup leaves
-            // near-zero low-depth samples in mainSamples, so count≥5 never fired (0/16 sessions).
-            // ecdfDisplay thresholds already distinguish deep vs shallow; phase filter not needed.
-            let highRMSSD = rec.samples.filter { ($0.ecdfDisplay ?? 0) >= 0.50 }.compactMap(\.rmssd)
-            let lowRMSSD  = rec.samples.filter { ($0.ecdfDisplay ?? 1) < 0.25 }.compactMap(\.rmssd)
-            Telemetry.recording.notice("rmssdDepthDelta buckets: high=\(highRMSSD.count, privacy: .public) low=\(lowRMSSD.count, privacy: .public)")
-            if highRMSSD.count >= 5 && lowRMSSD.count >= 5 {
-                rec.rmssdDepthDelta = highRMSSD.reduce(0, +) / Float(highRMSSD.count)
-                                    - lowRMSSD.reduce(0, +)  / Float(lowRMSSD.count)
-            }
-
-            // B99 — main-phase mean band powers (frontal). Stored for cross-session trend analysis.
-            // Beta is the only band showing significant improvement trend (p=.03, n=13 sessions).
-            if !mainSamples.isEmpty {
-                let n = Float(mainSamples.count)
-                rec.mainAlphaMean = mainSamples.map(\.alpha).reduce(0, +) / n
-                rec.mainThetaMean = mainSamples.map(\.theta).reduce(0, +) / n
-                rec.mainBetaMean  = mainSamples.map(\.beta).reduce(0, +)  / n
-                Telemetry.recording.notice("mainBeta=\(rec.mainBetaMean ?? 0, privacy: .public) mainAlpha=\(rec.mainAlphaMean ?? 0, privacy: .public) n=\(mainSamples.count, privacy: .public)")
-            }
-
-            // B100 — warmup FAA mean stored for analysis (prospective predictor r=-0.76).
-            // Requires ≥30 non-zero FAA samples (~15s of clean frontal signal).
-            let warmupFAASamples = rec.samples.filter { $0.phase == "warmup" }.compactMap(\.faa).filter { $0 != 0 }
-            if warmupFAASamples.count >= 30 {
-                rec.warmupFAAMean = warmupFAASamples.reduce(0, +) / Float(warmupFAASamples.count)
-                Telemetry.recording.notice("warmupFAAMean=\(rec.warmupFAAMean ?? 0, privacy: .public) n=\(warmupFAASamples.count, privacy: .public)")
-            }
-
-            // B107: session-level RMSSD mean (main phase)
-            let mainRMSSD = rec.samples
-                .filter { $0.phase == "main" }
-                .compactMap { $0.rmssd }
-                .filter { $0 > 0 }
-            if !mainRMSSD.isEmpty {
-                rec.rmssd = mainRMSSD.reduce(0, +) / Double(mainRMSSD.count)
-            }
-
-            // B107: physiologicalScore — independent of deep-gate binary.
-            rec.physiologicalScore = Self.computePhysiologicalScore(rec: rec, frontalGoodFrac: frontalGoodFrac)
-
-            // Write NDJSON footer — all biomarkers populated above.
-            appendFooter(rec: rec, reason: reason)
-            closeNDJSONHandle()
-
-            // A3: stop flush timer
-            DispatchQueue.main.async {
-                self.flushTimer?.invalidate()
-                self.flushTimer = nil
-            }
-
-            // A4: tear down app-state observers
-            tearDownAppStateObservers()
-
-            // Feed personal ECDF — main phase only; warmup samples (first 300s) inflate
-            // the distribution and raise the threshold bar for subsequent sessions.
-            let allZs = rec.samples.compactMap { s -> Float? in
-                guard s.phase == "main", let z = s.depthZ, z.isFinite else { return nil }
-                return z
-            }
-            if !allZs.isEmpty {
-                PersonalZDistribution.shared.ingestSession(zSamples: allZs)
-            }
-
-            // Log gap stats
-            let times = rec.samples.map(\.time)
-            if times.count > 1 {
-                let gaps   = zip(times, times.dropFirst()).map { $1 - $0 }
-                let mean   = gaps.reduce(0.0, +) / Double(gaps.count)
-                let sorted = gaps.sorted()
-                let p95    = sorted[min(Int(Double(sorted.count) * 0.95), sorted.count - 1)]
-                let maxGap = sorted.last ?? 0
-                Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) duration=\(String(format: "%.1f", times.last ?? 0), privacy: .public)s gap_mean=\(String(format: "%.3f", mean), privacy: .public)s gap_p95=\(String(format: "%.3f", p95), privacy: .public)s gap_max=\(String(format: "%.3f", maxGap), privacy: .public)s")
-            } else {
-                Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) (too few to compute gaps)")
-            }
-
+            populateSessionBiomarkers(&rec, reason: reason)
             current       = nil
             lastDeepState = false
             sampleCount   = 0
-
-            // Synthesise canonical .json from in-memory record. save() logs its own failures.
             save(rec)
-
             return rec
         }
+    }
+
+    // Extracted from endSession to keep queue.sync closure small enough for Swift type-checker.
+    // Must only be called from within the recorder serial queue.
+    private func populateSessionBiomarkers(_ rec: inout SessionRecord, reason: String) {
+        rec.endDate = Date()
+        if lastDeepState && !rec.episodes.isEmpty {
+            let t = rec.endDate!.timeIntervalSince(rec.startDate)
+            rec.episodes[rec.episodes.count - 1].exitTime = t
+        }
+
+        let durSec: TimeInterval = (rec.endDate ?? Date()).timeIntervalSince(rec.startDate)
+        rec.durationSec        = durSec
+        rec.summarySampleCount = rec.samples.count
+        rec.deepFraction       = durSec > 0 ? rec.deepMinutes * 60.0 / durSec : 0
+
+        // B94 quality score: deep fraction (40) + ecdf smoothness (25) + contact (35).
+        let mainSamples: [SessionSample] = rec.samples.filter { $0.phase == "main" }
+        let ecdfVals: [Float]            = mainSamples.compactMap(\.ecdfDisplay)
+        let deepFrac: Float              = Float(rec.deepFraction ?? 0)
+        let deepScore: Float             = min(40.0, deepFrac / 0.70 * 40.0)
+
+        let smoothScore: Float
+        if ecdfVals.count > 1 {
+            let mean: Float     = ecdfVals.reduce(0, +) / Float(ecdfVals.count)
+            let variance: Float = ecdfVals.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(ecdfVals.count)
+            smoothScore         = max(0.0, (1.0 - sqrt(variance) / 0.25)) * 25.0
+        } else {
+            smoothScore = 0.0
+        }
+
+        let frontalGoodCount: Int = mainSamples.filter { $0.frontalGood == true }.count
+        let frontalGoodFrac: Float = mainSamples.isEmpty ? 0.0
+            : Float(frontalGoodCount) / Float(mainSamples.count)
+        rec.qualityScore = Int((deepScore + smoothScore + frontalGoodFrac * 35.0).rounded())
+
+        // B96 meditationIndex / ecdfDisplay Pearson correlation.
+        let paired: [(Float, Float)] = mainSamples.compactMap { s -> (Float, Float)? in
+            guard let mi = s.meditationIndexCorrected, let ec = s.ecdfDisplay else { return nil }
+            return (mi, ec)
+        }
+        if paired.count >= 20 {
+            let n: Float  = Float(paired.count)
+            let xMean: Float = paired.map { $0.0 }.reduce(0, +) / n
+            let yMean: Float = paired.map { $0.1 }.reduce(0, +) / n
+            let num: Float   = paired.map { ($0.0 - xMean) * ($0.1 - yMean) }.reduce(0, +)
+            let dX: Float    = sqrt(paired.map { ($0.0 - xMean) * ($0.0 - xMean) }.reduce(0, +))
+            let dY: Float    = sqrt(paired.map { ($0.1 - yMean) * ($0.1 - yMean) }.reduce(0, +))
+            let denom: Float = dX * dY
+            if denom > 1e-6 { rec.meditationIndexCorrelation = num / denom }
+        }
+
+        // B99 rmssdDepthDelta.
+        let highRMSSD: [Float] = rec.samples.filter { ($0.ecdfDisplay ?? 0) >= 0.50 }.compactMap(\.rmssd)
+        let lowRMSSD:  [Float] = rec.samples.filter { ($0.ecdfDisplay ?? 1) <  0.25 }.compactMap(\.rmssd)
+        Telemetry.recording.notice("rmssdDepthDelta buckets: high=\(highRMSSD.count, privacy: .public) low=\(lowRMSSD.count, privacy: .public)")
+        if highRMSSD.count >= 5 && lowRMSSD.count >= 5 {
+            rec.rmssdDepthDelta = highRMSSD.reduce(0, +) / Float(highRMSSD.count)
+                                - lowRMSSD.reduce(0, +)  / Float(lowRMSSD.count)
+        }
+
+        // B99 main-phase band power means.
+        if !mainSamples.isEmpty {
+            let n: Float      = Float(mainSamples.count)
+            rec.mainAlphaMean = mainSamples.map(\.alpha).reduce(0, +) / n
+            rec.mainThetaMean = mainSamples.map(\.theta).reduce(0, +) / n
+            rec.mainBetaMean  = mainSamples.map(\.beta).reduce(0, +)  / n
+            Telemetry.recording.notice("mainBeta=\(rec.mainBetaMean ?? 0, privacy: .public) mainAlpha=\(rec.mainAlphaMean ?? 0, privacy: .public) n=\(mainSamples.count, privacy: .public)")
+        }
+
+        // B100 warmup FAA mean.
+        let warmupFAASamples: [Float] = rec.samples.filter { $0.phase == "warmup" }.compactMap(\.faa).filter { $0 != 0 }
+        if warmupFAASamples.count >= 30 {
+            rec.warmupFAAMean = warmupFAASamples.reduce(0, +) / Float(warmupFAASamples.count)
+            Telemetry.recording.notice("warmupFAAMean=\(rec.warmupFAAMean ?? 0, privacy: .public) n=\(warmupFAASamples.count, privacy: .public)")
+        }
+
+        // B107 session-level RMSSD mean (main phase).
+        let mainRMSSD: [Double] = rec.samples.filter { $0.phase == "main" }.compactMap { $0.rmssd }.filter { $0 > 0 }
+        if !mainRMSSD.isEmpty {
+            rec.rmssd = mainRMSSD.reduce(0, +) / Double(mainRMSSD.count)
+        }
+
+        rec.physiologicalScore = Self.computePhysiologicalScore(rec: rec, frontalGoodFrac: frontalGoodFrac)
+
+        appendFooter(rec: rec, reason: reason)
+        closeNDJSONHandle()
+
+        DispatchQueue.main.async { [self] in
+            flushTimer?.invalidate()
+            flushTimer = nil
+        }
+        tearDownAppStateObservers()
+
+        let allZs: [Float] = rec.samples.compactMap { s -> Float? in
+            guard s.phase == "main", let z = s.depthZ, z.isFinite else { return nil }
+            return z
+        }
+        if !allZs.isEmpty { PersonalZDistribution.shared.ingestSession(zSamples: allZs) }
+
+        logSessionGapStats(rec)
+    }
+
+    private func logSessionGapStats(_ rec: SessionRecord) {
+        let times: [Double] = rec.samples.map(\.time)
+        guard times.count > 1 else {
+            Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) (too few to compute gaps)")
+            return
+        }
+        let gaps:   [Double] = zip(times, times.dropFirst()).map { $1 - $0 }
+        let mean:   Double   = gaps.reduce(0.0, +) / Double(gaps.count)
+        let sorted: [Double] = gaps.sorted()
+        let p95:    Double   = sorted[min(Int(Double(sorted.count) * 0.95), sorted.count - 1)]
+        let maxGap: Double   = sorted.last ?? 0
+        Telemetry.recording.notice("session ended: samples=\(times.count, privacy: .public) duration=\(String(format: "%.1f", times.last ?? 0), privacy: .public)s gap_mean=\(String(format: "%.3f", mean), privacy: .public)s gap_p95=\(String(format: "%.3f", p95), privacy: .public)s gap_max=\(String(format: "%.3f", maxGap), privacy: .public)s")
     }
 
     // MARK: - Data ingestion
@@ -965,7 +946,9 @@ final class SessionRecorder: ObservableObject {
            let calRmssd = rec.calibrationRmssd,
            calRmssd > 1.0 {
             let response = (sessRmssd - calRmssd) / calRmssd
-            rmssdScore = Float(min(max(response * 30.0, 0.0), 30.0))
+            // 25% RMSSD improvement = full 30 pts; realistic session range 5-25%.
+            // Prior scaling (×30 raw) required 100% improvement to score max — physiologically impossible.
+            rmssdScore = Float(min(max(response / 0.25 * 30.0, 0.0), 30.0))
         } else {
             rmssdScore = 0.0
         }
@@ -1400,16 +1383,16 @@ extension SessionRecorder {
     // MARK: - B107 BLE resilience counters
 
     func recordBLEStall() {
-        queue.async { [self] in
-            guard isRecording else { return }
-            current?.stallCount = (current?.stallCount ?? 0) + 1
+        queue.sync {
+            guard self.isRecording else { return }
+            self.current?.stallCount = (self.current?.stallCount ?? 0) + 1
         }
     }
 
     func recordBLEReconnect() {
-        queue.async { [self] in
-            guard isRecording else { return }
-            current?.bleReconnectCount = (current?.bleReconnectCount ?? 0) + 1
+        queue.sync {
+            guard self.isRecording else { return }
+            self.current?.bleReconnectCount = (self.current?.bleReconnectCount ?? 0) + 1
         }
     }
 

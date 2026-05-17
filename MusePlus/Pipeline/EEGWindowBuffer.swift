@@ -133,9 +133,11 @@ final class EEGWindowBuffer {
         }
 
         let result = denoiser.denoise(window: window)
-        cleanedBatch.send(result.cleaned)   // B107: emit for live-path subscribers
         let s = result.stats
+        // Write alphaPowerRatio BEFORE send so main-thread subscribers always read window N's value,
+        // not a stale prior-window value (C1: eliminates the send-before-write ordering issue).
         latestAlphaPowerRatio = s.alphaPowerRatio
+        cleanedBatch.send(result.cleaned)   // B107: emit for live-path subscribers
 
         // B83 — direct field access; Potato + rASR fields confirmed present in struct.
         SessionRecorder.shared.appendDenoiseStats(

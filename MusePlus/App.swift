@@ -840,11 +840,6 @@ final class Probe: ObservableObject {
                     mean: self.scorer.calibrationBetaMean,
                     std:  self.scorer.calibrationBetaStd
                 )
-                // B107-T11: freeze calibration-phase RMSSD baseline
-                self.hrv.setCalibrationPhase(false)
-                if let calRmssd = self.hrv.calibrationRmssd {
-                    SessionRecorder.shared.attachCalibrationRmssd(calRmssd)
-                }
                 self.recordingStartWork?.cancel()
                 self.recordingStartedAt = Date()
                 self.marks.reset()
@@ -1154,12 +1149,13 @@ final class Probe: ObservableObject {
         SessionRecorder.shared.attachDiagnostics(buildDiagnostics(endReason: effectiveReason))
         SessionRecorder.shared.attachEventStream(sessionEvents)
         SessionRecorder.shared.attachEnterThreshold(gate.enterThresholdEcdf)
-        // B107: attach session-level HRV scalars before ending session
-        SessionRecorder.shared.attachHRVScalars(
-            sdnn: hrv.latestSDNN,
-            sd1:  hrv.latestSD1,
-            sd2:  hrv.latestSD2
-        )
+        // B107: atomically drain HRV scalars from HRV queue (C2: avoids inconsistent triple)
+        let hrvScalars = hrv.drainLatestHRVScalars()
+        SessionRecorder.shared.attachHRVScalars(sdnn: hrvScalars.sdnn, sd1: hrvScalars.sd1, sd2: hrvScalars.sd2)
+        // B107 C4: calibrationRmssd = first valid RMSSD window (~5 min) as session HRV baseline
+        if let calRmssd = hrv.calibrationRmssd {
+            SessionRecorder.shared.attachCalibrationRmssd(calRmssd)
+        }
         // B107: DFA α1 from full-session RR
         let sessionRR = hrv.extractSessionRR()
         if let alpha = HRVPipeline.computeDFAAlpha1(sessionRR) {
