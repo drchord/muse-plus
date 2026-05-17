@@ -151,6 +151,9 @@ struct SessionRecord: Codable, Identifiable {
     // B107 — BLE resilience counters.
     var stallCount:        Int? = nil   // BLE interruptions >0s that triggered grace period
     var bleReconnectCount: Int? = nil   // successful reconnects during session
+    // B107 — session-level HRV scalars for physiologicalScore and TrendsView.
+    var rmssd:            Double? = nil   // mean RMSSD over main phase (ms)
+    var calibrationRmssd: Double? = nil   // mean RMSSD during calibration window (ms)
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -526,6 +529,48 @@ final class SessionRecorder: ObservableObject {
                 rec.warmupFAAMean = warmupFAASamples.reduce(0, +) / Float(warmupFAASamples.count)
                 Telemetry.recording.notice("warmupFAAMean=\(rec.warmupFAAMean ?? 0, privacy: .public) n=\(warmupFAASamples.count, privacy: .public)")
             }
+
+            // B107: session-level RMSSD mean (main phase)
+            let mainRMSSD = rec.samples
+                .filter { $0.phase == "main" }
+                .compactMap { $0.rmssd }
+                .filter { $0 > 0 }
+            if !mainRMSSD.isEmpty {
+                rec.rmssd = mainRMSSD.reduce(0, +) / Double(mainRMSSD.count)
+            }
+
+            // B107: physiologicalScore — independent of deep-gate binary.
+            // betaZ: calibration vs session frontal beta suppression (0-50)
+            // rmssdResponse: HRV increase vs calibration baseline (0-30)
+            // signalCoherence: frontal contact quality (0-20)
+            let physScore: Int = {
+                // Component 1: betaZ (0-50)
+                let betaZScore: Float
+                if let calBeta = rec.calibrationBetaMean,
+                   let calBetaStd = rec.calibrationBetaStd,
+                   let sessBeta = rec.mainBetaMean,
+                   calBetaStd > 0 {
+                    let bz = (calBeta - sessBeta) / max(calBetaStd, 0.10)
+                    betaZScore = min(max(bz / 2.0 * 50.0, 0.0), 50.0)
+                } else {
+                    betaZScore = 0.0
+                }
+                // Component 2: rmssdResponse (0-30)
+                // calibrationRmssd wired in Task 11; until then contributes 0.
+                let rmssdScore: Float
+                if let sessRmssd = rec.rmssd,
+                   let calRmssd = rec.calibrationRmssd,
+                   calRmssd > 1.0 {
+                    let response = (Double(sessRmssd) - calRmssd) / calRmssd
+                    rmssdScore = Float(min(max(response * 30.0, 0.0), 30.0))
+                } else {
+                    rmssdScore = 0.0
+                }
+                // Component 3: signalCoherence (0-20) — frontalGoodFrac computed above
+                let coherenceScore = frontalGoodFrac * 20.0
+                return Int((betaZScore + rmssdScore + coherenceScore).rounded())
+            }()
+            rec.physiologicalScore = physScore
 
             // Write NDJSON footer — all biomarkers populated above.
             appendFooter(rec: rec, reason: reason)
