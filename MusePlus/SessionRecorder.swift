@@ -453,7 +453,7 @@ final class SessionRecorder: ObservableObject {
     /// The canonical .json is saved as a side effect; save failures are logged via Telemetry.
     @discardableResult
     func endSession(reason: String = "normal") -> SessionRecord? {
-        return queue.sync {
+        return queue.sync { () -> SessionRecord? in
             guard isRecording, var rec = current else { return nil }
             // Stop accepting new samples FIRST.
             DispatchQueue.main.async { self.isRecording = false }
@@ -1375,28 +1375,28 @@ extension SessionRecorder {
     }
 
     func attachCalibrationRmssd(_ rmssd: Double) {
-        queue.sync { [self] in
-            guard isRecording else { return }
-            current?.calibrationRmssd = rmssd
+        queue.sync {
+            guard self.isRecording else { return }
+            self.current?.calibrationRmssd = rmssd
             Telemetry.recording.notice("calibrationRmssd=\(rmssd, privacy: .public) ms")
         }
     }
 
     // B107: attach Poincaré / SDNN scalars captured at session end from HRVPipeline.latestX properties.
     func attachHRVScalars(sdnn: Double, sd1: Double, sd2: Double?) {
-        queue.sync { [self] in
-            guard isRecording else { return }
-            current?.sdnn = sdnn
-            current?.sd1  = sd1
-            current?.sd2  = sd2
+        queue.sync {
+            guard self.isRecording else { return }
+            self.current?.sdnn = sdnn
+            self.current?.sd1  = sd1
+            self.current?.sd2  = sd2
             Telemetry.recording.notice("HRVScalars attached: sdnn=\(sdnn, privacy: .public) sd1=\(sd1, privacy: .public) sd2=\(sd2.map(String.init) ?? "nil", privacy: .public)")
         }
     }
 
     func attachDFAAlpha1(_ alpha: Double) {
-        queue.sync { [self] in
-            guard isRecording else { return }
-            current?.dfaAlpha1 = alpha
+        queue.sync {
+            guard self.isRecording else { return }
+            self.current?.dfaAlpha1 = alpha
             Telemetry.recording.notice("dfaAlpha1=\(alpha, privacy: .public)")
         }
     }
