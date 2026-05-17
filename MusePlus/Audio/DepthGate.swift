@@ -291,6 +291,7 @@ final class DepthGate {
         smoothedScore      = 0.5
         smoothedDisplay    = 0.0
         kalman.reset()
+        kalman.qD          = 0.0022   // B107: restore default; next session re-adapts at calibration end
         duckDisplay        = 0.0
         SoundscapePlayer.shared.setProximityGain(1.0)
         SoundscapePlayer.shared.resetDeepStateGain()

@@ -806,8 +806,10 @@ final class Probe: ObservableObject {
             if result.isCalibrated && !self.calibrationFiredRecording {
                 self.calibrationFiredRecording = true
                 // B107: adaptive Kalman qD from calibration variance.
-                // Clamped to [0.0005, 0.020]: prevents over-smoothing and runaway tracking.
-                let adaptiveQD = min(max(self.scorer.calibrationEcdfVariance * 0.01, 0.0005), 0.020)
+                // baselineStd ∈ [0.10, 0.35] → variance ∈ [0.01, 0.12] → qD ∈ [0.0015, 0.018]
+                // Factor 0.15 centres the range around default 0.0022 at typical std≈0.13.
+                // Clamped to [0.0005, 0.020].
+                let adaptiveQD = min(max(self.scorer.calibrationEcdfVariance * 0.15, 0.0005), 0.020)
                 self.gate.setQD(adaptiveQD)
                 Telemetry.recording.notice("B107 adaptiveQD=\(adaptiveQD, privacy: .public) ecdfVar=\(self.scorer.calibrationEcdfVariance, privacy: .public)")
                 self.recordingStartWork?.cancel()
