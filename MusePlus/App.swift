@@ -308,6 +308,7 @@ final class Probe: ObservableObject {
                     self?.sessionSummary = nil
                     // Recording starts at calibration completion (B77: no 300s delay; warmup tag).
                     self?.calibrationFiredRecording = false
+                    self?.hrv.setCalibrationPhase(true)  // B107-T11: start collecting calibration-phase RR
                     self?.sessionForecast     = nil
                     self?.calibrationCompleted = false
                     self?.recentEcdf           = []
@@ -839,6 +840,11 @@ final class Probe: ObservableObject {
                     mean: self.scorer.calibrationBetaMean,
                     std:  self.scorer.calibrationBetaStd
                 )
+                // B107-T11: freeze calibration-phase RMSSD baseline
+                self.hrv.setCalibrationPhase(false)
+                if let calRmssd = self.hrv.calibrationRmssd {
+                    SessionRecorder.shared.attachCalibrationRmssd(calRmssd)
+                }
                 self.recordingStartWork?.cancel()
                 self.recordingStartedAt = Date()
                 self.marks.reset()

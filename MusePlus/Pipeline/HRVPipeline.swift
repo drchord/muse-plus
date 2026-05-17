@@ -58,6 +58,9 @@ final class HRVPipeline {
             rawBuffer.removeAll()
             updateCounter = 0
             sessionRR.removeAll()
+            calibrationRR.removeAll()
+            calibrationRmssd = nil
+            isInCalibration  = false
         }
     }
 
@@ -127,6 +130,7 @@ final class HRVPipeline {
 
         // Accumulate clean RR intervals for session-level DFA α1 computation.
         sessionRR.append(contentsOf: cleanRR)
+        if isInCalibration { calibrationRR.append(contentsOf: cleanRR) }
 
         // RMSSD (ms) — ESC/NASPE formula
         let diffs  = zip(cleanRR.dropFirst(), cleanRR).map { ($0 - $1) * ($0 - $1) }
@@ -326,6 +330,12 @@ final class HRVPipeline {
 
     private var sessionRR: [Double] = []
 
+    // MARK: - Calibration-phase RR accumulator (T11)
+
+    private var isInCalibration: Bool = false
+    private var calibrationRR:   [Double] = []
+    private(set) var calibrationRmssd: Double? = nil
+
     /// Drains the accumulated per-session RR array and resets it.
     /// Safe to call from any thread — dispatches synchronously on the HRV serial queue.
     func extractSessionRR() -> [Double] {
@@ -335,5 +345,18 @@ final class HRVPipeline {
             sessionRR = []
         }
         return rr
+    }
+
+    /// Called from App.swift to mark calibration phase boundaries.
+    /// When phase ends (active → false), freezes calibrationRmssd from accumulated RR.
+    func setCalibrationPhase(_ active: Bool) {
+        queue.async { [self] in
+            isInCalibration = active
+            if !active && !calibrationRR.isEmpty {
+                let diffs = zip(calibrationRR.dropFirst(), calibrationRR).map { pow($0 - $1, 2) }
+                calibrationRmssd = sqrt(diffs.reduce(0, +) / Double(diffs.count)) * 1000.0
+                calibrationRR.removeAll()
+            }
+        }
     }
 }

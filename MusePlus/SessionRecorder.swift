@@ -1364,6 +1364,14 @@ extension SessionRecorder {
         }
     }
 
+    func attachCalibrationRmssd(_ rmssd: Double) {
+        queue.async { [self] in
+            guard isRecording else { return }
+            current?.calibrationRmssd = rmssd
+            Telemetry.recording.notice("calibrationRmssd=\(rmssd, privacy: .public) ms")
+        }
+    }
+
     // B107: attach Poincaré / SDNN scalars captured at session end from HRVPipeline.latestX properties.
     func attachHRVScalars(sdnn: Double, sd1: Double, sd2: Double?) {
         queue.async { [self] in
