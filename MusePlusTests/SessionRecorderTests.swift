@@ -197,4 +197,21 @@ final class SessionRecorderTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(eventRows.count, 3,
             "NDJSON must retain events appended before crash (no endSession call)")
     }
+
+    func testNDJSONFooterContainsEnterThreshold() throws {
+        SessionRecorder.shared.startSession()
+        SessionRecorder.shared.endSession(reason: "test-completion")
+        Thread.sleep(forTimeInterval: 0.05)
+
+        guard let url = latestNDJSONURL() else {
+            throw XCTSkip("No session NDJSON available")
+        }
+        let allLines = lines(from: url)
+        let footer = allLines.last { $0["_type"] as? String == "footer" }
+        XCTAssertNotNil(footer, "Footer line must exist in NDJSON")
+        XCTAssertTrue(footer?.keys.contains("enterThresholdAtSession") == true,
+                      "Footer must contain enterThresholdAtSession in B107 sessions")
+        XCTAssertTrue(footer?.keys.contains("physiologicalScore") == true,
+                      "Footer must contain physiologicalScore in B107 sessions")
+    }
 }

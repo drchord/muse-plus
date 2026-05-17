@@ -143,6 +143,8 @@ struct SessionRecord: Codable, Identifiable {
     var mainBetaMean:  Float? = nil
     // B100 — warmup-phase mean FAA. Prospective predictor (r=-0.76, n=8). Nil if <30 valid samples.
     var warmupFAAMean: Float? = nil
+    // B107 — signal-quality score independent of deep-gate binary.
+    var physiologicalScore: Int? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -184,6 +186,8 @@ private struct NDJSONFooter: Codable {
     let meditationIndexCorrelation: Float?
     let warmupFAAMean: Float?        // B100: warmup mean FAA; nil if <30 valid samples
     let mainBetaMean:  Float?        // B100: main-phase mean frontal beta
+    let enterThresholdAtSession: Float?   // B107: entry threshold active for this session
+    let physiologicalScore: Int?          // B107: signal-quality score independent of deep gate
 }
 
 private struct NDJSONAppState: Codable {
@@ -924,7 +928,9 @@ final class SessionRecorder: ObservableObject {
             rmssdDepthDelta: rec.rmssdDepthDelta,
             meditationIndexCorrelation: rec.meditationIndexCorrelation,
             warmupFAAMean: rec.warmupFAAMean,
-            mainBetaMean:  rec.mainBetaMean
+            mainBetaMean:  rec.mainBetaMean,
+            enterThresholdAtSession: rec.enterThresholdAtSession,
+            physiologicalScore: rec.physiologicalScore
         )
         appendLine(footer)
         ndjsonHandle?.synchronizeFile()
