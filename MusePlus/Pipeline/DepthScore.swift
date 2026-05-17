@@ -21,6 +21,7 @@ final class DepthScore {
 
     private(set) var calibrationBetaMean: Float = 0
     private(set) var calibrationBetaStd:  Float = 0.30
+    private(set) var calibrationEcdfVariance: Float = 0.0
 
     var isCalibrated: Bool {
         guard let start = calibrationStart else { return false }
@@ -45,6 +46,7 @@ final class DepthScore {
         calibrationIndexStd    = 0
         calibrationBetaMean    = 0
         calibrationBetaStd     = 0.30
+        calibrationEcdfVariance = 0.0
     }
 
     func process(_ powers: [BandPowers], correctedPowers: [BandPowers]? = nil) {
@@ -145,6 +147,9 @@ final class DepthScore {
         // This floor is provisional — check calibrationIndexStd in Settings after
         // a few sessions to determine whether 0.10 is appropriate for your EEG.
         baselineStd = max(mad * 1.4826, 0.10)
+
+        // B107: variance proxy for adaptive Kalman qD. Must be set BEFORE calibrationSamples = [] below.
+        calibrationEcdfVariance = baselineStd * baselineStd
 
         calibrationIndexMean = baselineMean
         calibrationIndexStd  = baselineStd
