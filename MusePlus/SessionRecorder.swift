@@ -550,37 +550,7 @@ final class SessionRecorder: ObservableObject {
             }
 
             // B107: physiologicalScore — independent of deep-gate binary.
-            // betaZ: calibration vs session frontal beta suppression (0-50)
-            // rmssdResponse: HRV increase vs calibration baseline (0-30)
-            // signalCoherence: frontal contact quality (0-20)
-            let physScore: Int = {
-                // Component 1: betaZ (0-50)
-                let betaZScore: Float
-                if let calBeta = rec.calibrationBetaMean,
-                   let calBetaStd = rec.calibrationBetaStd,
-                   let sessBeta = rec.mainBetaMean,
-                   calBetaStd > 0 {
-                    let bz = (calBeta - sessBeta) / max(calBetaStd, 0.10)
-                    betaZScore = min(max(bz / 2.0 * 50.0, 0.0), 50.0)
-                } else {
-                    betaZScore = 0.0
-                }
-                // Component 2: rmssdResponse (0-30)
-                // calibrationRmssd wired in Task 11; until then contributes 0.
-                let rmssdScore: Float
-                if let sessRmssd = rec.rmssd,
-                   let calRmssd = rec.calibrationRmssd,
-                   calRmssd > 1.0 {
-                    let response = (Double(sessRmssd) - calRmssd) / calRmssd
-                    rmssdScore = Float(min(max(response * 30.0, 0.0), 30.0))
-                } else {
-                    rmssdScore = 0.0
-                }
-                // Component 3: signalCoherence (0-20) — frontalGoodFrac computed above
-                let coherenceScore = frontalGoodFrac * 20.0
-                return Int((betaZScore + rmssdScore + coherenceScore).rounded())
-            }()
-            rec.physiologicalScore = physScore
+            rec.physiologicalScore = Self.computePhysiologicalScore(rec: rec, frontalGoodFrac: frontalGoodFrac)
 
             // Write NDJSON footer — all biomarkers populated above.
             appendFooter(rec: rec, reason: reason)
@@ -975,6 +945,32 @@ final class SessionRecorder: ObservableObject {
         } catch {
             Telemetry.recording.error("NDJSON encode error: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    // betaZ (0-50) + rmssdResponse (0-30) + signalCoherence (0-20) = 0-100
+    // Extracted from endSession closure to avoid Swift type-checker timeout on large closures.
+    private static func computePhysiologicalScore(rec: SessionRecord, frontalGoodFrac: Float) -> Int {
+        let betaZScore: Float
+        if let calBeta = rec.calibrationBetaMean,
+           let calBetaStd = rec.calibrationBetaStd,
+           let sessBeta = rec.mainBetaMean,
+           calBetaStd > 0 {
+            let bz = (calBeta - sessBeta) / max(calBetaStd, 0.10)
+            betaZScore = min(max(bz / 2.0 * 50.0, 0.0), 50.0)
+        } else {
+            betaZScore = 0.0
+        }
+        let rmssdScore: Float
+        if let sessRmssd = rec.rmssd,
+           let calRmssd = rec.calibrationRmssd,
+           calRmssd > 1.0 {
+            let response = (sessRmssd - calRmssd) / calRmssd
+            rmssdScore = Float(min(max(response * 30.0, 0.0), 30.0))
+        } else {
+            rmssdScore = 0.0
+        }
+        let coherenceScore = frontalGoodFrac * 20.0
+        return Int((betaZScore + rmssdScore + coherenceScore).rounded())
     }
 
     private func appendFooter(rec: SessionRecord, reason: String) {
@@ -1389,7 +1385,7 @@ extension SessionRecorder {
             self.current?.sdnn = sdnn
             self.current?.sd1  = sd1
             self.current?.sd2  = sd2
-            Telemetry.recording.notice("HRVScalars attached: sdnn=\(sdnn, privacy: .public) sd1=\(sd1, privacy: .public) sd2=\(sd2.map(String.init) ?? "nil", privacy: .public)")
+            Telemetry.recording.notice("HRVScalars attached: sdnn=\(sdnn, privacy: .public) sd1=\(sd1, privacy: .public) sd2=\(sd2.map { String($0) } ?? "nil", privacy: .public)")
         }
     }
 
