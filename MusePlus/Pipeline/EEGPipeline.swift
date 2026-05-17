@@ -85,6 +85,38 @@ final class EEGPipeline {
             allPSDs.append(psd)
         }
 
+        dispatchPowers(allPowers, psds: allPSDs, timestamp: ts)
+        for ch in 0..<activeChannelCount { buffers[ch].removeFirst(EEGPipeline.hopSize) }
+    }
+
+    // B107: accepts a pre-denoised 4-channel × 256-sample window directly.
+    // Called from App.swift when `eegDenoiseLiveSignal` UserDefault is true.
+    // Bypasses per-packet accumulation — EEGWindowBuffer already formed the window.
+    func processCleanedWindow(_ channels: [[Float]]) {
+        guard channels.count >= 4, channels[0].count == EEGPipeline.windowSize else { return }
+        for ch in 0..<min(channels.count, 8) {
+            buffers[ch] = Array(channels[ch])
+        }
+        activeChannelCount = max(activeChannelCount, channels.count)
+        let ts = Date().timeIntervalSinceReferenceDate
+        var allPowers = [BandPowers]()
+        var allPSDs   = [[Float]]()
+        allPowers.reserveCapacity(activeChannelCount)
+        allPSDs.reserveCapacity(activeChannelCount)
+        for ch in 0..<activeChannelCount {
+            let (psd, bp) = computeWindow(Array(buffers[ch].prefix(EEGPipeline.windowSize)),
+                                           channel: ch, timestamp: ts)
+            allPowers.append(bp)
+            allPSDs.append(psd)
+        }
+        for ch in 0..<activeChannelCount { buffers[ch].removeFirst(EEGPipeline.hopSize) }
+        dispatchPowers(allPowers, psds: allPSDs, timestamp: ts)
+    }
+
+    // MARK: - Power dispatch
+
+    private func dispatchPowers(_ allPowers: [BandPowers], psds allPSDs: [[Float]],
+                                 timestamp ts: TimeInterval) {
         // IRASA: canonical channels 0-3 only (EEG1-4). Compute fits, gather mean fit
         // params for aperiodic correction (mean chi/offset across channels passing R² gate).
         var fitChis = [Float]()
@@ -130,8 +162,6 @@ final class EEGPipeline {
                                windowSize: EEGPipeline.windowSize)
             onITPFUpdate?(iTPFTracker.currentEstimate)
         }
-
-        for ch in 0..<activeChannelCount { buffers[ch].removeFirst(EEGPipeline.hopSize) }
     }
 
     // Called on session end — persists Kalman state and adapts process noise.

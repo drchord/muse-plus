@@ -38,6 +38,7 @@
 /// so even at 50 ms we'd be fine. CPU footprint will be confirmed by `mainStall`
 /// telemetry: if denoise enabled correlates with stall events, drop CPU budget.
 
+import Combine
 import Foundation
 
 final class EEGWindowBuffer {
@@ -53,6 +54,11 @@ final class EEGWindowBuffer {
     // Written on queue, read cross-thread; Float reads are atomic on ARM64, benign race acceptable
     // given 1s update cadence and the value being a smoothed quality metric (not a control flow gate).
     private(set) var latestAlphaPowerRatio: Float = 0.5
+
+    // B107: emits the cleaned 4-channel × 256-sample window on the denoiser queue.
+    // Subscribers that set `eegDenoiseLiveSignal=true` at session start will receive these
+    // and feed them directly into EEGPipeline.processCleanedWindow() instead of raw packets.
+    let cleanedBatch = PassthroughSubject<[[Float]], Never>()
 
     private init() {}
 
@@ -127,6 +133,7 @@ final class EEGWindowBuffer {
         }
 
         let result = denoiser.denoise(window: window)
+        cleanedBatch.send(result.cleaned)   // B107: emit for live-path subscribers
         let s = result.stats
         latestAlphaPowerRatio = s.alphaPowerRatio
 

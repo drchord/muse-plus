@@ -145,6 +145,9 @@ final class Probe: ObservableObject {
     @Published var rmssd:     Float? = nil  // RMSSD in ms; nil until 5-min Optics window accumulates
     @Published var lfhfRatio: Float? = nil  // LF/HF ratio; nil until RMSSD available
     private var bag = Set<AnyCancellable>()
+    // B107: set at session start from UserDefault; gates raw vs cleaned EEG path for this session.
+    // Read-once at calibration completion so the path stays stable for the entire session.
+    private var liveDenoiseEnabled = false
     private var sampleIndex = 0
 
     // MARK: - B80 Diagnostic state
@@ -457,8 +460,24 @@ final class Probe: ObservableObject {
                 guard let self else { return }
                 self.lastEEG = pkt.channels
                 self.packetCount += 1
+                // B107: when live denoiser is active, skip raw path — cleaned-batch
+                // subscriber below calls pipeline.processCleanedWindow() instead.
+                guard !self.liveDenoiseEnabled else { return }
                 self.pipeline.process(pkt)
                 // B80: notify liveness watchdog of every raw packet.
+                LivenessWatchdog.shared.packetReceived()
+            }
+            .store(in: &bag)
+
+        // B107: cleaned-batch subscription — active only when eegDenoiseLiveSignal=true.
+        // EEGWindowBuffer emits one [[Float]] per second (256-sample window, 4 channels).
+        // Feeds processCleanedWindow() which runs the same FFT/band-power/IRASA path as
+        // the raw process() call but on the denoiser output.
+        EEGWindowBuffer.shared.cleanedBatch
+            .receive(on: RunLoop.main)
+            .sink { [weak self] channels in
+                guard let self, self.liveDenoiseEnabled else { return }
+                self.pipeline.processCleanedWindow(channels)
                 LivenessWatchdog.shared.packetReceived()
             }
             .store(in: &bag)
@@ -897,6 +916,10 @@ final class Probe: ObservableObject {
 
                 ElementsTracker.shared.reset()
                 PersonalZDistribution.shared.resetSessionRing()
+                // B107: latch live-denoiser flag once per session at calibration end.
+                // Reading UserDefault here (not at app launch) so the user can toggle
+                // the flag between sessions without restarting the app.
+                self.liveDenoiseEnabled = UserDefaults.standard.bool(forKey: "eegDenoiseLiveSignal")
                 SessionRecorder.shared.startSession(
                     calibrationIndexMean: self.scorer.calibrationIndexMean,
                     calibrationIndexStd:  self.scorer.calibrationIndexStd
