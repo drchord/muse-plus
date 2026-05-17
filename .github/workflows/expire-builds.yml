@@ -1,0 +1,155 @@
+name: Expire old TestFlight builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — list only, no changes made'
+        type: boolean
+        default: true
+      keep_count:
+        description: 'Number of most-recent Muse++ builds to keep'
+        type: string
+        default: '6'
+      expire_muse_plus:
+        description: 'Expire ALL builds of old "Muse Plus" app (separate from Muse++)'
+        type: boolean
+        default: false
+
+jobs:
+  expire:
+    runs-on: macos-15
+
+    steps:
+      - name: Setup ASC API key
+        env:
+          ASC_API_KEY: ${{ secrets.ASC_API_KEY }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$ASC_API_KEY" > ~/.appstoreconnect/private_keys/AuthKey_9V47M72GKG.p8
+          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_9V47M72GKG.p8
+
+      - name: Install Python deps
+        run: pip3 install PyJWT cryptography requests
+
+      - name: List and expire builds
+        env:
+          KEY_ID: "9V47M72GKG"
+          ISSUER_ID: "620b8c6b-545b-4fb4-8b7f-4b527a671243"
+          DRY_RUN: ${{ inputs.dry_run }}
+          KEEP_COUNT: ${{ inputs.keep_count }}
+          EXPIRE_MUSE_PLUS: ${{ inputs.expire_muse_plus }}
+        run: |
+          python3 << 'PYEOF'
+          import jwt, time, requests, os
+
+          KEY_ID      = os.environ["KEY_ID"]
+          ISSUER_ID   = os.environ["ISSUER_ID"]
+          KEY_PATH    = os.path.expanduser(f"~/.appstoreconnect/private_keys/AuthKey_{KEY_ID}.p8")
+          DRY_RUN     = os.environ.get("DRY_RUN", "true").lower() != "false"
+          KEEP        = int(os.environ.get("KEEP_COUNT", "6"))
+          EXPIRE_OLD  = os.environ.get("EXPIRE_MUSE_PLUS", "false").lower() == "true"
+          BASE        = "https://api.appstoreconnect.apple.com/v1"
+
+          with open(KEY_PATH) as f:
+              KEY = f.read()
+
+          def make_token():
+              now = int(time.time())
+              return jwt.encode(
+                  {"iss": ISSUER_ID, "iat": now, "exp": now + 1200, "aud": "appstoreconnect-v1"},
+                  KEY, algorithm="ES256", headers={"kid": KEY_ID}
+              )
+
+          def get(url, **params):
+              r = requests.get(url, headers={"Authorization": f"Bearer {make_token()}"}, params=params or None)
+              r.raise_for_status()
+              return r.json()
+
+          def patch(path, payload):
+              r = requests.patch(
+                  f"{BASE}{path}",
+                  headers={"Authorization": f"Bearer {make_token()}", "Content-Type": "application/json"},
+                  json=payload
+              )
+              r.raise_for_status()
+
+          def list_all(path, **params):
+              results, url, first = [], f"{BASE}{path}", True
+              while url:
+                  d = get(url, **(params if first else {}))
+                  results += d["data"]
+                  url = d.get("links", {}).get("next")
+                  first = False
+              return results
+
+          # ── List all apps in account ──────────────────────────────────────
+          apps = list_all("/apps", **{"fields[apps]": "name,bundleId"})
+          print(f"\n{'[DRY RUN] ' if DRY_RUN else ''}Apps in account ({len(apps)} total):")
+          for a in apps:
+              print(f"  {a['attributes']['name']:<35} {a['attributes']['bundleId']}  (id={a['id']})")
+
+          # ── Process each Muse app ─────────────────────────────────────────
+          for app in apps:
+              name   = app["attributes"]["name"]
+              bundle = app["attributes"]["bundleId"]
+              app_id = app["id"]
+
+              is_muse_pp  = bundle == "com.drchord.museplus"
+              is_muse_old = (not is_muse_pp) and ("muse" in name.lower())
+
+              if not is_muse_pp and not is_muse_old:
+                  continue
+
+              builds = list_all("/builds", **{
+                  "filter[app]": app_id,
+                  "sort": "-uploadedDate",
+                  "fields[builds]": "version,uploadedDate,expired,processingState",
+                  "limit": "200"
+              })
+
+              valid           = [b for b in builds if b["attributes"].get("processingState") == "VALID"
+                                                   and not b["attributes"].get("expired", False)]
+              already_expired = [b for b in builds if b["attributes"].get("expired", False)]
+
+              print(f"\n{'='*60}")
+              print(f"  App   : {name} ({bundle})")
+              print(f"  Total : {len(builds)}  Valid: {len(valid)}  Already expired: {len(already_expired)}")
+
+              if is_muse_pp:
+                  to_keep   = valid[:KEEP]
+                  to_expire = valid[KEEP:]
+                  print(f"\n  Keeping {len(to_keep)} most recent Muse++ builds:")
+                  for b in to_keep:
+                      print(f"    KEEP   #{b['attributes']['version']:>4}  {b['attributes']['uploadedDate'][:10]}")
+                  print(f"\n  Marking {len(to_expire)} build(s) for expiry:")
+                  for b in to_expire:
+                      print(f"    EXPIRE #{b['attributes']['version']:>4}  {b['attributes']['uploadedDate'][:10]}")
+
+              elif is_muse_old:
+                  if EXPIRE_OLD:
+                      to_expire = valid
+                      print(f"\n  Expiring ALL {len(to_expire)} valid builds (old Muse Plus app):")
+                      for b in to_expire:
+                          print(f"    EXPIRE #{b['attributes']['version']:>4}  {b['attributes']['uploadedDate'][:10]}")
+                  else:
+                      to_expire = []
+                      print(f"\n  expire_muse_plus=false — listing only, not expiring.")
+                      for b in valid:
+                          print(f"    BUILD  #{b['attributes']['version']:>4}  {b['attributes']['uploadedDate'][:10]}")
+
+              # ── Apply changes (skipped in dry run) ───────────────────────
+              if DRY_RUN:
+                  print(f"\n  [DRY RUN] Would expire {len(to_expire)} build(s). No changes made.")
+                  print(  "  Re-run with dry_run=false to apply.")
+              else:
+                  for b in to_expire:
+                      patch(f"/builds/{b['id']}", {
+                          "data": {"type": "builds", "id": b["id"], "attributes": {"expired": True}}
+                      })
+                      print(f"  ✓ expired #{b['attributes']['version']}")
+                  if to_expire:
+                      print(f"\n  Done — {len(to_expire)} build(s) expired.")
+                  else:
+                      print(f"\n  Nothing to expire.")
+          PYEOF
