@@ -530,14 +530,17 @@ final class SessionRecorder: ObservableObject {
             rec.mainAlphaMean = mainSamples.map(\.alpha).reduce(0, +) / n
             rec.mainThetaMean = mainSamples.map(\.theta).reduce(0, +) / n
             rec.mainBetaMean  = mainSamples.map(\.beta).reduce(0, +)  / n
-            Telemetry.recording.notice("mainBeta=\(rec.mainBetaMean ?? 0, privacy: .public) mainAlpha=\(rec.mainAlphaMean ?? 0, privacy: .public) n=\(mainSamples.count, privacy: .public)")
+            let logBeta  = rec.mainBetaMean  ?? Float(0)
+            let logAlpha = rec.mainAlphaMean ?? Float(0)
+            Telemetry.recording.notice("mainBeta=\(logBeta, privacy: .public) mainAlpha=\(logAlpha, privacy: .public) n=\(mainSamples.count, privacy: .public)")
         }
 
         // B100 warmup FAA mean.
         let warmupFAASamples: [Float] = rec.samples.filter { $0.phase == "warmup" }.compactMap(\.faa).filter { $0 != 0 }
         if warmupFAASamples.count >= 30 {
             rec.warmupFAAMean = warmupFAASamples.reduce(0, +) / Float(warmupFAASamples.count)
-            Telemetry.recording.notice("warmupFAAMean=\(rec.warmupFAAMean ?? 0, privacy: .public) n=\(warmupFAASamples.count, privacy: .public)")
+            let logFAA = rec.warmupFAAMean ?? Float(0)
+            Telemetry.recording.notice("warmupFAAMean=\(logFAA, privacy: .public) n=\(warmupFAASamples.count, privacy: .public)")
         }
 
         // B107 session-level RMSSD mean (main phase).
@@ -1385,15 +1388,17 @@ extension SessionRecorder {
 
     func recordBLEStall() {
         queue.sync {
-            guard self.isRecording else { return }
-            self.current?.stallCount = (self.current?.stallCount ?? 0) + 1
+            guard self.isRecording, var rec = self.current else { return }
+            rec.stallCount = (rec.stallCount ?? 0) + 1
+            self.current = rec
         }
     }
 
     func recordBLEReconnect() {
         queue.sync {
-            guard self.isRecording else { return }
-            self.current?.bleReconnectCount = (self.current?.bleReconnectCount ?? 0) + 1
+            guard self.isRecording, var rec = self.current else { return }
+            rec.bleReconnectCount = (rec.bleReconnectCount ?? 0) + 1
+            self.current = rec
         }
     }
 
