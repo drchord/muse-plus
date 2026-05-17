@@ -154,6 +154,11 @@ struct SessionRecord: Codable, Identifiable {
     // B107 — session-level HRV scalars for physiologicalScore and TrendsView.
     var rmssd:            Double? = nil   // mean RMSSD over main phase (ms)
     var calibrationRmssd: Double? = nil   // mean RMSSD during calibration window (ms)
+    // B107 — Poincaré plot and SDNN scalars (Brennan 2002). Populated at session end via attachHRVScalars().
+    var sdnn:      Double? = nil   // standard deviation of all RR intervals (ms)
+    var sd1:       Double? = nil   // Poincaré short-axis SD (instantaneous beat-to-beat variability)
+    var sd2:       Double? = nil   // Poincaré long-axis SD (continuous long-term variability)
+    var dfaAlpha1: Double? = nil   // DFA α1 scaling exponent — populated by Task 10
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -1356,6 +1361,17 @@ extension SessionRecorder {
             current?.calibrationBetaMean = mean
             current?.calibrationBetaStd  = std
             Telemetry.recording.notice("calibrationBeta attached: mean=\(mean, privacy: .public) std=\(std, privacy: .public)")
+        }
+    }
+
+    // B107: attach Poincaré / SDNN scalars captured at session end from HRVPipeline.latestX properties.
+    func attachHRVScalars(sdnn: Double, sd1: Double, sd2: Double?) {
+        queue.async { [self] in
+            guard isRecording else { return }
+            current?.sdnn = sdnn
+            current?.sd1  = sd1
+            current?.sd2  = sd2
+            Telemetry.recording.notice("HRVScalars attached: sdnn=\(sdnn, privacy: .public) sd1=\(sd1, privacy: .public) sd2=\(sd2.map(String.init) ?? "nil", privacy: .public)")
         }
     }
 

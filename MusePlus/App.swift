@@ -1148,6 +1148,12 @@ final class Probe: ObservableObject {
         SessionRecorder.shared.attachDiagnostics(buildDiagnostics(endReason: effectiveReason))
         SessionRecorder.shared.attachEventStream(sessionEvents)
         SessionRecorder.shared.attachEnterThreshold(gate.enterThresholdEcdf)
+        // B107: attach session-level HRV scalars before ending session
+        SessionRecorder.shared.attachHRVScalars(
+            sdnn: hrv.latestSDNN,
+            sd1:  hrv.latestSD1,
+            sd2:  hrv.latestSD2
+        )
         Telemetry.recording.notice("endSession reason=\(effectiveReason, privacy: .public)")
         // B98: endSession() returns the completed SessionRecord directly — eliminates the
         // prior file-decode path (try? dec.decode silently returned nil, showing Duration:0s).

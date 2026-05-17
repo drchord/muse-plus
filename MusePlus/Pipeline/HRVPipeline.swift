@@ -10,6 +10,14 @@ final class HRVPipeline {
     // Fires on main thread: (rmssd_ms, lfhf_ratio?)
     var onRMSSD: ((Double, Double?) -> Void)?
 
+    // B107: per-window latest values for session-end attachment
+    private(set) var latestSDNN: Double = 0.0
+    private(set) var latestSD1:  Double = 0.0
+    private(set) var latestSD2:  Double?
+
+    // B107: fires with extended HRV metrics (alongside onRMSSD)
+    var onHRVExtended: ((sdnn: Double, sd1: Double, sd2: Double?) -> Void)?
+
     private static let sampleRate:    Double = 64.0
     private static let windowSamples: Int    = 19200   // 5 * 60 * 64
     private static let updateInterval: Int   = 64      // run AMPD every 1 s
@@ -122,8 +130,18 @@ final class HRVPipeline {
 
         let lfhf   = computeLFHF(cleanRR)
 
+        let sdnn = Self.computeSDNN(cleanRR)
+        let sd1  = Self.computeSD1(cleanRR) ?? rmssd / sqrt(2.0)
+        let sd2  = Self.computeSD2(cleanRR)
+        latestSDNN = sdnn
+        latestSD1  = sd1
+        latestSD2  = sd2
         DispatchQueue.main.async { [weak self] in
-            self?.onRMSSD?(rmssd, lfhf)
+            guard let self else { return }
+            self.onRMSSD?(rmssd, lfhf)
+            if let sd2 = sd2 {
+                self.onHRVExtended?((sdnn: sdnn, sd1: sd1, sd2: sd2))
+            }
         }
     }
 
@@ -216,5 +234,31 @@ final class HRVPipeline {
         let s = arr.sorted()
         let n = s.count
         return n % 2 == 0 ? (s[n/2 - 1] + s[n/2]) / 2 : s[n/2]
+    }
+
+    // MARK: - Poincaré / SDNN (B107)
+
+    static func computeSDNN(_ rr: [Double]) -> Double {
+        guard rr.count >= 2 else { return 0 }
+        let mean = rr.reduce(0, +) / Double(rr.count)
+        let variance = rr.map { pow($0 - mean, 2) }.reduce(0, +) / Double(rr.count)
+        return sqrt(variance)
+    }
+
+    static func computeSD1(_ rr: [Double]) -> Double? {
+        guard rr.count >= 2 else { return nil }
+        let diffs = zip(rr.dropFirst(), rr).map { pow($0 - $1, 2) }
+        let rmssd = sqrt(diffs.reduce(0, +) / Double(diffs.count))
+        return rmssd / sqrt(2.0)
+    }
+
+    static func computeSD2(_ rr: [Double]) -> Double? {
+        guard rr.count >= 2 else { return nil }
+        let sdnn = computeSDNN(rr)
+        let diffs = zip(rr.dropFirst(), rr).map { pow($0 - $1, 2) }
+        let rmssd = sqrt(diffs.reduce(0, +) / Double(diffs.count))
+        let inner = 2 * pow(sdnn, 2) - pow(rmssd, 2) / 2
+        guard inner >= 0 else { return nil }
+        return sqrt(inner)
     }
 }
