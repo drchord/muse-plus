@@ -18,6 +18,12 @@ private struct TrendSession: Identifiable {
     let dfaAlpha1:                 Double?
 }
 
+// Used by thresholdSection Chart — anonymous tuples don't support key-path id in Swift.
+private struct ThresholdPoint: Identifiable {
+    let id: Int
+    let threshold: Float
+}
+
 // Minimal Codable subset for fast JSON parsing (avoids decoding thousands of samples).
 private struct TrendRecord: Codable {
     let id:           String
@@ -196,13 +202,14 @@ struct TrendsView: View {
 
     private var thresholdSection: some View {
         Section("Entry Threshold Progression") {
-            Chart(filteredSessions.enumerated().compactMap { (i, s) -> (Int, Float)? in
+            let points = filteredSessions.enumerated().compactMap { (i, s) -> ThresholdPoint? in
                 guard let t = s.enterThreshold else { return nil }
-                return (i + 1, t)
-            }, id: \.0) { pair in
+                return ThresholdPoint(id: i + 1, threshold: t)
+            }
+            Chart(points) { pt in
                 LineMark(
-                    x: .value("Session", pair.0),
-                    y: .value("Threshold (ECDF)", pair.1)
+                    x: .value("Session", pt.id),
+                    y: .value("Threshold (ECDF)", pt.threshold)
                 )
                 .foregroundStyle(.orange)
             }

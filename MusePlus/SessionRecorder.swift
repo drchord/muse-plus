@@ -541,7 +541,7 @@ final class SessionRecorder: ObservableObject {
         }
 
         // B107 session-level RMSSD mean (main phase).
-        let mainRMSSD: [Double] = rec.samples.filter { $0.phase == "main" }.compactMap { $0.rmssd }.filter { $0 > 0 }
+        let mainRMSSD: [Double] = rec.samples.filter { $0.phase == "main" }.compactMap { $0.rmssd.map { Double($0) } }.filter { $0 > 0 }
         if !mainRMSSD.isEmpty {
             rec.rmssd = mainRMSSD.reduce(0, +) / Double(mainRMSSD.count)
         }
@@ -1036,6 +1036,7 @@ final class SessionRecorder: ObservableObject {
 
     // MARK: - Private: canonical .json synthesis
 
+    @discardableResult
     private func save(_ rec: SessionRecord) -> URL? {
         let dir = sessionsDir()
         let fmt = DateFormatter()
