@@ -38,8 +38,9 @@ private struct TrendRecord: Codable {
 }
 
 struct TrendsView: View {
-    @State private var sessions:  [TrendSession] = []
-    @State private var isLoading: Bool           = true
+    @State private var sessions:       [TrendSession] = []
+    @State private var isLoading:      Bool           = true
+    @State private var timeOfDayFilter: String?      = nil  // nil = show all
 
     var body: some View {
         Group {
@@ -54,11 +55,34 @@ struct TrendsView: View {
                 )
             } else {
                 List {
+                    Section {
+                        Picker("Time of Day", selection: $timeOfDayFilter) {
+                            Text("All").tag(String?.none)
+                            Text("Morning").tag(String?.some("morning"))
+                            Text("Afternoon").tag(String?.some("afternoon"))
+                            Text("Evening").tag(String?.some("evening"))
+                            Text("Night").tag(String?.some("night"))
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
                     deepFractionSection
-                    if sessions.contains(where: { $0.qualityScore != nil }) {
+                    if filteredSessions.contains(where: { $0.qualityScore != nil }) {
                         qualityScoreSection
                     }
                     durationSection
+                    if filteredSessions.contains(where: { $0.physiologicalScore != nil }) {
+                        physiologicalScoreSection
+                    }
+                    if filteredSessions.contains(where: { $0.enterThreshold != nil }) {
+                        thresholdSection
+                    }
+                    if filteredSessions.contains(where: { $0.rmssd != nil }) {
+                        rmssdSection
+                    }
+                    if filteredSessions.contains(where: { $0.dfaAlpha1 != nil }) {
+                        dfaSection
+                    }
                     statsSection
                 }
                 .listStyle(.insetGrouped)
@@ -69,11 +93,18 @@ struct TrendsView: View {
         .task { await loadSessions() }
     }
 
+    // MARK: - Filtering
+
+    private var filteredSessions: [TrendSession] {
+        guard let f = timeOfDayFilter else { return sessions }
+        return sessions.filter { $0.timeOfDay == f }
+    }
+
     // MARK: - Chart sections
 
     private var deepFractionSection: some View {
         Section {
-            Chart(sessions) { s in
+            Chart(filteredSessions) { s in
                 if let d = s.deepFraction {
                     AreaMark(x: .value("Date", s.date),
                              y: .value("Deep %", d * 100))
@@ -92,7 +123,7 @@ struct TrendsView: View {
             .chartXAxis { AxisMarks(values: .stride(by: .day, count: 7)) }
             .frame(height: 180)
 
-            if let arrow = trendArrow(values: sessions.compactMap(\.deepFraction)) {
+            if let arrow = trendArrow(values: filteredSessions.compactMap(\.deepFraction)) {
                 Label(arrow.label, systemImage: arrow.icon)
                     .font(.caption)
                     .foregroundStyle(arrow.color)
@@ -104,7 +135,7 @@ struct TrendsView: View {
 
     private var qualityScoreSection: some View {
         Section("Quality Score") {
-            Chart(sessions.filter { $0.qualityScore != nil }) { s in
+            Chart(filteredSessions.filter { $0.qualityScore != nil }) { s in
                 LineMark(x: .value("Date", s.date),
                          y: .value("Score", Double(s.qualityScore!)))
                     .foregroundStyle(.blue)
@@ -120,7 +151,7 @@ struct TrendsView: View {
 
     private var durationSection: some View {
         Section("Session Duration (min)") {
-            Chart(sessions.filter { $0.durationMin != nil }) { s in
+            Chart(filteredSessions.filter { $0.durationMin != nil }) { s in
                 BarMark(x: .value("Date", s.date),
                         y: .value("Min", s.durationMin!))
                     .foregroundStyle(.indigo.opacity(0.65))
@@ -132,14 +163,90 @@ struct TrendsView: View {
 
     private var statsSection: some View {
         Section("Summary") {
-            let deepVals = sessions.compactMap(\.deepFraction)
+            let deepVals = filteredSessions.compactMap(\.deepFraction)
             if !deepVals.isEmpty {
-                LabeledContent("Sessions loaded", value: "\(sessions.count)")
+                LabeledContent("Sessions loaded", value: "\(filteredSessions.count)")
                 LabeledContent("Avg deep fraction",
                                value: String(format: "%.0f%%",
                                              deepVals.reduce(0, +) / Double(deepVals.count) * 100))
                 LabeledContent("Best session",
                                value: String(format: "%.0f%%", (deepVals.max() ?? 0) * 100))
+            }
+        }
+    }
+
+    private var physiologicalScoreSection: some View {
+        Section("Physiological Score") {
+            Chart(filteredSessions.filter { $0.physiologicalScore != nil }, id: \.id) { s in
+                LineMark(
+                    x: .value("Date", s.date),
+                    y: .value("Score", s.physiologicalScore!)
+                )
+                .foregroundStyle(.purple)
+                PointMark(
+                    x: .value("Date", s.date),
+                    y: .value("Score", s.physiologicalScore!)
+                )
+                .foregroundStyle(.purple)
+            }
+            .chartYScale(domain: 0...100)
+            .frame(height: 150)
+        }
+    }
+
+    private var thresholdSection: some View {
+        Section("Entry Threshold Progression") {
+            Chart(filteredSessions.enumerated().compactMap { (i, s) -> (Int, Float)? in
+                guard let t = s.enterThreshold else { return nil }
+                return (i + 1, t)
+            }, id: \.0) { pair in
+                LineMark(
+                    x: .value("Session", pair.0),
+                    y: .value("Threshold (ECDF)", pair.1)
+                )
+                .foregroundStyle(.orange)
+            }
+            .chartYScale(domain: 0...1)
+            .frame(height: 150)
+        }
+    }
+
+    private var rmssdSection: some View {
+        Section("RMSSD Trend (ms)") {
+            Chart(filteredSessions.filter { $0.rmssd != nil }, id: \.id) { s in
+                LineMark(
+                    x: .value("Date", s.date),
+                    y: .value("RMSSD", s.rmssd!)
+                )
+                .foregroundStyle(.green)
+            }
+            .frame(height: 150)
+        }
+    }
+
+    private var dfaSection: some View {
+        Section("DFA α1 (Short-Range HRV Scaling)") {
+            Chart {
+                ForEach(filteredSessions.filter { $0.dfaAlpha1 != nil }, id: \.id) { s in
+                    PointMark(
+                        x: .value("Date", s.date),
+                        y: .value("α1", s.dfaAlpha1!)
+                    )
+                    .foregroundStyle(.teal)
+                }
+                RuleMark(y: .value("Healthy", 1.0))
+                    .foregroundStyle(.gray.opacity(0.5))
+                    .lineStyle(StrokeStyle(dash: [4]))
+                    .annotation(position: .trailing) {
+                        Text("1.0").font(.caption2).foregroundStyle(.gray)
+                    }
+            }
+            .chartYScale(domain: 0...2)
+            .frame(height: 150)
+            if filteredSessions.filter({ $0.dfaAlpha1 != nil }).count < 5 {
+                Text("DFA α1 needs ≥200 RR intervals per session (~17+ min at 60 BPM)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
