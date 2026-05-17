@@ -30,7 +30,7 @@ jobs:
           chmod 600 ~/.appstoreconnect/private_keys/AuthKey_9V47M72GKG.p8
 
       - name: Install Python deps
-        run: pip3 install PyJWT cryptography requests
+        run: pip3 install --break-system-packages PyJWT cryptography requests
 
       - name: List and expire builds
         env:
