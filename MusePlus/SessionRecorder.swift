@@ -327,7 +327,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B103"
+    static let currentBuildTag = "B107"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []

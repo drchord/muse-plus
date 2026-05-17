@@ -354,7 +354,7 @@ final class Probe: ObservableObject {
                             AlertCoordinator.shared.sessionEndedFailure(reason: "BLE reconnect timeout")
                         }
                         self?.gracePeriodWork = gracework
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: gracework)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 45, execute: gracework)
                         self?.scheduleReconnect()
                         return
                     }
@@ -1317,7 +1317,7 @@ final class Probe: ObservableObject {
         return streak
     }
 
-    // B80 (B2): Called when the 30s grace period expires without reconnect.
+    // B80/B107: Called when the 45s grace period expires without reconnect.
     // Tears down session state cleanly, preserves whatever was recorded.
     private func performFinalDisconnect(gracePeriodStart: Date?) {
         calibrationFiredRecording = false
