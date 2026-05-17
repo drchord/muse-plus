@@ -3,20 +3,38 @@ import Charts
 
 // Lightweight summary extracted from SessionRecord JSON — avoids loading full sample arrays.
 private struct TrendSession: Identifiable {
-    let id:           String
-    let date:         Date
-    let deepFraction: Double?
-    let qualityScore: Int?
-    let durationMin:  Double?
+    let id:            String
+    let date:          Date
+    let deepFraction:  Double?
+    let qualityScore:  Int?
+    let durationMin:   Double?
+    // B107
+    let physiologicalScore:        Int?
+    let meditationIndexCorrelation: Float?
+    let betaSuppression:           Float?   // calibrationBetaMean - mainBetaMean (positive = good)
+    let timeOfDay:                 String?
+    let enterThreshold:            Float?
+    let rmssd:                     Double?
+    let dfaAlpha1:                 Double?
 }
 
 // Minimal Codable subset for fast JSON parsing (avoids decoding thousands of samples).
 private struct TrendRecord: Codable {
     let id:           String
     let startDate:    Date
-    var deepFraction: Double?  = nil
-    var qualityScore: Int?     = nil
-    var durationSec:  Double?  = nil
+    var deepFraction: Double? = nil
+    var qualityScore: Int?    = nil
+    var durationSec:  Double? = nil
+    // B107 additions — all optional for back-compat with pre-B107 files
+    var physiologicalScore:        Int?    = nil
+    var meditationIndexCorrelation: Float? = nil
+    var mainBetaMean:              Float?  = nil
+    var calibrationBetaMean:       Float?  = nil
+    var timeOfDay:                 String? = nil
+    var enterThresholdAtSession:   Float?  = nil
+    var rmssd:                     Double? = nil
+    var dfaAlpha1:                 Double? = nil
+    var stallCount:                Int?    = nil
 }
 
 struct TrendsView: View {
@@ -129,7 +147,7 @@ struct TrendsView: View {
     // MARK: - Data loading
 
     private func loadSessions() async {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = SessionRecorder.sessionsDirURL()
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: docs, includingPropertiesForKeys: [.nameKey], options: .skipsHiddenFiles
         ) else {
@@ -155,7 +173,17 @@ struct TrendsView: View {
                 date:         rec.startDate,
                 deepFraction: rec.deepFraction,
                 qualityScore: rec.qualityScore,
-                durationMin:  rec.durationSec.map { $0 / 60.0 }
+                durationMin:  rec.durationSec.map { $0 / 60 },
+                physiologicalScore: rec.physiologicalScore,
+                meditationIndexCorrelation: rec.meditationIndexCorrelation,
+                betaSuppression: {
+                    guard let cal = rec.calibrationBetaMean, let sess = rec.mainBetaMean else { return nil }
+                    return cal - sess
+                }(),
+                timeOfDay:      rec.timeOfDay,
+                enterThreshold: rec.enterThresholdAtSession,
+                rmssd:          rec.rmssd,
+                dfaAlpha1:      rec.dfaAlpha1
             ))
         }
 
