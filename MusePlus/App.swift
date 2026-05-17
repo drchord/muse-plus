@@ -282,6 +282,7 @@ final class Probe: ObservableObject {
                         let graceDuration = Date().timeIntervalSince(self?.gracePeriodStarted ?? Date())
                         self?.gracePeriodWork?.cancel()
                         self?.gracePeriodWork = nil
+                        SessionRecorder.shared.recordBLEReconnect()  // B107: count successful reconnects
                         self?.isPausedForReconnect = false
                         self?.gracePeriodStarted = nil
                         self?.reconnectAttempts = 0
@@ -353,6 +354,8 @@ final class Probe: ObservableObject {
                             self.performFinalDisconnect(gracePeriodStart: started)
                             AlertCoordinator.shared.sessionEndedFailure(reason: "BLE reconnect timeout")
                         }
+                        // B107: record stall for post-session analysis
+                        SessionRecorder.shared.recordBLEStall()
                         self?.gracePeriodWork = gracework
                         DispatchQueue.main.asyncAfter(deadline: .now() + 45, execute: gracework)
                         self?.scheduleReconnect()

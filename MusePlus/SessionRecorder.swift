@@ -148,6 +148,9 @@ struct SessionRecord: Codable, Identifiable {
     // B107 — calibration-phase beta baseline for physiologicalScore betaZ computation.
     var calibrationBetaMean: Float? = nil
     var calibrationBetaStd:  Float? = nil
+    // B107 — BLE resilience counters.
+    var stallCount:        Int? = nil   // BLE interruptions >0s that triggered grace period
+    var bleReconnectCount: Int? = nil   // successful reconnects during session
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -1308,6 +1311,22 @@ extension SessionRecorder {
             current?.calibrationBetaMean = mean
             current?.calibrationBetaStd  = std
             Telemetry.recording.notice("calibrationBeta attached: mean=\(mean, privacy: .public) std=\(std, privacy: .public)")
+        }
+    }
+
+    // MARK: - B107 BLE resilience counters
+
+    func recordBLEStall() {
+        queue.async { [self] in
+            guard isRecording else { return }
+            current?.stallCount = (current?.stallCount ?? 0) + 1
+        }
+    }
+
+    func recordBLEReconnect() {
+        queue.async { [self] in
+            guard isRecording else { return }
+            current?.bleReconnectCount = (current?.bleReconnectCount ?? 0) + 1
         }
     }
 
