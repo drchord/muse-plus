@@ -97,7 +97,7 @@ final class EEGPipeline {
         for ch in 0..<min(channels.count, 8) {
             buffers[ch] = Array(channels[ch])
         }
-        activeChannelCount = max(activeChannelCount, channels.count)
+        activeChannelCount = channels.count   // B107: use only channels from denoiser output
         let ts = Date().timeIntervalSinceReferenceDate
         var allPowers = [BandPowers]()
         var allPSDs   = [[Float]]()
