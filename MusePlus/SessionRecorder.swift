@@ -1375,6 +1375,14 @@ extension SessionRecorder {
         }
     }
 
+    func attachDFAAlpha1(_ alpha: Double) {
+        queue.async { [self] in
+            guard isRecording else { return }
+            current?.dfaAlpha1 = alpha
+            Telemetry.recording.notice("dfaAlpha1=\(alpha, privacy: .public)")
+        }
+    }
+
     // MARK: - B107 BLE resilience counters
 
     func recordBLEStall() {

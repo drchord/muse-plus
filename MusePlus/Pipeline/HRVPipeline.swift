@@ -57,6 +57,7 @@ final class HRVPipeline {
         queue.async { [self] in
             rawBuffer.removeAll()
             updateCounter = 0
+            sessionRR.removeAll()
         }
     }
 
@@ -123,6 +124,9 @@ final class HRVPipeline {
         let med     = median(validRR)
         let cleanRR = validRR.filter { abs($0 - med) <= 0.25 }
         guard cleanRR.count >= 5 else { return }
+
+        // Accumulate clean RR intervals for session-level DFA α1 computation.
+        sessionRR.append(contentsOf: cleanRR)
 
         // RMSSD (ms) — ESC/NASPE formula
         let diffs  = zip(cleanRR.dropFirst(), cleanRR).map { ($0 - $1) * ($0 - $1) }
@@ -260,5 +264,75 @@ final class HRVPipeline {
         let inner = 2 * pow(sdnn, 2) - pow(rmssd, 2) / 2
         guard inner >= 0 else { return nil }
         return sqrt(inner)
+    }
+
+    // DFA α1: short-range scaling exponent (Peng et al. 1995).
+    // Box sizes 4-16 beats cover the short-range (sympathetic) window.
+    // Returns nil if fewer than 200 RR intervals.
+    static func computeDFAAlpha1(_ rr: [Double]) -> Double? {
+        guard rr.count >= 200 else { return nil }
+        let n = rr.count
+        let mean = rr.reduce(0, +) / Double(n)
+        var y = [Double](repeating: 0, count: n)
+        var cum = 0.0
+        for i in 0..<n {
+            cum += rr[i] - mean
+            y[i] = cum
+        }
+        let boxSizes = [4, 5, 6, 8, 10, 12, 16]
+        var logN = [Double]()
+        var logF = [Double]()
+        for boxLen in boxSizes {
+            guard boxLen <= n / 4 else { continue }
+            let numBoxes = n / boxLen
+            guard numBoxes >= 4 else { continue }
+            var sumSq = 0.0
+            var count = 0
+            for b in 0..<numBoxes {
+                let start = b * boxLen
+                let end   = start + boxLen
+                let segment = Array(y[start..<end])
+                let xi = (0..<boxLen).map { Double($0) }
+                let xm = Double(boxLen - 1) / 2.0
+                let ym = segment.reduce(0, +) / Double(boxLen)
+                let num = zip(xi, segment).map { ($0 - xm) * ($1 - ym) }.reduce(0, +)
+                let den = xi.map { pow($0 - xm, 2) }.reduce(0, +)
+                guard den > 0 else { continue }
+                let slope = num / den
+                let intercept = ym - slope * xm
+                for i in 0..<boxLen {
+                    let trend = slope * Double(i) + intercept
+                    sumSq += pow(segment[i] - trend, 2)
+                    count += 1
+                }
+            }
+            guard count > 0 else { continue }
+            let F = sqrt(sumSq / Double(count))
+            guard F > 0 else { continue }
+            logN.append(log(Double(boxLen)))
+            logF.append(log(F))
+        }
+        guard logN.count >= 3 else { return nil }
+        let xm = logN.reduce(0, +) / Double(logN.count)
+        let ym = logF.reduce(0, +) / Double(logF.count)
+        let num = zip(logN, logF).map { ($0 - xm) * ($1 - ym) }.reduce(0, +)
+        let den = logN.map { pow($0 - xm, 2) }.reduce(0, +)
+        guard den > 0 else { return nil }
+        return num / den
+    }
+
+    // MARK: - Session RR accumulator (B107)
+
+    private var sessionRR: [Double] = []
+
+    /// Drains the accumulated per-session RR array and resets it.
+    /// Safe to call from any thread — dispatches synchronously on the HRV serial queue.
+    func extractSessionRR() -> [Double] {
+        var rr = [Double]()
+        queue.sync {
+            rr = sessionRR
+            sessionRR = []
+        }
+        return rr
     }
 }

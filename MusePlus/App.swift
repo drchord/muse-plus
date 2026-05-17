@@ -1154,6 +1154,11 @@ final class Probe: ObservableObject {
             sd1:  hrv.latestSD1,
             sd2:  hrv.latestSD2
         )
+        // B107: DFA α1 from full-session RR
+        let sessionRR = hrv.extractSessionRR()
+        if let alpha = HRVPipeline.computeDFAAlpha1(sessionRR) {
+            SessionRecorder.shared.attachDFAAlpha1(alpha)
+        }
         Telemetry.recording.notice("endSession reason=\(effectiveReason, privacy: .public)")
         // B98: endSession() returns the completed SessionRecord directly — eliminates the
         // prior file-decode path (try? dec.decode silently returned nil, showing Duration:0s).
