@@ -207,6 +207,11 @@ private struct NDJSONFooter: Codable {
     let rmssd:               Double?      // B107: main-phase RMSSD (ms)
     let calibrationRmssd:    Double?      // B107: calibration-phase RMSSD baseline (ms)
     let dfaAlpha1:           Double?      // B107: DFA α1 short-range scaling exponent
+    // B108: calibration-phase beta baseline — exported so betaZScore inputs are verifiable from JSON.
+    let calibrationBetaMean: Float?
+    let calibrationBetaStd:  Float?
+    // B108: calibration ECDF index — leading predictor of session outcome (r²=0.84, n=8, treat as signal not gate).
+    let calibrationIndexMean: Float?
 }
 
 private struct NDJSONAppState: Codable {
@@ -350,7 +355,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B107"
+    static let currentBuildTag = "B108"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -945,13 +950,18 @@ final class SessionRecorder: ObservableObject {
             betaZScore = 0.0
         }
         let rmssdScore: Float
-        if let sessRmssd = rec.rmssd,
-           let calRmssd = rec.calibrationRmssd,
-           calRmssd > 1.0 {
-            let response = (sessRmssd - calRmssd) / calRmssd
-            // 25% RMSSD improvement = full 30 pts; realistic session range 5-25%.
-            // Prior scaling (×30 raw) required 100% improvement to score max — physiologically impossible.
-            rmssdScore = Float(min(max(response / 0.25 * 30.0, 0.0), 30.0))
+        if let sessRmssd = rec.rmssd {
+            // B108: absolute RMSSD scoring replaces relative-to-calibration formula.
+            // Root cause of B107 score=0: (sessRmssd=81ms - calRmssd=97ms) / calRmssd = -0.17 → clamped to 0.
+            // Failure mode: calibration captures arousal spike at session start; relaxation during
+            // meditation then LOWERS RMSSD from the elevated baseline, which the old formula read as
+            // "no HRV improvement." Absolute thresholds are calibration-independent.
+            // Reference bands: Shaffer & Ginsberg (2017). Capped at 30pts.
+            // <40ms → 0-10pts, 40-65ms → 10-25pts, 65-100ms → 25-30pts, >100ms → 30pts.
+            let sr = Float(sessRmssd)
+            rmssdScore = sr < 40  ? max(0, sr / 40.0 * 10.0)
+                       : sr < 65  ? 10.0 + (sr - 40.0) / 25.0 * 15.0
+                       :             min(30.0, 25.0 + (sr - 65.0) / 35.0 * 5.0)
         } else {
             rmssdScore = 0.0
         }
@@ -978,7 +988,10 @@ final class SessionRecorder: ObservableObject {
             bleReconnectCount:  rec.bleReconnectCount,
             rmssd:              rec.rmssd,
             calibrationRmssd:   rec.calibrationRmssd,
-            dfaAlpha1:          rec.dfaAlpha1
+            dfaAlpha1:           rec.dfaAlpha1,
+            calibrationBetaMean: rec.calibrationBetaMean,
+            calibrationBetaStd:  rec.calibrationBetaStd,
+            calibrationIndexMean: rec.calibrationIndexMean
         )
         appendLine(footer)
         ndjsonHandle?.synchronizeFile()

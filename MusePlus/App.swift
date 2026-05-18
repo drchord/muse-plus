@@ -836,10 +836,11 @@ final class Probe: ObservableObject {
                 self.gate.setQD(adaptiveQD)
                 Telemetry.recording.notice("B107 adaptiveQD=\(adaptiveQD, privacy: .public) ecdfVar=\(self.scorer.calibrationEcdfVariance, privacy: .public)")
                 // B107: capture calibration beta baseline for physiologicalScore
-                SessionRecorder.shared.attachCalibrationBeta(
-                    mean: self.scorer.calibrationBetaMean,
-                    std:  self.scorer.calibrationBetaStd
-                )
+                let _calBetaMean = self.scorer.calibrationBetaMean
+                let _calBetaStd  = self.scorer.calibrationBetaStd
+                SessionRecorder.shared.attachCalibrationBeta(mean: _calBetaMean, std: _calBetaStd)
+                // B108: if either is nil betaZScore silently defaults to 0 — log to verify.
+                Telemetry.recording.notice("B108 calBeta mean=\(String(describing: _calBetaMean), privacy: .public) std=\(String(describing: _calBetaStd), privacy: .public)")
                 self.recordingStartWork?.cancel()
                 self.recordingStartedAt = Date()
                 self.marks.reset()

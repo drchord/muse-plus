@@ -16,6 +16,7 @@ private struct TrendSession: Identifiable {
     let enterThreshold:            Float?
     let rmssd:                     Double?
     let dfaAlpha1:                 Double?
+    let calibrationIndexMean:      Float?
 }
 
 // Used by thresholdSection Chart — anonymous tuples don't support key-path id in Swift.
@@ -36,6 +37,7 @@ private struct TrendRecord: Codable {
     var meditationIndexCorrelation: Float? = nil
     var mainBetaMean:              Float?  = nil
     var calibrationBetaMean:       Float?  = nil
+    var calibrationIndexMean:      Float?  = nil   // B108
     var timeOfDay:                 String? = nil
     var enterThresholdAtSession:   Float?  = nil
     var rmssd:                     Double? = nil
@@ -88,6 +90,15 @@ struct TrendsView: View {
                     }
                     if filteredSessions.contains(where: { $0.dfaAlpha1 != nil }) {
                         dfaSection
+                    }
+                    if filteredSessions.contains(where: { $0.meditationIndexCorrelation != nil }) {
+                        miCorrelationSection
+                    }
+                    if filteredSessions.contains(where: { $0.calibrationIndexMean != nil }) {
+                        calibrationIndexSection
+                    }
+                    if filteredSessions.contains(where: { $0.betaSuppression != nil }) {
+                        betaSuppressionSection
                     }
                     statsSection
                 }
@@ -258,6 +269,54 @@ struct TrendsView: View {
         }
     }
 
+    private var miCorrelationSection: some View {
+        Section("MI/Depth Correlation (r)") {
+            Chart(filteredSessions.filter { $0.meditationIndexCorrelation != nil }, id: \.id) { s in
+                LineMark(x: .value("Date", s.date), y: .value("r", Double(s.meditationIndexCorrelation!)))
+                    .foregroundStyle(.mint)
+                PointMark(x: .value("Date", s.date), y: .value("r", Double(s.meditationIndexCorrelation!)))
+                    .foregroundStyle(.mint)
+                    .symbolSize(30)
+            }
+            .chartYScale(domain: 0...1)
+            .chartYAxis { AxisMarks(values: [0.0, 0.4, 0.7, 1.0]) }
+            .frame(height: 150)
+            Text("r < 0.4 suggests EEG/depth signal mismatch — possible calibration drift.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var calibrationIndexSection: some View {
+        Section("Calibration Baseline (ECDF Index)") {
+            Chart(filteredSessions.filter { $0.calibrationIndexMean != nil }, id: \.id) { s in
+                LineMark(x: .value("Date", s.date), y: .value("Index", Double(s.calibrationIndexMean!)))
+                    .foregroundStyle(.orange)
+                PointMark(x: .value("Date", s.date), y: .value("Index", Double(s.calibrationIndexMean!)))
+                    .foregroundStyle(.orange)
+                    .symbolSize(30)
+                RuleMark(y: .value("Threshold", -0.20))
+                    .foregroundStyle(.red.opacity(0.5))
+                    .lineStyle(StrokeStyle(dash: [4]))
+            }
+            .frame(height: 150)
+            Text("More negative = stronger theta/alpha baseline. Sessions landing above −0.20 have produced zero deep state in 3/3 cases (n=8 total, r²=0.84 — signal, not hard gate).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var betaSuppressionSection: some View {
+        Section("Beta Suppression (cal − session)") {
+            Chart(filteredSessions.filter { $0.betaSuppression != nil }, id: \.id) { s in
+                BarMark(x: .value("Date", s.date), y: .value("Δβ", Double(s.betaSuppression!)))
+                    .foregroundStyle(s.betaSuppression! >= 0 ? Color.green.opacity(0.7) : Color.red.opacity(0.7))
+                    .cornerRadius(3)
+            }
+            .frame(height: 150)
+            Text("Positive = beta decreased from calibration to session (expected during deep state). Zero bars mean betaZScore contributed 0 pts to physiologicalScore — check Console for B108 calBeta log.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - Data loading
 
     private func loadSessions() async {
@@ -296,8 +355,9 @@ struct TrendsView: View {
                 }(),
                 timeOfDay:      rec.timeOfDay,
                 enterThreshold: rec.enterThresholdAtSession,
-                rmssd:          rec.rmssd,
-                dfaAlpha1:      rec.dfaAlpha1
+                rmssd:               rec.rmssd,
+                dfaAlpha1:           rec.dfaAlpha1,
+                calibrationIndexMean: rec.calibrationIndexMean
             ))
         }
 

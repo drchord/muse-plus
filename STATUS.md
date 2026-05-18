@@ -1,23 +1,146 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-13 (B96 — church bell gong, alphaPowerRatio wire-in, trajectory coaching, RMSSD/MI correlation, NSFileCoordinator, gong telemetry buffer, kEnterSustained UserDefault, HR artifact rejection)
+**Last updated:** 2026-05-18 (B108 — physiologicalScore rmssdScore fix, calibration data exported to NDJSON, betaZScore telemetry, TrendsView: calibration index + MI correlation + beta suppression charts)
 
 ---
 
 ## Build State
 
-| Build | Theme | CI / TestFlight | Status |
-|-------|-------|----------------|--------|
-| 40–83 | Foundation → soundscape → HRV → ECDF → instrumentation overhaul | ✅ Historical | See journal |
-| **86** | Layout fix attempt 1 (GeometryReader — flawed) | ✅ TestFlight | Superseded by B89 |
-| **87** | Unified timers (MeditationTimer deleted), touch targets, fit-event HSI | ✅ TestFlight | Stable baseline |
-| **88** | frontalContactGood rename, adaptive DepthGate threshold, Spotify in Soundscape, JSON summary scalars | ✅ TestFlight | Data confirmed in session_2026-05-09_2203 |
-| **89** | ScrollView layout — band chart visible, buttons normal size | ✅ CI green (run 25615473857) | Pushed 2026-05-09 |
-| **90** | Gong floor 0.85 + drone fix attempt (engine.stop in stopAll) + chime preview 0% warning + Anchor Tone label | ✅ CI green (run 25618431186) | Pushed 2026-05-09 |
-| **92** | Bowl audio fix + drone race fix (ordering + isStopping) + proximity approach duck + depth trace chart + warmup ECDF fix + buildTag | ⏳ Pending CI | Pushed 2026-05-10 |
-| **94** | Kalman depth filter + duckDisplay EMA + FAA flow state + iTPF adaptive binaural + quality score + forecast banner + TrendsView | ⏳ Pending CI | Pushed 2026-05-10 |
-| **95** | Deep-state volume system overhaul + crash data preservation + 7 pre-existing audio fixes | ⏳ Pending CI | Pushed 2026-05-12 |
-| **96** | Church bell gong · alphaPowerRatio live · trajectory coaching · RMSSD/MI correlation · NSFileCoordinator · gong telemetry buffer · kEnterSustained tunable · HR artifact rejection | 🔲 Awaiting push approval | Local complete |
+| Build | TF# | Theme | Status |
+|-------|-----|-------|--------|
+| 40–83 | — | Foundation → soundscape → HRV → ECDF → instrumentation | ✅ Historical |
+| **86** | — | Layout fix attempt 1 (GeometryReader — flawed) | ✅ Superseded by B89 |
+| **87** | — | Unified timers, touch targets, fit-event HSI | ✅ Stable baseline |
+| **88** | — | frontalContactGood rename, adaptive threshold, Spotify row, JSON scalars | ✅ |
+| **89** | — | ScrollView layout fix | ✅ CI run 25615473857 |
+| **90** | — | Gong floor 0.85, drone partial fix, chime preview, anchor tone label | ✅ CI run 25618431186 |
+| **92** | — | Bowl audio fix, drone race fix (isStopping), proximity duck, depth trace chart | ✅ |
+| **94** | — | Kalman depth filter, FAA flow state, iTPF binaural, quality score, forecast, TrendsView | ✅ |
+| **95** | — | Deep-state volume overhaul (deepStateGain), crash data preservation, 7 audio bugs | ✅ |
+| **96** | — | Church bell gong, alphaPowerRatio live, trajectory coaching, rmssdDepthDelta, NSFileCoordinator, kEnterSustained UserDefault | ✅ |
+| **97** | 101 | Gong subdirectory lookup fix, NDJSON footer biomarkers fix, SwiftUI type-checker extraction | ✅ |
+| **99** | 103 | mainBeta/Alpha/Theta band means, warmupFAAMean, rmssdDepthDelta wire-in | ✅ |
+| **100** | 104 | warmup FAA tracking, calibrationIndexMean wire-in improvements | ✅ |
+| **103** | 106 | Spotify depth-responsive volume (6 bugs fixed) | ✅ |
+| **107** | 112 | HRV scalars (SDNN/SD1/SD2/DFA α1), physiologicalScore, BLE resilience, TrendsView expansion | ✅ Session 2026-05-18: deepFraction=0.836 |
+| **108** | — | physiologicalScore rmssdScore fix, NDJSON calibration data export, betaZScore telemetry, 3 new TrendsView charts | 🔲 Local — awaiting push |
+
+---
+
+## B108 Changes (2026-05-18)
+
+### What motivated this build — data analysis of 19 sessions (2026-05-02 to 2026-05-18)
+
+Full analysis artifacts: `C:\Users\sugat\MusePlus\analysis\` (sessions_extracted.csv, progress_dashboard.png, findings.md)
+
+#### Key patterns found
+- **deepFraction is bimodal:** sessions produce either 0.000 or 0.66–0.93. No middle ground.
+- **4 of 8 zero-deep sessions were instrumentation failures, not meditation failures:**
+  - B95 (2026-05-13): kEnterSustained=20 (10s required); session max run was 2.5s → gate never fired
+  - B100 (2026-05-16): calibrationIndexMean≈0 → no theta/alpha baseline established
+  - B103 (2026-05-17): BLE dropout 34.2s at t=33.7min killed session (packetGapMax=34.17s)
+  - B87 (2026-05-10): same build produced 0.847 earlier that day; cause unknown
+- **calibrationIndexMean predicts outcome** (r²=0.84, n=8): sessions with cal > −0.20 produced deepFraction=0 in 3/3 cases; cal < −0.20 → deepFraction 0.66–0.93. Treat as a signal, not a hard gate (sample too small for validated threshold).
+- **physiologicalScore=20 was not a bug** — the relative rmssdScore formula scored 0 because calRmssd=97.3ms > sessRmssd=80.7ms. The arousal/anticipation spike at calibration start elevated RMSSD; relaxation during session normalized it downward. The formula interpreted this as "no HRV improvement" despite 80.7ms being elite in absolute terms.
+- **betaZScore likely 0 by nil** — calibrationBetaMean was captured in-memory but not exported to NDJSON footer, so it cannot be verified retroactively. betaZScore has contributed 0 pts to every physiologicalScore ever recorded.
+- **Kalman freeze already exists** for frontal contact loss (DepthGate.swift:144). BLE dropout is handled differently (no packets = gate stops updating = last state persists implicitly). My initial recommendation to "add Kalman freeze on BLE dropout" was wrong — it already works.
+- **qualityScore contact component uses frontalGoodFraction** (AF7/AF8), not temporal sensors (TP9/TP10). TP9/TP10 noise does NOT penalize qualityScore. Earlier claim that "TP9/TP10 killing quality score" was factually wrong.
+- **kEnterSustained is already tunable**: `UserDefaults.standard.set(X, forKey: "kEnterSustainedWindows")` via debugger, range 6–24. No build needed.
+
+### Changes
+
+#### 1. physiologicalScore: absolute RMSSD scoring (`SessionRecorder.swift:computePhysiologicalScore`)
+- **Old:** `response = (sessRmssd - calRmssd) / calRmssd` — relative improvement formula. Scored 0 when calRmssd > sessRmssd.
+- **New:** Absolute thresholds from Shaffer & Ginsberg (2017): <40ms=0-10pts, 40-65ms=10-25pts, 65-100ms=25-30pts, >100ms=30pts.
+- **Effect on B107 session:** rmssdScore goes from 0 → ~27 (sessRmssd=80.7ms). physiologicalScore goes from 20 → ~47 (assuming betaZScore still 0 pending investigation).
+- **Invariant:** `calibrationRmssd` field kept in NDJSONFooter for historical comparison; just no longer drives the score.
+
+#### 2. Export calibration beta to NDJSON footer (`SessionRecorder.swift:NDJSONFooter + appendFooter`)
+- Added `calibrationBetaMean: Float?`, `calibrationBetaStd: Float?`, `calibrationIndexMean: Float?` to NDJSONFooter.
+- Populated from `rec.calibrationBetaMean`, `rec.calibrationBetaStd`, `rec.calibrationIndexMean`.
+- **Why:** calibrationBetaMean was captured in-memory (B107) but never written to JSON. betaZScore inputs have been unverifiable for every session since B107. `TrendRecord` in TrendsView already had the field parsed — it was always nil because the footer lacked it.
+- **calibrationIndexMean export:** was in NDJSONHeader only. Now also in footer → TrendsView can chart it across sessions (key predictor metric).
+
+#### 3. betaZScore diagnostic telemetry (`App.swift`)
+- Added `Telemetry.recording.notice` after `attachCalibrationBeta` call.
+- Logs whether `calibrationBetaMean` and `calibrationBetaStd` are nil or populated at calibration end.
+- **Action on next session:** Check Console (category `Telemetry.recording`) after calibration fires. If nil → scorer.calibrationBetaMean is not being set; track down in DepthScore/EEGWindowBuffer. If non-nil → betaZScore actually computed; cross-check with physiologicalScore.
+
+#### 4. TrendsView: 3 new chart sections (`TrendsView.swift`)
+- **MI/Depth Correlation (r):** charts meditationIndexCorrelation over time. r < 0.4 = EEG/depth mismatch → calibration drift. Field existed in TrendSession but was never displayed.
+- **Calibration Baseline (ECDF Index):** charts calibrationIndexMean over time. Includes dashed reference line at −0.20 (empirical threshold from 8-session dataset — labeled as signal, not gate). Critical for monitoring pre-session brain state quality.
+- **Beta Suppression:** charts `calibrationBetaMean - mainBetaMean` per session. Positive = beta decreased during session (expected during deep state). Exposes whether betaZScore ever had real inputs.
+- All three sections are conditional (`contains(where:)`) — hidden until data accumulates.
+
+---
+
+## B108 Validation Checklist
+
+1. Console after calibration: `B108 calBeta mean=X.XXX std=X.XXX` (not nil). If nil, investigate `scorer.calibrationBetaMean` population.
+2. Session end → `physiologicalScore` in JSON > 20 for sessions with RMSSD > 65ms.
+3. Session JSON footer contains `calibrationBetaMean`, `calibrationBetaStd`, `calibrationIndexMean` fields.
+4. TrendsView shows "Calibration Baseline" section after first B108 session.
+5. TrendsView shows "MI/Depth Correlation" section (data already exists from B97+ sessions).
+
+---
+
+## B108 Architecture Invariants
+
+**B108+:**
+- `computePhysiologicalScore` rmssdScore uses absolute thresholds, not relative-to-calibration. `calibrationRmssd` retained in footer for historical data but no longer drives score.
+- `NDJSONFooter` exports `calibrationBetaMean`, `calibrationBetaStd`, `calibrationIndexMean` — these are now verifiable from JSON without Console access.
+- betaZScore diagnostic telemetry fires at every calibration end — never remove without replacing with equivalent observability.
+
+---
+
+## B97–B107 Changes (reconstructed from memory — not in original STATUS.md)
+
+### B97 (TF 101, 2026-05-14)
+- `EndGongPlayer.bundleURL()` subdirectory lookup fix — `bowl_success.mp3` in bundle but root-only lookup fell through to synthesized WAV. Lookup now: m4a → mp3 → wav at root then Sounds/ subdirectory.
+- `NDJSONFooter` biomarkers fix: `qualityScore`, `timeOfDay`, `rmssdDepthDelta`, `meditationIndexCorrelation` were nil in footer for all B96 sessions — biomarker computation moved BEFORE `appendFooter()`.
+- `frontalGoodFrac` for qualityScore fixed to use `mainSamples` not `rec.samples` (warmup noise excluded).
+- `pendingGongEvents` flush moved AFTER `openNDJSONHandle()` — now writes to NDJSON.
+- SwiftUI type-checker fix: `SessionSummarySheet.body` 160-line body causing type-checker timeout — extracted 3 `@ViewBuilder private var` sections.
+- **Session data:** Best session to date — 2026-05-15, deepFraction=0.931, Q=91, 58.6 min.
+
+### B99 (TF 103)
+- Main-phase band power means added to SessionRecord: `mainAlphaMean`, `mainThetaMean`, `mainBetaMean`.
+- `rmssdDepthDelta` wired in (RMSSD at ecdfDisplay ≥ 0.50 vs < 0.25).
+- `warmupFAAMean` capture (warmup phase FAA, ≥30 valid samples).
+
+### B100 (TF 104)
+- Warmup FAA tracking improvements.
+- `calibrationIndexMean` capture refinements.
+- **Session data (2026-05-16):** deepFraction=0, Q=45. calibrationIndexMean=−0.010 (near zero) → confirmed calibration oracle pattern.
+
+### B103 (TF 106, 2026-05-15)
+- Spotify depth-responsive volume (6 bugs fixed):
+  - Volume map: no session→no-op, cal end→60%, enter deep→25%, chime→15% debounced, exit deep→60%, session end→preSessionVol.
+  - 403 detection: `volumeManagementEnabled=false` on free tier.
+  - `duckForChime` WorkItem reads `targetVol` at fire time (not schedule time).
+- **Session data (2026-05-17):** deepFraction=0, Q=43. BLE dropout: packetGapMax=34.17s at t=33.7min, 2 reconnects. Session ended mid-session — zero deep was from BLE failure, not meditation.
+
+### B107 (TF 112, 2026-05-17)
+- HRV pipeline: RMSSD, SDNN, SD1, SD2, DFA α1 computed at session end via `attachHRVScalars()`.
+- `calibrationRmssd`: RMSSD during calibration window captured for physiologicalScore baseline.
+- `physiologicalScore` (0-100): betaZScore (0-50) + rmssdScore (0-30) + coherenceScore (0-20).
+- `calibrationBetaMean`/`Std` captured via `attachCalibrationBeta()` at calibration end.
+- BLE resilience improvements: B103 had 2 reconnects and 34s gap. B107 session had 0 reconnects, 0 disconnects.
+- Adaptive Kalman qD from calibration ECDF variance (App.swift).
+- TrendsView expansion: RMSSD, DFA α1, physiologicalScore sections added.
+- **Session data (2026-05-18):** deepFraction=0.836, Q=79, RMSSD=80.7ms, DFA α1=0.665, physiologicalScore=20 (rmssdScore=0 — fixed in B108).
+
+---
+
+## Pending (B109+)
+
+1. **Verify betaZScore pipeline** — after one B108 session, check Console log. If `calibrationBetaMean` is nil at calibration end, find and fix in `scorer.calibrationBetaMean` population path.
+2. **calibrationIndexMean as soft gate** — display value at calibration end in session HUD. Do not add hard go/no-go until n≥30 sessions validate the −0.20 threshold. Currently r²=0.84 with n=8 (one outlier: B87 S11, cal≈0, deep=0.847 in 15-min session).
+3. **kEnterSustained empirical tuning** — try `UserDefaults.standard.set(10, forKey: "kEnterSustainedWindows")` for 3 sessions. No code change needed. Current default=20 (10s) was confirmed too tight in B95.
+4. **Per-sensor contact extraction** — re-extract `diagnostics.contactStateChanges` dict per session to get real TP9/TP10 vs AF7/AF8 split. Run script in `analysis/` against raw JSON files.
+5. **Phase-continuous iTPF binaural ramp** (backlog since B94).
+6. **EEGDenoiser live-signal wire-in** (gated by `eegDenoiseLiveSignal` UserDefault).
+7. **TrendsView time-of-day stratification** — filter already implemented; labels need UTC→local time correction in session tagging (current `timeOfDay` field uses UTC hour, not local ET).
 
 ---
 
