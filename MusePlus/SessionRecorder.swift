@@ -145,6 +145,10 @@ struct SessionRecord: Codable, Identifiable {
     var warmupFAAMean: Float? = nil
     // B107 — signal-quality score independent of deep-gate binary.
     var physiologicalScore: Int? = nil
+    // B109 — score sub-components for post-session audit (betaZ 0-50, rmssd 0-30, coherence 0-20).
+    var betaZScore:     Int? = nil
+    var rmssdScore:     Int? = nil
+    var coherenceScore: Int? = nil
     // B107 — calibration-phase beta baseline for physiologicalScore betaZ computation.
     var calibrationBetaMean: Float? = nil
     var calibrationBetaStd:  Float? = nil
@@ -202,6 +206,9 @@ private struct NDJSONFooter: Codable {
     let mainBetaMean:  Float?        // B100: main-phase mean frontal beta
     let enterThresholdAtSession: Float?   // B107: entry threshold active for this session
     let physiologicalScore: Int?          // B107: signal-quality score independent of deep gate
+    let betaZScore:    Int?               // B109: beta suppression component (0-50)
+    let rmssdScore:    Int?               // B109: HRV response component (0-30)
+    let coherenceScore: Int?              // B109: frontal coherence component (0-20)
     let stallCount:          Int?         // B107: BLE grace-period stalls
     let bleReconnectCount:   Int?         // B107: successful BLE reconnects
     let rmssd:               Double?      // B107: main-phase RMSSD (ms)
@@ -355,7 +362,7 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B108"
+    static let currentBuildTag = "B109"
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -554,7 +561,11 @@ final class SessionRecorder: ObservableObject {
             rec.rmssd = mainRMSSD.reduce(0, +) / Double(mainRMSSD.count)
         }
 
-        rec.physiologicalScore = Self.computePhysiologicalScore(rec: rec, frontalGoodFrac: frontalGoodFrac)
+        let scoreComponents = Self.computePhysiologicalScore(rec: rec, frontalGoodFrac: frontalGoodFrac)
+        rec.physiologicalScore = scoreComponents.total
+        rec.betaZScore         = scoreComponents.betaZ
+        rec.rmssdScore         = scoreComponents.rmssd
+        rec.coherenceScore     = scoreComponents.coherence
 
         appendFooter(rec: rec, reason: reason)
         closeNDJSONHandle()
@@ -938,7 +949,7 @@ final class SessionRecorder: ObservableObject {
 
     // betaZ (0-50) + rmssdResponse (0-30) + signalCoherence (0-20) = 0-100
     // Extracted from endSession closure to avoid Swift type-checker timeout on large closures.
-    private static func computePhysiologicalScore(rec: SessionRecord, frontalGoodFrac: Float) -> Int {
+    private static func computePhysiologicalScore(rec: SessionRecord, frontalGoodFrac: Float) -> (total: Int, betaZ: Int, rmssd: Int, coherence: Int) {
         let betaZScore: Float
         if let calBeta = rec.calibrationBetaMean,
            let calBetaStd = rec.calibrationBetaStd,
@@ -966,7 +977,12 @@ final class SessionRecorder: ObservableObject {
             rmssdScore = 0.0
         }
         let coherenceScore = frontalGoodFrac * 20.0
-        return Int((betaZScore + rmssdScore + coherenceScore).rounded())
+        return (
+            total:    Int((betaZScore + rmssdScore + coherenceScore).rounded()),
+            betaZ:    Int(betaZScore.rounded()),
+            rmssd:    Int(rmssdScore.rounded()),
+            coherence: Int(coherenceScore.rounded())
+        )
     }
 
     private func appendFooter(rec: SessionRecord, reason: String) {
@@ -984,6 +1000,9 @@ final class SessionRecorder: ObservableObject {
             mainBetaMean:  rec.mainBetaMean,
             enterThresholdAtSession: rec.enterThresholdAtSession,
             physiologicalScore: rec.physiologicalScore,
+            betaZScore:         rec.betaZScore,
+            rmssdScore:         rec.rmssdScore,
+            coherenceScore:     rec.coherenceScore,
             stallCount:         rec.stallCount,
             bleReconnectCount:  rec.bleReconnectCount,
             rmssd:              rec.rmssd,

@@ -371,19 +371,30 @@ final class Probe: ObservableObject {
                     self?.calibrationFiredRecording = false
                     self?.recordingStartWork?.cancel()
                     self?.recordingStartWork = nil
-                    self?.recordingStartedAt = nil
                     // B80(D): cancel session-length timer (session is ending here, no grace).
                     SessionTimer.shared.cancel()
                     // B80: stop liveness watchdog, increment disconnect counter, log event.
                     LivenessWatchdog.shared.stop()
                     self?.sessionDiagCounters.disconnectCount += 1
                     self?.recordEvent(kind: "disconnect")
-                    // Attach diagnostics before endSession so the saved file carries them.
+                    // B109: recordingStartedAt moved to AFTER buildDiagnostics (was before; caused sessionMin=0 → fitsPerMin=0).
+                    // B109: full HRV attach block added (was missing; dfaAlpha1/enterThreshold never exported on disconnect path).
                     if let s = self {
                         SessionRecorder.shared.attachDiagnostics(
-                            s.buildDiagnostics(endReason: "disconnect-grace-expired"))
+                            s.buildDiagnostics(endReason: "disconnect"))
                         SessionRecorder.shared.attachEventStream(s.sessionEvents)
+                        SessionRecorder.shared.attachEnterThreshold(s.gate.enterThresholdEcdf)
+                        let hrvScalars = s.hrv.drainLatestHRVScalars()
+                        SessionRecorder.shared.attachHRVScalars(sdnn: hrvScalars.sdnn, sd1: hrvScalars.sd1, sd2: hrvScalars.sd2)
+                        if let calRmssd = s.hrv.calibrationRmssd {
+                            SessionRecorder.shared.attachCalibrationRmssd(calRmssd)
+                        }
+                        let sessionRR = s.hrv.extractSessionRR()
+                        if let alpha = HRVPipeline.computeDFAAlpha1(sessionRR) {
+                            SessionRecorder.shared.attachDFAAlpha1(alpha)
+                        }
                     }
+                    self?.recordingStartedAt = nil
                     Telemetry.recording.error("endSession reason=disconnect")
                     let completedRec = SessionRecorder.shared.endSession(reason: "disconnect")
                     self?.pipeline.endSession()
@@ -835,12 +846,6 @@ final class Probe: ObservableObject {
                 let adaptiveQD = min(max(self.scorer.calibrationEcdfVariance * 0.15, 0.0005), 0.020)
                 self.gate.setQD(adaptiveQD)
                 Telemetry.recording.notice("B107 adaptiveQD=\(adaptiveQD, privacy: .public) ecdfVar=\(self.scorer.calibrationEcdfVariance, privacy: .public)")
-                // B107: capture calibration beta baseline for physiologicalScore
-                let _calBetaMean = self.scorer.calibrationBetaMean
-                let _calBetaStd  = self.scorer.calibrationBetaStd
-                SessionRecorder.shared.attachCalibrationBeta(mean: _calBetaMean, std: _calBetaStd)
-                // B108: if either is nil betaZScore silently defaults to 0 — log to verify.
-                Telemetry.recording.notice("B108 calBeta mean=\(String(describing: _calBetaMean), privacy: .public) std=\(String(describing: _calBetaStd), privacy: .public)")
                 self.recordingStartWork?.cancel()
                 self.recordingStartedAt = Date()
                 self.marks.reset()
@@ -926,6 +931,13 @@ final class Probe: ObservableObject {
                     calibrationIndexMean: self.scorer.calibrationIndexMean,
                     calibrationIndexStd:  self.scorer.calibrationIndexStd
                 )
+                // B109: attachCalibrationBeta moved to AFTER startSession so isRecording=true
+                // when the guard fires. Previously called before startSession → guard blocked it
+                // → calibrationBetaMean always nil → betaZScore always 0.
+                let _calBetaMean = self.scorer.calibrationBetaMean
+                let _calBetaStd  = self.scorer.calibrationBetaStd
+                SessionRecorder.shared.attachCalibrationBeta(mean: _calBetaMean, std: _calBetaStd)
+                Telemetry.recording.notice("B109 calBeta mean=\(String(describing: _calBetaMean), privacy: .public) std=\(String(describing: _calBetaStd), privacy: .public)")
                 // B83 — start main-thread stall detector (1Hz heartbeat, 1.5s threshold).
                 // Quantifies the "freezing" sensation users describe; emits `mainStall` events.
                 MainThreadStall.shared.start()
@@ -1375,7 +1387,6 @@ final class Probe: ObservableObject {
         calibrationFiredRecording = false
         recordingStartWork?.cancel()
         recordingStartWork = nil
-        recordingStartedAt = nil
         // B83 — capture audio state at failure-gong time.
         fireDiagnosticsSnapshot(trigger: "performFinalDisconnect-pre-gong")
         // B83 — was missing in B80; grace-expiry would silently end with NO audio cue.
@@ -1388,6 +1399,21 @@ final class Probe: ObservableObject {
         MainThreadStall.shared.stop()
         diagnosticsTimer?.invalidate()
         diagnosticsTimer = nil
+        // B109: diagnostics block added (was missing entirely); recordingStartedAt moved to after
+        // buildDiagnostics so sessionMin is computed correctly before it is cleared.
+        SessionRecorder.shared.attachDiagnostics(buildDiagnostics(endReason: "grace-expired"))
+        SessionRecorder.shared.attachEventStream(sessionEvents)
+        SessionRecorder.shared.attachEnterThreshold(gate.enterThresholdEcdf)
+        let hrvScalars = hrv.drainLatestHRVScalars()
+        SessionRecorder.shared.attachHRVScalars(sdnn: hrvScalars.sdnn, sd1: hrvScalars.sd1, sd2: hrvScalars.sd2)
+        if let calRmssd = hrv.calibrationRmssd {
+            SessionRecorder.shared.attachCalibrationRmssd(calRmssd)
+        }
+        let sessionRR = hrv.extractSessionRR()
+        if let alpha = HRVPipeline.computeDFAAlpha1(sessionRR) {
+            SessionRecorder.shared.attachDFAAlpha1(alpha)
+        }
+        recordingStartedAt = nil
         Telemetry.recording.error("endSession reason=grace-expired")
         let completedRec = SessionRecorder.shared.endSession(reason: "grace-expired")
         pipeline.endSession()

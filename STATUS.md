@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-18 (B108 — physiologicalScore rmssdScore fix, calibration data exported to NDJSON, betaZScore telemetry, TrendsView: calibration index + MI correlation + beta suppression charts)
+**Last updated:** 2026-05-19 (B109 — calibrationBeta ordering fix, scoreComponents export, disconnect-path HRV attachment, performFinalDisconnect diagnostics, fitsPerMin ordering fix)
 
 ---
 
@@ -23,7 +23,66 @@
 | **100** | 104 | warmup FAA tracking, calibrationIndexMean wire-in improvements | ✅ |
 | **103** | 106 | Spotify depth-responsive volume (6 bugs fixed) | ✅ |
 | **107** | 112 | HRV scalars (SDNN/SD1/SD2/DFA α1), physiologicalScore, BLE resilience, TrendsView expansion | ✅ Session 2026-05-18: deepFraction=0.836 |
-| **108** | — | physiologicalScore rmssdScore fix, NDJSON calibration data export, betaZScore telemetry, 3 new TrendsView charts | 🔲 Local — awaiting push |
+| **108** | 115 | physiologicalScore rmssdScore fix, NDJSON calibration data export, betaZScore telemetry, 3 new TrendsView charts | ✅ Session 2026-05-19: physScore=47, deepFraction=0 (signal oscillatory, gate correct) |
+| **109** | — | calibrationBeta ordering fix, scoreComponents export, disconnect HRV attach, grace-expired diagnostics, fitsPerMin fix | 🔲 CI pending |
+
+---
+
+## B109 Changes (2026-05-19)
+
+### What motivated this build — first B108 session analysis (session_2026-05-19_0340.json)
+
+#### Bugs confirmed from data
+- **calibrationBetaMean always nil** (every session since B107): `attachCalibrationBeta` was called before `startSession` → `isRecording=false` → guard blocked it → betaZScore=0 always. B108 physScore=47 was 26pts rmssd + 20pts coherence + 0pts betaZ.
+- **fitsPerMin=0 in diagnostics**: `recordingStartedAt=nil` at line 374 (non-grace disconnect) and line 1378 (performFinalDisconnect) before `buildDiagnostics` → `sessionMin=0` → `fitsPerMin=0/0=0`.
+- **performFinalDisconnect missing diagnostics entirely**: No `buildDiagnostics`, no `attachEventStream`, no HRV attachment block before `endSession`. Grace-expired sessions had skeletal JSON.
+- **Non-grace disconnect missing HRV attachment**: `attachEnterThreshold`, `attachHRVScalars`, `attachCalibrationRmssd`, `attachDFAAlpha1` not called → dfaAlpha1/sdnn/sd1/sd2 nil in every disconnect-ended session.
+- **scoreComponents not exported**: betaZScore/rmssdScore/coherenceScore were local Float vars only. Score decomposition unverifiable post-hoc.
+
+#### deepFraction=0 root cause (NOT a bug)
+Signal was oscillatory — raw ecdfDisplay max=0.9545 but longest consecutive run above 0.65 = 12 windows (6s). Gate requires 20 windows (10s). Historical data: all 4 deep sessions had lr@0.65 ≥ 39. Gate worked correctly. No fix needed.
+
+### Changes
+
+#### Fix 1 — calibrationBeta ordering (`App.swift`, calibration-end block)
+- Moved `attachCalibrationBeta` and its Telemetry log from BEFORE `startSession` to AFTER.
+- Root cause: `isRecording` guard in `attachCalibrationBeta` blocked every call since the value was always set pre-recording.
+- Effect: betaZScore will be non-zero for the first time in B109+.
+
+#### Fix 2 — fitsPerMin ordering (non-grace disconnect path, `App.swift`)
+- Moved `recordingStartedAt = nil` to AFTER the `buildDiagnostics` block.
+- `buildDiagnostics` computes `sessionMin` from `recordingStartedAt`; clearing it first → `sessionMin=0` → `fitsPerMin=0`.
+- Also fixed endReason string in `buildDiagnostics` call: `"disconnect-grace-expired"` → `"disconnect"`.
+
+#### Fix 3 — performFinalDisconnect diagnostics (`App.swift`)
+- Added full attachment block before `endSession`: `attachDiagnostics(buildDiagnostics)`, `attachEventStream`, full HRV block.
+- Moved `recordingStartedAt = nil` to after `buildDiagnostics` (same ordering fix as Fix 2).
+- Grace-expired sessions now get the same richness as graceful-end sessions.
+
+#### Fix 4 — HRV attachment on disconnect paths (`App.swift`, both paths)
+- Added `attachEnterThreshold`, `attachHRVScalars`, `attachCalibrationRmssd`, `attachDFAAlpha1` to non-grace path and performFinalDisconnect.
+- Previously these only fired on the graceful end path (lines 1150-1168). All non-graceful ends had nil dfaAlpha1, sdnn, sd1, sd2.
+
+#### Fix 5 — scoreComponents export (`SessionRecorder.swift`)
+- Changed `computePhysiologicalScore` return type from `Int` to `(total: Int, betaZ: Int, rmssd: Int, coherence: Int)`.
+- Added `betaZScore`, `rmssdScore`, `coherenceScore` fields to `SessionRecord` and `NDJSONFooter`.
+- Updated `appendFooter` to pass all three components.
+- Effect: post-hoc score audits no longer require Console access.
+
+### B109 Validation Checklist
+1. Console after calibration: `B109 calBeta mean=X.XXX std=X.XXX` (MUST be non-nil for betaZScore to work).
+2. Session JSON footer contains `betaZScore`, `rmssdScore`, `coherenceScore` (check .ndjson file).
+3. `physiologicalScore` ≈ betaZScore + rmssdScore + coherenceScore (within 1pt rounding).
+4. For a session ending via disconnect: `dfaAlpha1`, `sdnn`, `sd1`, `sd2` must be non-nil in NDJSON footer.
+5. `fitsPerMin` > 0 in diagnostics for any session with fit events.
+
+### B109 Architecture Invariants
+
+**B109+:**
+- `attachCalibrationBeta` must always be called AFTER `startSession`. Guard depends on `isRecording=true`.
+- `recordingStartedAt` must not be nil before `buildDiagnostics` — clear it only after the diagnostics block.
+- All session-end paths (graceful, disconnect, grace-expired) now carry the full HRV attachment block.
+- `computePhysiologicalScore` returns a 4-tuple; call site must populate all four fields on `SessionRecord`.
 
 ---
 
