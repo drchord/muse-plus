@@ -80,6 +80,13 @@ final class DepthScore {
 
         let af7Alpha = powers.first(where: { $0.channel == 1 })?.alpha ?? 0
         let af8Alpha = powers.first(where: { $0.channel == 2 })?.alpha ?? 0
+        // B117 F6 — FAA convention: af8 (right frontal AF8) MINUS af7 (left frontal AF7).
+        // Positive => right has more alpha => right-frontal hypoactive => LEFT-active
+        //          => textbook Davidson "approach motivation" sign.
+        // EMPIRICAL for this user (Muse++ n=8): NEGATIVE faa predicts depth (r=-0.76 with deepFraction).
+        // This is INVERSE of textbook Davidson interpretation — user-specific.
+        // Do NOT flip sign without re-validating against historical session data first.
+        // Footer exports faaConvention="af8-af7" so analysis tooling self-documents this.
         let faa = af8Alpha - af7Alpha
 
         let progress = calibrationProgress
@@ -118,6 +125,13 @@ final class DepthScore {
                               faa: faa, alphaPowerRatio: EEGWindowBuffer.shared.latestAlphaPowerRatio))
     }
 
+    /// B117: public entry point so App.swift can force finalization at session start
+    /// before reading calibrationBetaMean/Std/SampleCount. Internal callers unchanged.
+    func forceFinalize() { finalizeBaseline() }
+
+    // B117: track finalized sample count for calibrationSummary record
+    private(set) var calibrationSampleCount: Int = 0
+
     private func finalizeBaseline() {
         // Fallback: if band powers arrived slower than 2Hz and no samples cleared the
         // 30s threshold, use all collected samples rather than leaving baselineMean=0.
@@ -151,9 +165,10 @@ final class DepthScore {
         // B107: variance proxy for adaptive Kalman qD. Must be set BEFORE calibrationSamples = [] below.
         calibrationEcdfVariance = baselineStd * baselineStd
 
-        calibrationIndexMean = baselineMean
-        calibrationIndexStd  = baselineStd
-        calibrationSamples   = []
+        calibrationIndexMean    = baselineMean
+        calibrationIndexStd     = baselineStd
+        calibrationSampleCount  = n    // B117: persist for calibrationSummary record
+        calibrationSamples      = []
 
         if !calibrationBetaSamplesInternal.isEmpty {
             let nb = Float(calibrationBetaSamplesInternal.count)

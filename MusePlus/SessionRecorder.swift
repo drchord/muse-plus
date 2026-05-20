@@ -92,6 +92,8 @@ struct SessionDiagnostics: Codable {
     // B83 — fit events per minute, used to derive grade. Persisted for transparency.
     // Renamed from `contactTransitionsPerMin` (misnamed prior to grade-metric correction).
     var fitEventsPerMin: Double? = nil
+    // B117 — count of HR samples rejected by absolute bounds gate [35, 120 BPM].
+    var hrSamplesRejected: Int? = nil
 }
 
 struct DeepEpisode: Codable {
@@ -152,6 +154,10 @@ struct SessionRecord: Codable, Identifiable {
     // B107 — calibration-phase beta baseline for physiologicalScore betaZ computation.
     var calibrationBetaMean: Float? = nil
     var calibrationBetaStd:  Float? = nil
+    // B117 F4 — true when attachCalibrationBeta got real values (not DepthScore defaults 0.0/0.30).
+    var calibrationBetaAttached: Bool? = nil
+    // B117 F6 — FAA sign convention literal for this session ("af8-af7").
+    var faaConvention: String? = nil
     // B107 — BLE resilience counters.
     var stallCount:        Int? = nil   // BLE interruptions >0s that triggered grace period
     var bleReconnectCount: Int? = nil   // successful reconnects during session
@@ -192,6 +198,41 @@ private struct NDJSONHeader: Codable {
     let buildTag: String
 }
 
+// B117 — calibration completion record. Emitted ONCE at the warmup→main transition
+// after DepthScore.forceFinalize() has populated real baseline values. Lets analysis
+// tooling verify whether calibrationBetaMean was real or a default (0.0/0.30).
+private struct NDJSONCalibrationSummary: Codable {
+    var _type = "calibrationSummary"
+    let time: Double
+    let calibrationIndexMean: Float?
+    let calibrationIndexStd: Float?
+    let calibrationBetaMean: Float?
+    let calibrationBetaStd: Float?
+    let calibrationSampleCount: Int?
+    let calibrationDurationSec: Double?
+}
+
+// B117 — C5 coach event log. Unified record of every coaching intervention
+// (chime, speech, haptic, breath pacer, banner) with the EEG/HRV state at trigger time.
+// Required for post-hoc A/B evaluation of coaching efficacy.
+struct CoachStateSnapshot: Codable {
+    let ecdfDisplay: Float?
+    let beta: Float?
+    let alpha: Float?
+    let theta: Float?
+    let faa: Float?
+    let heartRateBPM: Float?
+}
+private struct NDJSONCoach: Codable {
+    var _type = "coach"
+    let time: Double
+    let trigger: String        // e.g. "induction-stall-360", "approach-zone", "enter-deep", "return-nudge"
+    let diagnosis: String?     // optional context: "no-deep", "left-frontal-arousal", etc.
+    let intervention: String   // "chime" | "speech" | "haptic" | "breath-pacer" | "approach-bowl" | "return-bowl" | "banner" | mixed e.g. "chime+speech"
+    let speechText: String?    // verbatim TTS string, nil if no speech
+    let stateAtTrigger: CoachStateSnapshot
+}
+
 private struct NDJSONFooter: Codable {
     var _type = "footer"
     let endDate: String
@@ -219,6 +260,15 @@ private struct NDJSONFooter: Codable {
     let calibrationBetaStd:  Float?
     // B108: calibration ECDF index — leading predictor of session outcome (r²=0.84, n=8, treat as signal not gate).
     let calibrationIndexMean: Float?
+    // B117 F4: true if attachCalibrationBeta received non-default values; false if it wrote 0.0/0.30 defaults.
+    // betaZScore=0 is meaningless when attached=false; betaZScore=0 with attached=true is a real measurement.
+    let calibrationBetaAttached: Bool?
+    // B117 F6: literal label for the FAA sign convention used in this session.
+    // "af8-af7" means faa = af8Alpha - af7Alpha (right minus left). Empirically (Muse++ n=8)
+    // NEGATIVE faa predicts depth for this user (r=-0.76 with deepFraction).
+    let faaConvention: String?
+    // B117 F9: one-line formulas for every exported metric. Self-documenting telemetry.
+    let metricDefinitions: [String: String]?
 }
 
 private struct NDJSONAppState: Codable {
@@ -362,7 +412,10 @@ private struct NDJSONDenoiseStats: Codable {
 ///
 final class SessionRecorder: ObservableObject {
     static let shared = SessionRecorder()
-    static let currentBuildTag = "B109"
+    static let currentBuildTag: String = {
+        let v = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+        return v.isEmpty ? "Bunknown" : "B\(v)"
+    }()
 
     @Published var isRecording   = false
     @Published var savedSessions: [URL] = []
@@ -421,6 +474,8 @@ final class SessionRecorder: ObservableObject {
                 buildTag: SessionRecorder.currentBuildTag
             )
             current?.timeOfDay = tod
+            // B117 F6 — declare the FAA sign convention used by DepthScore. Footer exports this.
+            current?.faaConvention = "af8-af7"
             lastDeepState = false
             sampleCount   = 0
 
@@ -1010,12 +1065,56 @@ final class SessionRecorder: ObservableObject {
             dfaAlpha1:           rec.dfaAlpha1,
             calibrationBetaMean: rec.calibrationBetaMean,
             calibrationBetaStd:  rec.calibrationBetaStd,
-            calibrationIndexMean: rec.calibrationIndexMean
+            calibrationIndexMean: rec.calibrationIndexMean,
+            calibrationBetaAttached: rec.calibrationBetaAttached,
+            faaConvention: rec.faaConvention ?? "af8-af7",
+            metricDefinitions: SessionRecorder.metricDefinitions
         )
         appendLine(footer)
         ndjsonHandle?.synchronizeFile()
         Telemetry.recording.notice("NDJSON footer written: samples=\(rec.samples.count, privacy: .public) quality=\(rec.qualityScore.map(String.init) ?? "nil", privacy: .public) reason=\(reason, privacy: .public)")
     }
+
+    // B117 F9 — one-line formula for every metric exported in the footer or sample stream.
+    // Static so that the dictionary is constructed once and serialized identically every session.
+    // If a formula changes, update both here AND the implementation. Do not let these drift.
+    // Formulas verified against the actual implementation files cited (B117).
+    // If implementation changes, update BOTH the code and this dict — analysis tooling reads this.
+    // Entries marked SOURCE=... cite the file:line where the formula lives in code.
+    // Entries marked PARTIAL/UNVERIFIED admit incomplete grounding — fix in B118.
+    static let metricDefinitions: [String: String] = [
+        "faa": "af8Alpha - af7Alpha on frontal channels (right-minus-left log10 µV²). SOURCE=Pipeline/DepthScore.swift:~83. Empirically (Muse++ n=8) NEGATIVE faa predicts depth for Sugato (r=-0.76).",
+        "ecdfDisplay": "smoothedDisplay = Kalman-filtered Personal-ECDF mapping of depthZ to [0,1]. SOURCE=Audio/DepthGate.swift:~162 (smoothedDisplay = kalmanDepth).",
+        "depthZ": "max(-3.0, min(8.0, (idx - baselineMean) / max(baselineStd, 0.01))) where idx is aperiodic-corrected meditationIndex (or raw if correction disabled). SOURCE=Pipeline/DepthScore.swift:~119.",
+        "meditationIndex": "0.7*((alpha + theta) - 2*beta) + 0.3*max(0, theta - alpha) on log10 µV² band powers. Peniston alpha-theta crossover term added. SOURCE=Muse/MuseTypes.swift:~44.",
+        "meditationIndexCorrected": "Same formula as meditationIndex but on aperiodic-corrected band powers (FOOOF-style 1/f subtracted); equals raw when chi unavailable. SOURCE=Pipeline/AperiodicCorrection.swift.",
+        "betaZScore": "bz = (calibrationBetaMean - mainBetaMean) / max(calibrationBetaStd, 0.10); score = clamp(bz/2.0*50, 0, 50). Meaningless unless calibrationBetaAttached=true. SOURCE=SessionRecorder.swift:~1013.",
+        "rmssdScore": "Piecewise ABSOLUTE thresholds (B108+): sr<40→sr/40*10; 40≤sr<65→10+(sr-40)/25*15; 65≤sr<100→min(30,25+(sr-65)/35*5); sr≥100→30. Calibration-INDEPENDENT (was relative pre-B108). SOURCE=SessionRecorder.swift:~1018-1033.",
+        "coherenceScore": "frontalGoodFrac * 20.0 where frontalGoodFrac is fraction of main-phase samples with frontalGood=true. SOURCE=SessionRecorder.swift:~1034.",
+        "physiologicalScore": "Int(round(betaZScore + rmssdScore + coherenceScore)); range 0-100. SOURCE=SessionRecorder.swift:~1036.",
+        "rmssdDepthDelta": "mean RMSSD at ecdfDisplay>=0.50 minus mean at ecdfDisplay<0.25 (ms). Positive = HRV rises during depth. nil if either bucket <5 samples. SOURCE=B97 spec.",
+        "dfaAlpha1": "Detrended Fluctuation Analysis short-range scaling exponent. ~1.0=healthy pink-noise resting; ->0.5=random walk (may indicate artifact); >1.2=Brownian. SOURCE=Pipeline/HRVPipeline.swift computeDFAAlpha1.",
+        "sdnn": "Standard deviation of all NN/RR intervals over the recording window (ms).",
+        "sd1": "Poincaré short-axis SD ≈ instantaneous beat-to-beat variability. SD1>SD2 at rest is non-physiological (Brennan 2002) and suggests PPG noise or ectopics.",
+        "sd2": "Poincaré long-axis SD ≈ continuous long-term variability. Healthy resting: SD2>SD1.",
+        "iTPFFrontal": "Individual Theta Peak Frequency on frontal channels (Hz). SOURCE=Pipeline/ITPFTracker.swift.",
+        "aperiodicSlopeMean": "1/f aperiodic exponent χ from log-log PSD fit (Donoghue 2020 / FOOOF). Steeper (more negative) = stronger long-range power decay. SOURCE=Pipeline/AperiodicSlope.swift.",
+        "alphaPowerRatio": "cleanAlpha / rawAlpha from EEGDenoiser (post-denoise 8-12 Hz / pre-denoise); ≈1.0 = preservation. SOURCE=Pipeline/EEGDenoiser.swift:~849.",
+        "warmupFAAMean": "mean of faa across warmup phase; requires >=30 valid samples or nil.",
+        "mainBetaMean": "z-scored frontal beta averaged across main phase (post-warmup).",
+        "mainAlphaMean": "z-scored frontal alpha averaged across main phase.",
+        "mainThetaMean": "z-scored frontal theta averaged across main phase.",
+        "calibrationBetaMean": "mean frontal beta over calibration samples (DepthScore samples appended when calibrationProgress >= 0.5). SOURCE=Pipeline/DepthScore.swift:~95.",
+        "calibrationBetaStd": "max(0.10, sqrt(var)) of frontal beta over calibration samples; floored at 0.10. SOURCE=Pipeline/DepthScore.swift:~163.",
+        "calibrationIndexMean": "median of meditationIndex over calibration samples (robust to outliers). SOURCE=Pipeline/DepthScore.swift:~137.",
+        "calibrationIndexStd": "max(MAD*1.4826, 0.10) over calibration samples; consistent-Gaussian-σ estimate. SOURCE=Pipeline/DepthScore.swift:~149.",
+        "calibrationRmssd": "mean RMSSD computed over calibration-window RR intervals (ms).",
+        "qualityScore": "deep fraction (40) + ecdf smoothness (25) + contact quality (35); 0-100. SOURCE=B94 spec.",
+        "deepFraction": "fraction of session time where gate.inDeepState==true; [0,1].",
+        "enterThresholdAtSession": "ecdfDisplay threshold required to enter deep state (default 0.65).",
+        "fitEventsPerMin": "count of contact-state allGood flips per minute; lower=better.",
+        "hrSamplesRejected": "count of raw heartRateBPM samples rejected by B117 absolute bounds gate [35,120]. nil if no samples rejected."
+    ]
 
     private func closeNDJSONHandle() {
         try? ndjsonHandle?.close()
@@ -1381,11 +1480,63 @@ extension SessionRecorder {
     }
 
     func attachCalibrationBeta(mean: Float, std: Float) {
+        // B117 F4+F5: detect default values (DepthScore initializes calibrationBetaMean=0.0, Std=0.30).
+        // Real calibration produces non-default values; defaults mean finalizeBaseline never ran
+        // in time. Caller (App.swift) MUST call DepthScore.forceFinalize() before reading these.
+        let attachedReal = (mean != 0.0) || (std != 0.30)
+        // B117 F5: unconditional log — runs BEFORE the isRecording guard so the line always appears.
+        Telemetry.recording.notice("calibrationBeta attach: mean=\(mean, privacy: .public) std=\(std, privacy: .public) isRecording=\(self.isRecording, privacy: .public) attached=\(attachedReal, privacy: .public)")
         queue.sync {
             guard isRecording else { return }
-            current?.calibrationBetaMean = mean
-            current?.calibrationBetaStd  = std
-            Telemetry.recording.notice("calibrationBeta attached: mean=\(mean, privacy: .public) std=\(std, privacy: .public)")
+            current?.calibrationBetaMean    = mean
+            current?.calibrationBetaStd     = std
+            current?.calibrationBetaAttached = attachedReal
+        }
+    }
+
+    /// B117 F3 — emit a single calibrationSummary NDJSON record at warmup→main transition.
+    /// Call AFTER DepthScore.forceFinalize() so values are real, not defaults.
+    func attachCalibrationSummary(indexMean: Float,
+                                  indexStd: Float,
+                                  betaMean: Float,
+                                  betaStd: Float,
+                                  sampleCount: Int,
+                                  durationSec: Double) {
+        queue.sync {
+            guard isRecording, let rec = current else { return }
+            let t = Date().timeIntervalSince(rec.startDate)
+            appendLine(NDJSONCalibrationSummary(
+                time: t,
+                calibrationIndexMean: indexMean,
+                calibrationIndexStd: indexStd,
+                calibrationBetaMean: betaMean,
+                calibrationBetaStd: betaStd,
+                calibrationSampleCount: sampleCount,
+                calibrationDurationSec: durationSec
+            ))
+            Telemetry.recording.notice("calibrationSummary emitted: idxMean=\(indexMean, privacy: .public) idxStd=\(indexStd, privacy: .public) betaMean=\(betaMean, privacy: .public) betaStd=\(betaStd, privacy: .public) n=\(sampleCount, privacy: .public)")
+        }
+    }
+
+    /// B117 C5 — log a coaching intervention with the EEG/HRV state at trigger time.
+    /// Required for post-hoc evaluation of which interventions actually shift physiology.
+    func recordCoach(trigger: String,
+                     diagnosis: String? = nil,
+                     intervention: String,
+                     speechText: String? = nil,
+                     snapshot: CoachStateSnapshot) {
+        queue.sync {
+            guard isRecording, let rec = current else { return }
+            let t = Date().timeIntervalSince(rec.startDate)
+            appendLine(NDJSONCoach(
+                time: t,
+                trigger: trigger,
+                diagnosis: diagnosis,
+                intervention: intervention,
+                speechText: speechText,
+                stateAtTrigger: snapshot
+            ))
+            Telemetry.recording.notice("coach: trigger=\(trigger, privacy: .public) intervention=\(intervention, privacy: .public) ecdf=\(snapshot.ecdfDisplay.map(String.init) ?? "nil", privacy: .public) faa=\(snapshot.faa.map(String.init) ?? "nil", privacy: .public)")
         }
     }
 

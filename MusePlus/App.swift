@@ -644,14 +644,24 @@ final class Probe: ObservableObject {
                                              detail: String(format: "%.3f_%@", mean, readiness.label))
                             withAnimation(.easeIn(duration: 0.5)) { self.warmupFAAReadiness = readiness }
                             // B102: spoken coaching — primary channel for closed-eye users.
+                            let speechText: String
                             switch readiness {
                             case .ready:
-                                ChimeEngine.shared.speak("Brain ready. Settle in.")
+                                speechText = "Brain ready. Settle in."
                             case .neutral:
-                                ChimeEngine.shared.speak("Brain still settling. Take three slow breaths. Release any effort.")
+                                speechText = "Brain still settling. Take three slow breaths. Release any effort."
                             case .caution:
-                                ChimeEngine.shared.speak("High arousal detected. Five slow exhales, six seconds each. Drop your shoulders completely.")
+                                speechText = "High arousal detected. Five slow exhales, six seconds each. Drop your shoulders completely."
                             }
+                            ChimeEngine.shared.speak(speechText)
+                            // B117 C5 — log the coach intervention with state at trigger.
+                            SessionRecorder.shared.recordCoach(
+                                trigger: "warmup-faa-readiness",
+                                diagnosis: readiness.label,
+                                intervention: "banner+speech",
+                                speechText: speechText,
+                                snapshot: self.coachSnapshot()
+                            )
                             // Extended display for neutral/caution: user needs time to act on guidance.
                             let displayDuration: TimeInterval
                             switch readiness {
@@ -757,6 +767,14 @@ final class Probe: ObservableObject {
                             ChimeEngine.shared.playApproachZone()
                             self.recordEvent(kind: "approach-zone",
                                              detail: String(format: "ecdf=%.2f", self.gate.smoothedDisplay))
+                            // B117 C5
+                            SessionRecorder.shared.recordCoach(
+                                trigger: "approach-zone",
+                                diagnosis: "near-gate",
+                                intervention: "approach-bowl",
+                                speechText: nil,
+                                snapshot: self.coachSnapshot()
+                            )
                         }
                     }
                 } else {
@@ -776,6 +794,16 @@ final class Probe: ObservableObject {
                     self?.inductionStallTimer?.cancel()
                     self?.inductionStallTimer600?.cancel()
                     self?.inductionStallTimer900?.cancel()
+                    // B117 C5 — log enter-deep coaching point (no chime here; gate-driven entry has its own audio path).
+                    if let self {
+                        SessionRecorder.shared.recordCoach(
+                            trigger: "enter-deep",
+                            diagnosis: nil,
+                            intervention: "haptic",
+                            speechText: nil,
+                            snapshot: self.coachSnapshot()
+                        )
+                    }
                     // B102: single soft haptic 5s after entry — interoceptive registration.
                     // Fires after enter chime has fully decayed; prompts user to consciously
                     // notice the state they are in without disrupting it.
@@ -798,12 +826,33 @@ final class Probe: ObservableObject {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         ChimeEngine.shared.playReturnNudge()
+                        // B117 C5
+                        if let self {
+                            SessionRecorder.shared.recordCoach(
+                                trigger: "return-nudge",
+                                diagnosis: "exited-deep",
+                                intervention: "return-bowl+haptic",
+                                speechText: nil,
+                                snapshot: self.coachSnapshot()
+                            )
+                        }
                         // Spoken cue after nudge chime and its 3.8s unduck fully complete (5.5s buffer).
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) {
-                            ChimeEngine.shared.speak("Return gently. Soften your gaze. Let it find you.")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) { [weak self] in
+                            let text = "Return gently. Soften your gaze. Let it find you."
+                            ChimeEngine.shared.speak(text)
+                            // B117 C5
+                            if let self {
+                                SessionRecorder.shared.recordCoach(
+                                    trigger: "exit-deep-speech",
+                                    diagnosis: "exited-deep",
+                                    intervention: "speech",
+                                    speechText: text,
+                                    snapshot: self.coachSnapshot()
+                                )
+                            }
                         }
                     }
                 }
@@ -869,11 +918,20 @@ final class Probe: ObservableObject {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     ChimeEngine.shared.playInductionNudge()
                     // B102: spoken coaching fires after nudge chime + its 3s unduck settle.
+                    let stall360Text = "Soften your focus. Stop trying to meditate."
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
-                        ChimeEngine.shared.speak("Soften your focus. Stop trying to meditate.")
+                        ChimeEngine.shared.speak(stall360Text)
                     }
                     self.recordEvent(kind: "induction-stall", detail: "360s-no-deep")
                     Telemetry.recording.notice("induction-stall alert fired at 360s")
+                    // B117 C5
+                    SessionRecorder.shared.recordCoach(
+                        trigger: "induction-stall-360",
+                        diagnosis: "no-deep",
+                        intervention: "chime+speech+haptic",
+                        speechText: stall360Text,
+                        snapshot: self.coachSnapshot()
+                    )
                     withAnimation { self.showInductionStall = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
                         withAnimation { self?.showInductionStall = false }
@@ -892,12 +950,21 @@ final class Probe: ObservableObject {
                           !self.hasEverEnteredDeep,
                           !self.isPausedForReconnect else { return }
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    ChimeEngine.shared.speak("Follow your breath. Breathe in slowly for five seconds, then out for five.")
+                    let stall600Text = "Follow your breath. Breathe in slowly for five seconds, then out for five."
+                    ChimeEngine.shared.speak(stall600Text)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
                         ChimeEngine.shared.playBreathPacer(cycles: 3)
                     }
                     self.recordEvent(kind: "induction-stall", detail: "600s-breath-pacer")
                     Telemetry.recording.notice("induction-stall 600s: breath pacer fired")
+                    // B117 C5
+                    SessionRecorder.shared.recordCoach(
+                        trigger: "induction-stall-600",
+                        diagnosis: "no-deep",
+                        intervention: "speech+breath-pacer+haptic",
+                        speechText: stall600Text,
+                        snapshot: self.coachSnapshot()
+                    )
                 }
                 self.inductionStallTimer600 = stallWork600
                 DispatchQueue.main.asyncAfter(deadline: .now() + 600, execute: stallWork600)
@@ -911,12 +978,21 @@ final class Probe: ObservableObject {
                           !self.hasEverEnteredDeep,
                           !self.isPausedForReconnect else { return }
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    ChimeEngine.shared.speak("Let go of trying. You are already here. Just rest.")
+                    let stall900Text = "Let go of trying. You are already here. Just rest."
+                    ChimeEngine.shared.speak(stall900Text)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                         ChimeEngine.shared.playInductionNudge()
                     }
                     self.recordEvent(kind: "induction-stall", detail: "900s-no-deep")
                     Telemetry.recording.notice("induction-stall 900s fired")
+                    // B117 C5
+                    SessionRecorder.shared.recordCoach(
+                        trigger: "induction-stall-900",
+                        diagnosis: "no-deep",
+                        intervention: "speech+chime+haptic",
+                        speechText: stall900Text,
+                        snapshot: self.coachSnapshot()
+                    )
                 }
                 self.inductionStallTimer900 = stallWork900
                 DispatchQueue.main.asyncAfter(deadline: .now() + 900, execute: stallWork900)
@@ -927,6 +1003,11 @@ final class Probe: ObservableObject {
                 // Reading UserDefault here (not at app launch) so the user can toggle
                 // the flag between sessions without restarting the app.
                 self.liveDenoiseEnabled = UserDefaults.standard.bool(forKey: "eegDenoiseLiveSignal")
+                // B117 F3: force-finalize calibration baseline NOW so calibrationBetaMean/Std
+                // hold real values instead of DepthScore defaults (0.0 / 0.30). Without this,
+                // the attach below was writing defaults when the first post-warmup sample
+                // hadn't yet triggered finalizeBaseline() — root cause of B109 betaZScore=0.
+                self.scorer.forceFinalize()
                 SessionRecorder.shared.startSession(
                     calibrationIndexMean: self.scorer.calibrationIndexMean,
                     calibrationIndexStd:  self.scorer.calibrationIndexStd
@@ -938,6 +1019,16 @@ final class Probe: ObservableObject {
                 let _calBetaStd  = self.scorer.calibrationBetaStd
                 SessionRecorder.shared.attachCalibrationBeta(mean: _calBetaMean, std: _calBetaStd)
                 Telemetry.recording.notice("B109 calBeta mean=\(String(describing: _calBetaMean), privacy: .public) std=\(String(describing: _calBetaStd), privacy: .public)")
+                // B117 F3: emit calibrationSummary NDJSON record with real values.
+                // Analysis tools key off this to verify calibration actually ran with samples.
+                SessionRecorder.shared.attachCalibrationSummary(
+                    indexMean:   self.scorer.calibrationIndexMean,
+                    indexStd:    self.scorer.calibrationIndexStd,
+                    betaMean:    _calBetaMean,
+                    betaStd:     _calBetaStd,
+                    sampleCount: self.scorer.calibrationSampleCount,
+                    durationSec: Date().timeIntervalSince(self.sessionStart)
+                )
                 // B83 — start main-thread stall detector (1Hz heartbeat, 1.5s threshold).
                 // Quantifies the "freezing" sensation users describe; emits `mainStall` events.
                 MainThreadStall.shared.start()
@@ -1102,11 +1193,33 @@ final class Probe: ObservableObject {
     // D3: Published flag observed by MeditationView to show "Session saved" toast.
     @Published var sessionSavedToast: String? = nil
 
+    /// B117: Absolute HR bounds reject counter. Incremented when raw BPM is outside [35,120].
+    var hrSamplesRejected: Int = 0
+
+    /// B117 C5: Build a snapshot of current EEG/HRV state for the coach record.
+    /// Called at every coaching trigger so post-hoc analysis can correlate intervention to physiology.
+    /// Reads the most-recent published Probe values; any unavailable field becomes nil.
+    func coachSnapshot() -> CoachStateSnapshot {
+        CoachStateSnapshot(
+            ecdfDisplay: self.gate.smoothedDisplay,
+            beta:        self.frontBeta != 0 ? self.frontBeta : nil,
+            alpha:       self.frontAlpha != 0 ? self.frontAlpha : nil,
+            theta:       self.frontTheta != 0 ? self.frontTheta : nil,
+            faa:         self.depth.faa != 0 ? self.depth.faa : nil,
+            heartRateBPM: self.filteredHeartRate()
+        )
+    }
+
     /// B96: Rolling-median HR filter. Rejects values where |bpm - median5| > 35.
     /// Physiologically impossible values (30, 192 BPM seen in session data) are sensor artifacts.
+    /// B117: Added absolute bounds gate [35, 120] before buffer append.
     private func filteredHeartRate() -> Float? {
         guard heartRate > 0 else { return nil }
         let raw = Float(heartRate)
+        guard raw >= 35, raw <= 120 else {
+            hrSamplesRejected += 1
+            return nil
+        }
         heartRateBuffer.append(raw)
         if heartRateBuffer.count > 5 { heartRateBuffer.removeFirst() }
         guard heartRateBuffer.count >= 3 else { return raw }   // not enough history yet
@@ -1572,7 +1685,8 @@ final class Probe: ObservableObject {
             iosVersion:          iosVer,
             museModel:           client.museModelString,
             contactQualityGrade: grade,
-            fitEventsPerMin:     fitsPerMin
+            fitEventsPerMin:     fitsPerMin,
+            hrSamplesRejected:   hrSamplesRejected > 0 ? hrSamplesRejected : nil
         )
     }
 }
