@@ -1536,7 +1536,9 @@ extension SessionRecorder {
                 speechText: speechText,
                 stateAtTrigger: snapshot
             ))
-            Telemetry.recording.notice("coach: trigger=\(trigger, privacy: .public) intervention=\(intervention, privacy: .public) ecdf=\(snapshot.ecdfDisplay.map(String.init) ?? "nil", privacy: .public) faa=\(snapshot.faa.map(String.init) ?? "nil", privacy: .public)")
+            let ecdfStr = snapshot.ecdfDisplay.map { String(format: "%.3f", $0) } ?? "nil"
+            let faaStr  = snapshot.faa.map        { String(format: "%.3f", $0) } ?? "nil"
+            Telemetry.recording.notice("coach: trigger=\(trigger, privacy: .public) intervention=\(intervention, privacy: .public) ecdf=\(ecdfStr, privacy: .public) faa=\(faaStr, privacy: .public)")
         }
     }
 
