@@ -14,9 +14,6 @@ struct MusePlusApp: App {
         // B80: register BGProcessingTask handler for crash-safe NDJSON flush.
         // Must be called before app finishes launching (before first scene connect).
         SessionRecorder.registerBackgroundTasks()
-        // B83 — generate fallback bowl WAVs on first launch (idempotent).
-        // Bundle .m4a / .wav take priority via EndGongPlayer.bundleURL ordering.
-        BowlAudioGenerator.shared.generateIfNeeded()
     }
 
     var body: some Scene {

@@ -187,17 +187,6 @@ public final class EndGongPlayer: NSObject, AVAudioPlayerDelegate {
                 return url
             }
         }
-        // B83 — Documents/Sounds fallback. BowlAudioGenerator.generateIfNeeded() writes
-        // these at first app launch so the file path is always populated even when the
-        // user hasn't yet bundled their own bowl recordings.
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        if let docs = docs {
-            let candidate = docs.appendingPathComponent("Sounds/\(resourceName).wav")
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                Telemetry.audio.notice("EndGongPlayer: Documents/Sounds fallback \(resourceName).wav")
-                return candidate
-            }
-        }
         return nil
     }
 
