@@ -1502,7 +1502,14 @@ final class Probe: ObservableObject {
         // B83 — was missing in B80; grace-expiry would silently end with NO audio cue.
         // EndGongPlayer.playFailure tries `bowl_failure.{m4a,wav}` then falls back to
         // ChimeEngine.playFailureChime (5 short alert pings, all in passband).
-        EndGongPlayer.shared.playFailure()
+        // B119 — long sessions (≥15 min) that end by disconnect get the success gong
+        // rather than alert pings; a sustained meditation deserves a gentle close.
+        let sessionElapsed = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        if sessionElapsed >= 900 {
+            EndGongPlayer.shared.playSuccess()
+        } else {
+            EndGongPlayer.shared.playFailure()
+        }
         recordEvent(kind: "session-end-failure", detail: "grace-expired")
         // Lengthen the soundscape fade so it doesn't get cut off mid-gong.
         SoundscapePlayer.shared.stopAll(fadeSeconds: 4.0)
