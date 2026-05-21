@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-19 (B109 — calibrationBeta ordering fix, scoreComponents export, disconnect-path HRV attachment, performFinalDisconnect diagnostics, fitsPerMin ordering fix)
+**Last updated:** 2026-05-20 (B118 — observability + coach log foundation: dynamic buildTag, forceFinalize calibrationBeta, NDJSON calibrationSummary + coach records, faaConvention + metricDefinitions in footer, HR absolute bounds gate)
 
 ---
 
@@ -25,6 +25,66 @@
 | **107** | 112 | HRV scalars (SDNN/SD1/SD2/DFA α1), physiologicalScore, BLE resilience, TrendsView expansion | ✅ Session 2026-05-18: deepFraction=0.836 |
 | **108** | 115 | physiologicalScore rmssdScore fix, NDJSON calibration data export, betaZScore telemetry, 3 new TrendsView charts | ✅ Session 2026-05-19: physScore=47, deepFraction=0 (signal oscillatory, gate correct) |
 | **109** | 116 | calibrationBeta ordering fix, scoreComponents export, disconnect HRV attach, grace-expired diagnostics, fitsPerMin fix | ✅ CI run 26092291419 |
+| **118** | 118 | F1 dynamic buildTag (from CFBundleVersion), F2 HR absolute bounds [35,120] + reject counter, F3 forceFinalize → calibrationSummary NDJSON record, F4 calibrationBetaAttached flag in footer, F5 unconditional calibrationBeta Telemetry, F6 faaConvention "af8-af7" in footer + DepthScore comment, F9 metricDefinitions dict (31 formulas with SOURCE cites) in footer, C5 NDJSONCoach + recordCoach() at 8 trigger sites (foundation for B119+ state-contingent coaching) | 🟡 CI run 26158572518 — first attempt 26158289551 failed on ambiguous queue.sync (String.init overload); fix pushed |
+
+---
+
+## B118 Changes (2026-05-20)
+
+### Motivation — first B109 session analysis (session_2026-05-20_0338.json, 58.8 min)
+
+Sugato ran B109 TF116 for ~1 hour. Deepdive analysis surfaced multiple defects in current observability AND interpretation backward in the codebase. Key findings:
+
+- `buildTag: "B109"` hardcoded literal — stale across builds, can't tell which binary produced a session
+- `betaZScore = 0` AGAIN (despite B109 ordering fix). Root cause traced to time-race: `isCalibrated` is a computed property based on wall-clock; `finalizeBaseline()` only runs on next band-power sample (~500ms latency); warmup→main UI timer can fire before that sample arrives → `calibrationBetaMean` stays at default `0.0` → `bz` formula clamps to 0
+- No `calibration` phase emitted to NDJSON → post-hoc tooling cannot tell if calibrationBeta was real or default
+- FAA convention undocumented in JSON — my analysis initially misread mid-session FAA jump as "positive affect" when codebase empirically labels positive FAA as the "caution / left-frontal arousal" caution range (r=-0.76 with deepFraction)
+- HR PPG spikes >120 BPM and <35 BPM slipped through first-2-sample warmup of rolling-median filter
+- Coaching events (`induction-stall-360/600/900`) fire `recordEvent` but log no diagnosis, no speech text, no EEG/HRV state at trigger — cannot test "did this intervention work" post-hoc
+- SD1>SD2 anomaly in HRV (70.1 > 61.1) suggests PPG noise/ectopics may inflate RMSSD — flagged but NOT fixed in B118 (offline validation required first)
+
+### Fixes shipped in B118
+
+| Tag | File | Change |
+|-----|------|--------|
+| F1 | `SessionRecorder.swift:~366` | `static let currentBuildTag` now reads `Bundle.main.infoDictionary["CFBundleVersion"]` → `"B\(version)"` |
+| F2 | `App.swift:~1215` | `filteredHeartRate()` rejects raw BPM outside `[35, 120]` BEFORE buffer accumulation; `hrSamplesRejected` counter on Probe + in `SessionDiagnostics` |
+| F3 | `App.swift:1010` + `DepthScore.swift:128` | `forceFinalize()` called BEFORE `startSession` so `calibrationBetaMean/Std` are real values, not defaults |
+| F3 | `SessionRecorder.swift:204` + `App.swift:1022` | `NDJSONCalibrationSummary` record emitted at warmup→main transition with mean/std/sampleCount/durationSec |
+| F4 | `SessionRecorder.swift:1493` | `calibrationBetaAttached: Bool?` flag in footer — true if `attachCalibrationBeta` got non-default values |
+| F5 | `SessionRecorder.swift:1487` | Telemetry log moved OUTSIDE `isRecording` guard — always logs attempt+result |
+| F6 | `DepthScore.swift:~83` + `SessionRecorder.swift:478` | FAA convention comment at compute site + `faaConvention: "af8-af7"` literal in footer |
+| F9 | `SessionRecorder.swift:1085` | `metricDefinitions: [String: String]` dict in footer (31 metrics with `SOURCE=file:line` cites) |
+| C5 | `SessionRecorder.swift:218,226,1523` + `App.swift` (8 sites) | `CoachStateSnapshot` + `NDJSONCoach` record + `recordCoach(...)` method + `coachSnapshot()` helper; wired at warmup-faa-readiness, approach-zone, enter-deep, return-nudge, exit-deep-speech, induction-stall-360/600/900 |
+
+### B118 Validation Checklist (post-CI green, on TF install)
+
+1. Footer field `buildTag` reads `"B118"` (NOT `"B109"`). If `"B1"`, F1 fallback path triggered — CI didn't set `CURRENT_PROJECT_VERSION`.
+2. `_type: "calibrationSummary"` record present at ~300s (warmup→main transition) with non-zero `calibrationBetaMean`.
+3. Footer `calibrationBetaAttached: true`.
+4. Footer `betaZScore > 0` if `mainBetaMean < calibrationBetaMean` (which it should be for any decent meditation session).
+5. Footer `faaConvention: "af8-af7"` + `metricDefinitions` dict (31 keys, each with `SOURCE=...` annotation where verified).
+6. Diagnostics `hrSamplesRejected` field present (may be 0 if PPG was clean this session).
+7. At least one `_type: "coach"` record per induction-stall event (if user doesn't enter deep).
+8. Each coach record has `stateAtTrigger.ecdfDisplay`, `.beta`, `.faa`, `.heartRateBPM` populated.
+
+### Deferred to B119+ (intentionally NOT in B118)
+
+- **F8 ectopic-RR filter** — needs offline validation against historical sessions before going live (could change scores)
+- **C1 state-contingent coaching triggers** — replaces 360/600/900s timers with EEG-state-driven triggers. Needs B118 coach log to baseline current behavior first.
+- **C2 differential diagnosis enum** — per-stall reason (highArousal vs overEfforting vs drowsy vs avoidant) → different intervention. Build on C5 log.
+- **C3 positive anchoring** — soft tone when `ecdfDisplay ≥ 0.80` sustained ≥3 samples. Anchors near-miss states.
+- **C4 post-session teacher paragraph** — generated narrative summarizing best window, blockers, what worked.
+- **coachSnapshot side-effect fix** — currently calls `filteredHeartRate()` which mutates buffer. Pure-read helper needed.
+- **hrSamplesRejected per-session reset** — counter persists across sessions; needs reset in calibration-end block.
+- **6 unverified metricDefinitions formulas** — `rmssdDepthDelta`, `dfaAlpha1`, `sdnn`, `iTPFFrontal`, `aperiodicSlopeMean`, `qualityScore` cite source files but I did not read those source files end-to-end.
+
+### B118 Architecture Invariants
+
+- buildTag is dynamic; never hardcode again.
+- All coaching interventions MUST go through `recordCoach()` so future A/B analysis can measure efficacy.
+- `metricDefinitions` is authoritative; if a formula changes in code, update the dict in the SAME commit.
+- `calibrationBetaAttached: false` in any session footer = DepthScore.forceFinalize() failed (no calibration samples). Treat that session's betaZScore as void.
 
 ---
 
