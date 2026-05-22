@@ -70,7 +70,7 @@ final class CrashRecovery: ObservableObject {
                     let coord = NSFileCoordinator()
                     coord.coordinate(writingItemAt: jsonURL, options: .forReplacing, error: &coordError) { writingURL in
                         do {
-                            try data.write(to: writingURL, options: [.atomic, .completeFileProtection])
+                            try data.write(to: writingURL, options: [.atomic, .completeFileProtectionUnlessOpen])
                         } catch {
                             writeError = error
                         }

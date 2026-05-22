@@ -255,6 +255,10 @@ private struct NDJSONFooter: Codable {
     let rmssd:               Double?      // B107: main-phase RMSSD (ms)
     let calibrationRmssd:    Double?      // B107: calibration-phase RMSSD baseline (ms)
     let dfaAlpha1:           Double?      // B107: DFA α1 short-range scaling exponent
+    // B120: Poincaré / SDNN scalars — previously only in SessionRecord, lost on crash recovery.
+    let sdnn: Double?       // standard deviation of all RR intervals (ms)
+    let sd1:  Double?       // Poincaré short-axis SD (instantaneous beat-to-beat variability)
+    let sd2:  Double?       // Poincaré long-axis SD (continuous long-term variability)
     // B108: calibration-phase beta baseline — exported so betaZScore inputs are verifiable from JSON.
     let calibrationBetaMean: Float?
     let calibrationBetaStd:  Float?
@@ -1063,6 +1067,9 @@ final class SessionRecorder: ObservableObject {
             rmssd:              rec.rmssd,
             calibrationRmssd:   rec.calibrationRmssd,
             dfaAlpha1:           rec.dfaAlpha1,
+            sdnn:                rec.sdnn,
+            sd1:                 rec.sd1,
+            sd2:                 rec.sd2,
             calibrationBetaMean: rec.calibrationBetaMean,
             calibrationBetaStd:  rec.calibrationBetaStd,
             calibrationIndexMean: rec.calibrationIndexMean,
@@ -1192,7 +1199,7 @@ final class SessionRecorder: ObservableObject {
             let coord = NSFileCoordinator()
             coord.coordinate(writingItemAt: url, options: .forReplacing, error: &coordError) { writingURL in
                 do {
-                    try data.write(to: writingURL, options: [.atomic, .completeFileProtection])
+                    try data.write(to: writingURL, options: [.atomic, .completeFileProtectionUnlessOpen])
                 } catch {
                     writeError = error
                 }
@@ -1240,6 +1247,7 @@ final class SessionRecorder: ObservableObject {
         var marks:     [Mark]          = []
         var lastTime:  Double          = 0
         var footerEndDate: Date?
+        var footerRecord:  NDJSONFooter?   // B120: recover biomarkers when footer is present
         var lastDeep = false
         var eventLog: [String]         = []
         var enterThresholdFromNDJSON: Float? = nil
@@ -1306,6 +1314,9 @@ final class SessionRecorder: ObservableObject {
                     fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
                     footerEndDate = fmt.date(from: endStr)
                 }
+                // B120: decode full footer so biomarkers (physiologicalScore, HRV scalars,
+                // calibrationBeta, betaZScore etc.) survive when save() failed mid-session.
+                footerRecord = try? dec.decode(NDJSONFooter.self, from: data)
 
             case "threshold":
                 if let t = obj["enterThreshold"] as? Double {
@@ -1362,7 +1373,7 @@ final class SessionRecorder: ObservableObject {
             return Int((deepPts + smoothPts + contactPts).rounded())
         }()
 
-        return SessionRecord(
+        var rec = SessionRecord(
             id:        hdr.id,
             startDate: startDate,
             endDate:   endDate,
@@ -1380,9 +1391,35 @@ final class SessionRecorder: ObservableObject {
             durationSec:          synthDuration,
             summarySampleCount:   samples.count,
             deepFraction:         synthDeepFraction,
-            enterThresholdAtSession: enterThresholdFromNDJSON,
-            qualityScore:         synthQuality
+            enterThresholdAtSession: footerRecord?.enterThresholdAtSession ?? enterThresholdFromNDJSON,
+            qualityScore:         footerRecord?.qualityScore ?? synthQuality
         )
+        // B120: populate biomarkers from footer when available (footer-present NDJSON =
+        // endSession() ran but save() failed; all attach*() calls had already fired).
+        if let f = footerRecord {
+            rec.physiologicalScore       = f.physiologicalScore
+            rec.betaZScore               = f.betaZScore
+            rec.rmssdScore               = f.rmssdScore
+            rec.coherenceScore           = f.coherenceScore
+            rec.rmssd                    = f.rmssd
+            rec.calibrationRmssd         = f.calibrationRmssd
+            rec.dfaAlpha1                = f.dfaAlpha1
+            rec.sdnn                     = f.sdnn
+            rec.sd1                      = f.sd1
+            rec.sd2                      = f.sd2
+            rec.calibrationBetaMean      = f.calibrationBetaMean
+            rec.calibrationBetaStd       = f.calibrationBetaStd
+            rec.calibrationBetaAttached  = f.calibrationBetaAttached
+            rec.faaConvention            = f.faaConvention
+            rec.rmssdDepthDelta          = f.rmssdDepthDelta
+            rec.meditationIndexCorrelation = f.meditationIndexCorrelation
+            rec.warmupFAAMean            = f.warmupFAAMean
+            rec.mainBetaMean             = f.mainBetaMean
+            rec.stallCount               = f.stallCount
+            rec.bleReconnectCount        = f.bleReconnectCount
+            rec.timeOfDay                = f.timeOfDay
+        }
+        return rec
     }
 
     // MARK: - Directory
@@ -1484,10 +1521,14 @@ extension SessionRecorder {
         // Real calibration produces non-default values; defaults mean finalizeBaseline never ran
         // in time. Caller (App.swift) MUST call DepthScore.forceFinalize() before reading these.
         let attachedReal = (mean != 0.0) || (std != 0.30)
-        // B117 F5: unconditional log — runs BEFORE the isRecording guard so the line always appears.
+        // B120: guard on current != nil, not isRecording. scorer.onResult fires on a background
+        // thread; startSession() sets isRecording=true via DispatchQueue.main.async. The subsequent
+        // queue.sync here runs before main processes that async (queue.sync is immediate; main.async
+        // requires a run-loop cycle). isRecording is false → guard would fire → calibrationBeta lost.
+        // current is set synchronously inside startSession()'s queue.sync — safe to use as the gate.
         Telemetry.recording.notice("calibrationBeta attach: mean=\(mean, privacy: .public) std=\(std, privacy: .public) isRecording=\(self.isRecording, privacy: .public) attached=\(attachedReal, privacy: .public)")
         queue.sync {
-            guard isRecording else { return }
+            guard current != nil else { return }
             current?.calibrationBetaMean    = mean
             current?.calibrationBetaStd     = std
             current?.calibrationBetaAttached = attachedReal
