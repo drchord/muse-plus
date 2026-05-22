@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-20 (B118 — observability + coach log foundation: dynamic buildTag, forceFinalize calibrationBeta, NDJSON calibrationSummary + coach records, faaConvention + metricDefinitions in footer, HR absolute bounds gate)
+**Last updated:** 2026-05-22 (B120 — betaZScore fix: attachCalibrationBeta guard isRecording→current!=nil; sdnn/sd1/sd2 added to NDJSONFooter; save() + CrashRecovery file protection fix; synthesiseRecord() full footer decode; git config name corrected)
 
 ---
 
@@ -24,8 +24,68 @@
 | **103** | 106 | Spotify depth-responsive volume (6 bugs fixed) | ✅ |
 | **107** | 112 | HRV scalars (SDNN/SD1/SD2/DFA α1), physiologicalScore, BLE resilience, TrendsView expansion | ✅ Session 2026-05-18: deepFraction=0.836 |
 | **108** | 115 | physiologicalScore rmssdScore fix, NDJSON calibration data export, betaZScore telemetry, 3 new TrendsView charts | ✅ Session 2026-05-19: physScore=47, deepFraction=0 (signal oscillatory, gate correct) |
+| **109** | 116 | calibrationBeta ordering fix, scoreComponents export, disconnect HRV attach, grace-expired diagnostics, fitsPerMin fix | ✅ Session 2026-05-20 (motivated B118 analysis — see B118 section) |
 | **109** | 116 | calibrationBeta ordering fix, scoreComponents export, disconnect HRV attach, grace-expired diagnostics, fitsPerMin fix | ✅ CI run 26092291419 |
 | **118** | 118 | F1 dynamic buildTag (from CFBundleVersion), F2 HR absolute bounds [35,120] + reject counter, F3 forceFinalize → calibrationSummary NDJSON record, F4 calibrationBetaAttached flag in footer, F5 unconditional calibrationBeta Telemetry, F6 faaConvention "af8-af7" in footer + DepthScore comment, F9 metricDefinitions dict (31 formulas with SOURCE cites) in footer, C5 NDJSONCoach + recordCoach() at 8 trigger sites (foundation for B119+ state-contingent coaching) | 🟡 CI run 26158572518 — first attempt 26158289551 failed on ambiguous queue.sync (String.init overload); fix pushed |
+| **119** | 120 | Remove Documents/Sounds fallback from EndGongPlayer.bundleURL() — ChimeEngine is now primary fallback for success/failure gong. Remove BowlAudioGenerator.generateIfNeeded() from App init. Long sessions (≥15 min) ending via BLE grace-expiry now receive playSuccess() instead of playFailure(). | ✅ Session 2026-05-22: NDJSON generated but JSON missing (save() bug fixed in B120) |
+| **120** | — | (1) Fix `save()` + `CrashRecovery` file protection: `.completeFileProtection` → `.completeFileProtectionUnlessOpen`. (2) Fix `synthesiseRecord()`: decode full NDJSONFooter → 19 biomarkers on crash-recovery. (3) Fix `attachCalibrationBeta` guard: `isRecording` → `current != nil` — root cause of betaZScore=0 every session. (4) Add `sdnn`/`sd1`/`sd2` to NDJSONFooter + `appendFooter()` + `synthesiseRecord()`. (5) Git config: user.name → "Sugato Chakravarty". | 🔴 Pending CI push |
+| **121** | — | Temporal contact gate: `doConnect()` defers `startCalibration()` until TP9 + TP10 `hsiStableTier` both ≤ 2 (not-bad, 4-of-5 majority). 15s timeout force-starts calibration if HSI never arrives (firmware/SDK variant). Only TP9/TP10 buffers reset on connect (AF7/AF8 unchanged). `FitStabilityBannerView` shows tier-colored dots + "Seat TP9 + TP10 to begin" while blocked. | 🔴 Pending CI push |
+
+---
+
+## B119 Changes (2026-05-21) — TF build 120
+
+### Motivation — Documents/Sounds fallback was masking real audio path
+
+`BowlAudioGenerator.generateIfNeeded()` wrote `Documents/Sounds/bowl_success.wav` at every launch. `EndGongPlayer.bundleURL()` always found it and returned it **before** reaching the ChimeEngine fallback. Result: 20+ builds of the synthesized mono WAV (grating overtones, no sustained fundamental) instead of ChimeEngine stereo gong synthesis. The bundled `.m4a`/`.mp3` (real recording) was being bypassed entirely.
+
+### Changes
+
+| Tag | File | Change |
+|-----|------|--------|
+| G1 | `App.swift` (init) | Removed `BowlAudioGenerator.shared.generateIfNeeded()` — no longer generates synthesized WAV at launch |
+| G2 | `EndGongPlayer.swift:bundleURL()` | Removed Documents/Sounds branch — lookup is now Bundle root → Bundle Sounds/ subdirectory → nil |
+| G3 | `App.swift:performFinalDisconnect` | Sessions ≥15 min that end via BLE grace-expiry now call `playSuccess()` instead of `playFailure()`. Gate: `recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0 >= 900` |
+
+### B119 Validation Checklist
+
+1. Session-end gong is ChimeEngine 432 Hz synthesis (or bundled .m4a if present) — NOT a synthesized WAV with grating overtones.
+2. `EndGongPlayer` Telemetry shows "synth:ChimeEngine-432Hz" in source field (not "Documents/Sounds").
+3. Long session (≥15 min) ending via BLE disconnect → success gong (not 5 alert pings).
+4. Short/accidental disconnect (<15 min) → failure chime (5 alert pings unchanged).
+
+### Known issue from 2026-05-22 session on TF120
+
+**B120 session (session_2026-05-22_0340) produced NDJSON but no JSON.** Possible causes:
+- `save()` in `SessionRecorder` caught a write error silently — `NSFileCoordinator` may behave differently with Google Drive Files.app provider vs iCloud
+- OR: session ended via a path that hit `playSuccess()` before `endSession()`, and ChimeEngine had an audio session conflict
+
+**Root cause confirmed (2026-05-22)**: `_type: "footer"` IS present in NDJSON — `endSession()` completed. All final samples show `appState: "background"`. Timer fired at t=3600s while iPhone screen was locked. `save()` used `.completeFileProtection` which iOS blocks on locked devices. NDJSON survived because it uses `.completeFileProtectionUnlessOpen`. Error was silently caught; JSON never written.
+
+**Fix shipped in B120**:
+- `SessionRecorder.save()` now uses `.completeFileProtectionUnlessOpen` (Apple docs: "files with this class may be created while the device is locked")
+- `CrashRecovery.swift:73` also fixed (same bug, different location)
+- `synthesiseRecord()` now decodes full `NDJSONFooter` to recover physiologicalScore, HRV scalars (rmssd, dfaAlpha1, calibrationRmssd), betaZScore/rmssdScore/coherenceScore, calibrationBeta fields, faaConvention, timeOfDay — previously these were all nil in crash-recovered JSONs
+
+**sdnn/sd1/sd2**: Added to `NDJSONFooter`, `appendFooter()`, and `synthesiseRecord()` footer-decode block in B120. No longer lost on crash recovery.
+
+**Data recovery now**: Launch app on iPhone → `CrashRecovery.recoverOrphans()` synthesizes JSON from NDJSON with full biomarkers (B120 fix). JSON should appear in Google Drive within ~30s.
+
+**Unconfirmed**: Root cause is the strongest-supported hypothesis (footer present = endSession() ran; appState=background = likely locked; .completeFileProtection blocks new file creation when locked). Cannot confirm without the Telemetry log entry "SAVE FAILED for session_2026-05-22_0340.json: ..." from the iPhone Console.
+
+**Session 2026-05-22 data (from NDJSON footer)**: physScore=46 (rmssd=26, coherence=20, betaZ=0), qualityScore=77, rmssd=75ms, dfaAlpha1=0.566, meditationIndexCorrelation=0.93, calibrationIndexMean=−0.42 (strong calibration), episodeCount=1 (sustained deep state), endReason=timer-completed, 60-minute session. betaZScore=0: root cause found and fixed in B120 — `attachCalibrationBeta()` guard was `isRecording` but `startSession()` sets `isRecording=true` via `DispatchQueue.main.async`. The `onResult` callback runs on a background thread (line 744 in App.swift), not main. The background thread immediately calls `attachCalibrationBeta()` → `queue.sync { guard isRecording }`. That serial-queue closure executes synchronously and completes before the pending `DispatchQueue.main.async { isRecording = true }` fires (main.async needs a run-loop cycle; queue.sync runs immediately). Race condition that consistently loses: `isRecording=false` in the closure → guard fires → calibrationBetaMean never written → betaZ=0 every session since B107. Fix: guard now checks `current != nil` (set synchronously in `startSession()`'s `queue.sync` before the async dispatch).
+
+### B120 Architecture Invariants
+
+- `attachCalibrationBeta()` guards on `current != nil`, NOT `isRecording`. `isRecording=true` is dispatched `DispatchQueue.main.async` in `startSession()`. Since `scorer.onResult` fires on a background thread, the immediately subsequent `queue.sync` in `attachCalibrationBeta()` runs before main has a chance to process the async — `isRecording` is still false, guard fires, calibrationBeta silently discarded every session since B107. `current` is set synchronously inside `startSession()`'s `queue.sync`, making it the correct gate.
+- `NDJSONFooter` now includes `sdnn`, `sd1`, `sd2`. If you add a new HRV scalar to `SessionRecord`, add it to `NDJSONFooter` + `appendFooter()` + `synthesiseRecord()` footer-decode block simultaneously — otherwise it's lost on crash recovery.
+- `.completeFileProtectionUnlessOpen` for all file writes. `.completeFileProtection` (Class A) blocks new file creation on locked devices — NDJSON survives because the file handle is opened while the device is unlocked; `.completeFileProtection` on `save()` prevented JSON creation when timer fired with locked screen.
+
+### B119 Architecture Invariants
+
+- `EndGongPlayer.bundleURL()` no longer has a Documents/Sounds branch — add bundled audio files via Xcode resource target, not BowlAudioGenerator.
+- `ChimeEngine.shared.playGong()` is the authoritative fallback for success gong; `ChimeEngine.shared.playFailureChime()` for failure. Both fire-and-forget.
+- `performFinalDisconnect` success-vs-failure gong gate: `recordingStartedAt` elapsed time ≥ 900s. Called BEFORE `endSession()` in this path — crash in gong path = no JSON. Monitor.
 
 ---
 
@@ -139,7 +199,7 @@ Signal was oscillatory — raw ecdfDisplay max=0.9545 but longest consecutive ru
 ### B109 Architecture Invariants
 
 **B109+:**
-- `attachCalibrationBeta` must always be called AFTER `startSession`. Guard depends on `isRecording=true`.
+- `attachCalibrationBeta` must always be called AFTER `startSession`. ~~Guard depends on `isRecording=true`~~ — B120 fix: guard now checks `current != nil` (isRecording was set async on main, causing guard to always fire).
 - `recordingStartedAt` must not be nil before `buildDiagnostics` — clear it only after the diagnostics block.
 - All session-end paths (graceful, disconnect, grace-expired) now carry the full HRV attachment block.
 - `computePhysiologicalScore` returns a 4-tuple; call site must populate all four fields on `SessionRecord`.

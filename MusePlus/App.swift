@@ -184,6 +184,14 @@ final class Probe: ObservableObject {
     // user complaint "TP9/TP10 keep going green/yellow." 5 samples × 1 Hz = ≤5 s latency.
     @Published var hsiStableTier: [Int] = [1, 1, 1, 1]
     private var hsiBuffer: [[Int]] = [[], [], [], []]
+    // B121: temporal-contact gate. Calibration deferred until TP9 (idx 0) and TP10 (idx 3)
+    // stable tier are both ≤ 2 (not-bad). Prevents calibration on Muse S/Athena when ear
+    // electrodes are unseated, which biases calibrationIndexMean and mis-seats the headband.
+    // Safety: 15s timeout force-starts calibration if hsiPrecision packets never arrive
+    // (SDK not emitting, firmware variant) so the session is never permanently blocked.
+    @Published var temporalGateBlocked: Bool = false
+    private var calibrationPending: Bool = false
+    private var temporalGateTimeoutWork: DispatchWorkItem?
     // B83 — UI render counters; incremented by view bodies, drained by 30s appendUIState.
     @Published var timerHudRendered: Int = 0
     @Published var depthGaugeRendered: Int = 0
@@ -305,6 +313,7 @@ final class Probe: ObservableObject {
                     self?.sessionSummary = nil
                     // Recording starts at calibration completion (B77: no 300s delay; warmup tag).
                     self?.calibrationFiredRecording = false
+                    // B121: gate state reset handled by doConnect(); don't override here.
                     self?.hrv.setCalibrationPhase(true)  // B107-T11: start collecting calibration-phase RR
                     self?.sessionForecast     = nil
                     self?.calibrationCompleted = false
@@ -366,6 +375,10 @@ final class Probe: ObservableObject {
                     // Stop soundscape (missing before B80 — soundscape kept playing after disconnect).
                     SoundscapePlayer.shared.stopAll(fadeSeconds: 1.0)
                     self?.calibrationFiredRecording = false
+                    self?.calibrationPending  = false   // B121: clear gate on disconnect
+                    self?.temporalGateBlocked = false
+                    self?.temporalGateTimeoutWork?.cancel()
+                    self?.temporalGateTimeoutWork = nil
                     self?.recordingStartWork?.cancel()
                     self?.recordingStartWork = nil
                     // B80(D): cancel session-length timer (session is ending here, no grace).
@@ -516,6 +529,21 @@ final class Probe: ObservableObject {
                                 self.hsiStableTier[i] = best
                             }
                         }
+                    }
+                    // B121: unblock calibration when TP9 + TP10 stable tier both ≤ 2 (not-bad).
+                    // hsiStableTier requires 4-of-5 HSI packets to agree before flipping (B83 majority
+                    // filter, ≤5s latency per B83 comment). One check per packet is sufficient.
+                    // NOTE: hsiPrecision rate not confirmed in SDK docs; inferred ~1 Hz from B83 "≤5s".
+                    // Bounds-guard: hsiStableTier is always count==4 after doConnect() reset, but
+                    // guard defensively in case of future refactors.
+                    if self.calibrationPending &&
+                       self.hsiStableTier.count == 4 &&
+                       self.hsiStableTier[0] <= 2 &&
+                       self.hsiStableTier[3] <= 2 {
+                        self.calibrationPending  = false
+                        self.temporalGateBlocked = false
+                        self.scorer.startCalibration()
+                        Telemetry.recording.notice("B121 temporal gate cleared: TP9=\(self.hsiStableTier[0], privacy: .public) TP10=\(self.hsiStableTier[3], privacy: .public)")
                     }
                 }
                 // B80: detect per-channel HSI state transitions.
@@ -1370,7 +1398,28 @@ final class Probe: ObservableObject {
 
     private func doConnect(to muse: IXNMuse) {
         client.connect(to: muse)
-        scorer.startCalibration()
+        // B121: reset ONLY TP9/TP10 (indices 0, 3) so stale data doesn't mask new contacts.
+        // AF7/AF8 (indices 1, 2) are left intact — no reason to show frontal contacts as red
+        // when the gate only concerns temporal electrodes.
+        hsiBuffer[0] = []; hsiBuffer[3] = []
+        if hsiStableTier.count == 4 { hsiStableTier[0] = 4; hsiStableTier[3] = 4 }
+        // B121: defer startCalibration() until TP9 + TP10 stable tier ≤ 2.
+        // startCalibration() fires from the HSI sink once the gate clears.
+        calibrationPending   = true
+        temporalGateBlocked  = true
+        Telemetry.recording.notice("B121 temporal gate active — awaiting TP9/TP10 tier ≤ 2")
+        // B121: 15s safety timeout — if hsiPrecision never arrives (SDK variant, Muse S firmware),
+        // force-start calibration so the session is never permanently blocked by the gate.
+        temporalGateTimeoutWork?.cancel()
+        let gateTimeout = DispatchWorkItem { [weak self] in
+            guard let self, self.calibrationPending else { return }
+            self.calibrationPending  = false
+            self.temporalGateBlocked = false
+            self.scorer.startCalibration()
+            Telemetry.recording.notice("B121 temporal gate timeout (15s) — force-starting calibration")
+        }
+        temporalGateTimeoutWork = gateTimeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: gateTimeout)
         gate.reset()
         // B77: restore ECDF-space adaptive thresholds.
         let savedEnter = UserDefaults.standard.float(forKey: "adaptiveEnterEcdf")
@@ -1925,9 +1974,11 @@ private struct MeditationView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 0) {
                     // Pre-session fit-stability banner (B83/B81 carryover)
-                    if !probe.depth.isCalibrated && probe.consecutiveGoodSeconds < 5 {
+                    if probe.temporalGateBlocked || (!probe.depth.isCalibrated && probe.consecutiveGoodSeconds < 5) {
                         FitStabilityBannerView(consecutiveGood: probe.consecutiveGoodSeconds,
-                                                fit: probe.fit)
+                                               fit: probe.fit,
+                                               gatingCalibration: probe.temporalGateBlocked,
+                                               hsiStable: probe.hsiStableTier)
                             .padding(.horizontal, 24)
                             .padding(.top, 8)
                             .padding(.bottom, 4)
@@ -2324,6 +2375,9 @@ private struct MarksRowView: View {
 private struct FitStabilityBannerView: View {
     let consecutiveGood: Int
     let fit: FitCheckSnapshot
+    // B121: when true, banner shows temporal gate UI instead of fit-stability UI.
+    var gatingCalibration: Bool = false
+    var hsiStable: [Int] = []
 
     private var badChannelLabels: [String] {
         var b: [String] = []
@@ -2334,26 +2388,61 @@ private struct FitStabilityBannerView: View {
         return b
     }
 
+    private func tierColor(_ tier: Int) -> Color {
+        switch tier {
+        case 1:  return .green
+        case 2:  return .orange
+        default: return .red
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Image(systemName: "headphones")
                     .font(.system(size: 14, weight: .semibold))
-                Text(badChannelLabels.isEmpty
-                     ? "Hold steady — locking fit \(consecutiveGood)/5 s"
-                     : "Reseat band — \(badChannelLabels.joined(separator: ", ")) loose")
-                    .font(.system(size: 13, weight: .medium))
+                if gatingCalibration {
+                    Text("Seat TP9 + TP10 to begin")
+                        .font(.system(size: 13, weight: .medium))
+                } else {
+                    Text(badChannelLabels.isEmpty
+                         ? "Hold steady — locking fit \(consecutiveGood)/5 s"
+                         : "Reseat band — \(badChannelLabels.joined(separator: ", ")) loose")
+                        .font(.system(size: 13, weight: .medium))
+                }
             }
             .foregroundStyle(.white.opacity(0.9))
 
-            // 5-segment progress bar.
-            HStack(spacing: 3) {
-                ForEach(0..<5, id: \.self) { i in
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(i < consecutiveGood
-                              ? Color.green.opacity(0.8)
-                              : Color.white.opacity(0.18))
-                        .frame(height: 4)
+            if gatingCalibration {
+                // B121: live tier-colored dots for TP9 and TP10.
+                HStack(spacing: 14) {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(tierColor(hsiStable.count > 0 ? hsiStable[0] : 4))
+                            .frame(width: 8, height: 8)
+                        Text("TP9")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(tierColor(hsiStable.count > 3 ? hsiStable[3] : 4))
+                            .frame(width: 8, height: 8)
+                        Text("TP10")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                }
+            } else {
+                // 5-segment progress bar.
+                HStack(spacing: 3) {
+                    ForEach(0..<5, id: \.self) { i in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(i < consecutiveGood
+                                  ? Color.green.opacity(0.8)
+                                  : Color.white.opacity(0.18))
+                            .frame(height: 4)
+                    }
                 }
             }
         }
