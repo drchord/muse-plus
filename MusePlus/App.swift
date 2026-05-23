@@ -544,6 +544,10 @@ final class Probe: ObservableObject {
                         self.temporalGateBlocked = false
                         self.scorer.startCalibration()
                         Telemetry.recording.notice("B121 temporal gate cleared: TP9=\(self.hsiStableTier[0], privacy: .public) TP10=\(self.hsiStableTier[3], privacy: .public)")
+                        SessionRecorder.shared.appendGateEvent(
+                            path: "cleared",
+                            tp9Tier: self.hsiStableTier[0],
+                            tp10Tier: self.hsiStableTier[3])
                     }
                 }
                 // B80: detect per-channel HSI state transitions.
@@ -1417,6 +1421,9 @@ final class Probe: ObservableObject {
             self.temporalGateBlocked = false
             self.scorer.startCalibration()
             Telemetry.recording.notice("B121 temporal gate timeout (15s) — force-starting calibration")
+            let tp9  = self.hsiStableTier.count > 0 ? self.hsiStableTier[0] : -1
+            let tp10 = self.hsiStableTier.count > 3 ? self.hsiStableTier[3] : -1
+            SessionRecorder.shared.appendGateEvent(path: "timeout", tp9Tier: tp9, tp10Tier: tp10)
         }
         temporalGateTimeoutWork = gateTimeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: gateTimeout)

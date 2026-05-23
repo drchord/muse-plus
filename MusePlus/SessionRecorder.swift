@@ -169,6 +169,16 @@ struct SessionRecord: Codable, Identifiable {
     var sd1:       Double? = nil   // Poincaré short-axis SD (instantaneous beat-to-beat variability)
     var sd2:       Double? = nil   // Poincaré long-axis SD (continuous long-term variability)
     var dfaAlpha1: Double? = nil   // DFA α1 scaling exponent — populated by Task 10
+    // B122: unclipped beta z-score and signal quality / spectral fields.
+    var betaZRaw:          Float? = nil
+    var signalQualityMeanSpikes:      Float? = nil
+    var signalQualityAlphaPowerRatio: Float? = nil
+    var potatoFlaggedPct:  Float? = nil
+    var alphaRelMean: Float? = nil
+    var thetaRelMean: Float? = nil
+    var betaRelMean:  Float? = nil
+    var ecdfMax:      Float? = nil
+    var ecdfP90:      Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -271,6 +281,23 @@ private struct NDJSONFooter: Codable {
     // "af8-af7" means faa = af8Alpha - af7Alpha (right minus left). Empirically (Muse++ n=8)
     // NEGATIVE faa predicts depth for this user (r=-0.76 with deepFraction).
     let faaConvention: String?
+    // B122: raw unclipped bz before clamping to [0,50]. betaZScore loses discrimination above bz=2;
+    // betaZRaw preserves longitudinal magnitude (e.g. bz=5.1 vs bz=2.1 are both score=50).
+    let betaZRaw:          Float?
+    // B122: denoise pipeline quality summary — surfaced in JSON so post-session analysis
+    // does not require parsing NDJSON denoiseStats records.
+    let signalQualityMeanSpikes:      Float?   // mean spikesRemoved/frame; >15 = elevated artifact
+    let signalQualityAlphaPowerRatio: Float?   // mean alphaPowerRatio; <0.70 = alpha degraded by noise
+    let potatoFlaggedPct:  Float?              // fraction of frames with Riemannian Potato verdict
+    // B122: calibration-independent relative band power for main phase.
+    // alphaRel+thetaRel+betaRel+... sum to 1; robust to absolute amplitude shifts from artifact.
+    let alphaRelMean: Float?
+    let thetaRelMean: Float?
+    let betaRelMean:  Float?
+    // B122: ecdf peak diagnostics. inDeep gate fires at ecdfDisplay>=0.70 sustained 10s.
+    // ecdfMax shows whether the gate was ever approached; ecdfP90 is robust to single-sample spikes.
+    let ecdfMax: Float?
+    let ecdfP90: Float?
     // B117 F9: one-line formulas for every exported metric. Self-documenting telemetry.
     let metricDefinitions: [String: String]?
 }
@@ -279,6 +306,14 @@ private struct NDJSONAppState: Codable {
     var _type = "appState"
     let state: String   // "background" | "foreground"
     let time: String    // ISO8601
+}
+
+private struct NDJSONGateEvent: Codable {
+    var _type = "gateEvent"
+    let time:     Double   // session elapsed seconds; -1.0 if gate fired before session start
+    let path:     String   // "cleared" | "timeout"
+    let tp9Tier:  Int
+    let tp10Tier: Int
 }
 
 private struct NDJSONMark: Codable {
@@ -437,6 +472,14 @@ final class SessionRecorder: ObservableObject {
     // B96: gong events fire 1.5s after endSession closes the NDJSON. Buffer them separately
     // so they survive the isRecording=false guard and flush to the next session open or os_log.
     private var pendingGongEvents: [(phase: String, source: String, detail: String?)] = []
+    // B122: gate events fire before session start (at connect time). Buffer so they flush to
+    // NDJSON at session open. path="cleared"|"timeout"; time will be written as -1.0 (pre-session).
+    private var pendingGateEvents: [(path: String, tp9Tier: Int, tp10Tier: Int)] = []
+    // B122: denoise quality accumulators — all accessed on queue, reset per-session.
+    private var denoiseSpikesSum:      Double = 0
+    private var denoiseAlphaPowerSum:  Double = 0
+    private var denoiseFrameCount:     Int    = 0
+    private var denoisePotatoes:       Int    = 0
 
     private let iso8601: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -480,8 +523,13 @@ final class SessionRecorder: ObservableObject {
             current?.timeOfDay = tod
             // B117 F6 — declare the FAA sign convention used by DepthScore. Footer exports this.
             current?.faaConvention = "af8-af7"
-            lastDeepState = false
-            sampleCount   = 0
+            lastDeepState      = false
+            sampleCount        = 0
+            // B122: reset denoise accumulators for the new session
+            denoiseSpikesSum     = 0
+            denoiseAlphaPowerSum = 0
+            denoiseFrameCount    = 0
+            denoisePotatoes      = 0
 
             // Open NDJSON file handle
             openNDJSONHandle(id: id, now: now,
@@ -500,6 +548,18 @@ final class SessionRecorder: ObservableObject {
                     appendLine(nd)
                 }
                 pendingGongEvents.removeAll()
+            }
+
+            // B122: flush gate events buffered before this session opened (gate fires at connect,
+            // session opens later). time=-1.0 marks pre-session origin, matching pendingGongEvents.
+            if !pendingGateEvents.isEmpty {
+                Telemetry.recording.notice("flushing \(self.pendingGateEvents.count, privacy: .public) pending gate events from pre-session")
+                for ev in pendingGateEvents {
+                    let nd = NDJSONGateEvent(_type: "gateEvent", time: -1.0,
+                                             path: ev.path, tp9Tier: ev.tp9Tier, tp10Tier: ev.tp10Tier)
+                    appendLine(nd)
+                }
+                pendingGateEvents.removeAll()
             }
 
             DispatchQueue.main.async { self.isRecording = true }
@@ -625,6 +685,44 @@ final class SessionRecorder: ObservableObject {
         rec.betaZScore         = scoreComponents.betaZ
         rec.rmssdScore         = scoreComponents.rmssd
         rec.coherenceScore     = scoreComponents.coherence
+
+        // B122: betaZRaw — same formula as betaZScore but without clamping. Preserves magnitude
+        // above bz=2 where the clamped score saturates at 50 (e.g. bz=5.1 → score=50, raw=5.1).
+        if let calBeta = rec.calibrationBetaMean,
+           let calBetaStd = rec.calibrationBetaStd,
+           let sessBeta = rec.mainBetaMean,
+           calBetaStd > 0 {
+            rec.betaZRaw = (calBeta - sessBeta) / max(calBetaStd, 0.10)
+        }
+
+        // B122: calibration-independent relative band power (main phase).
+        // These sum to ~1.0 within each sample, so absolute amplitude shifts from artifact
+        // or device variance cancel out.
+        if !mainSamples.isEmpty {
+            let alphaRels = mainSamples.compactMap(\.alphaRel)
+            let thetaRels = mainSamples.compactMap(\.thetaRel)
+            let betaRels  = mainSamples.compactMap(\.betaRel)
+            if !alphaRels.isEmpty { rec.alphaRelMean = alphaRels.reduce(0, +) / Float(alphaRels.count) }
+            if !thetaRels.isEmpty { rec.thetaRelMean = thetaRels.reduce(0, +) / Float(thetaRels.count) }
+            if !betaRels.isEmpty  { rec.betaRelMean  = betaRels.reduce(0, +)  / Float(betaRels.count)  }
+        }
+
+        // B122: ecdfDisplay peak and p90. inDeep fires at ecdfDisplay>=0.70 sustained 10s;
+        // ecdfMax shows whether the gate was ever approached even if not sustained.
+        let ecdfVals = rec.samples.compactMap(\.ecdfDisplay).sorted()
+        if !ecdfVals.isEmpty {
+            rec.ecdfMax = ecdfVals.last
+            let p90idx  = max(0, Int(Double(ecdfVals.count) * 0.90) - 1)
+            rec.ecdfP90 = ecdfVals[p90idx]
+        }
+
+        // B122: denoise quality from per-frame accumulators. Exclude bypass frames (buffer_warming
+        // etc.) — only frames where the denoiser was active are informative.
+        if denoiseFrameCount > 0 {
+            rec.signalQualityMeanSpikes      = Float(denoiseSpikesSum / Double(denoiseFrameCount))
+            rec.signalQualityAlphaPowerRatio = Float(denoiseAlphaPowerSum / Double(denoiseFrameCount))
+            rec.potatoFlaggedPct             = Float(denoisePotatoes) / Float(denoiseFrameCount)
+        }
 
         appendFooter(rec: rec, reason: reason)
         closeNDJSONHandle()
@@ -930,6 +1028,30 @@ final class SessionRecorder: ObservableObject {
                 bypassReason: bypassReason
             )
             self.appendLine(nd)
+            // B122: accumulate for footer summary (computed in populateSessionBiomarkers)
+            if bypassReason == nil {
+                self.denoiseSpikesSum     += Double(spikesRemoved)
+                self.denoiseAlphaPowerSum += Double(alphaPowerRatio)
+                self.denoiseFrameCount    += 1
+                if potatoFlagged { self.denoisePotatoes += 1 }
+            }
+        }
+    }
+
+    // B122: gate event — written to NDJSON when temporal gate clears or times out.
+    // If called before session start, the event is buffered in pendingGateEvents and
+    // flushed at the next startSession() (time=-1.0 marks pre-session origin).
+    func appendGateEvent(path: String, tp9Tier: Int, tp10Tier: Int) {
+        queue.async {
+            Telemetry.recording.notice("B122 gateEvent: path=\(path, privacy: .public) tp9=\(tp9Tier, privacy: .public) tp10=\(tp10Tier, privacy: .public)")
+            if self.isRecording {
+                let t = self.currentSessionElapsedLocked()
+                let nd = NDJSONGateEvent(_type: "gateEvent", time: t,
+                                         path: path, tp9Tier: tp9Tier, tp10Tier: tp10Tier)
+                self.appendLine(nd)
+            } else {
+                self.pendingGateEvents.append((path: path, tp9Tier: tp9Tier, tp10Tier: tp10Tier))
+            }
         }
     }
 
@@ -1075,6 +1197,15 @@ final class SessionRecorder: ObservableObject {
             calibrationIndexMean: rec.calibrationIndexMean,
             calibrationBetaAttached: rec.calibrationBetaAttached,
             faaConvention: rec.faaConvention ?? "af8-af7",
+            betaZRaw:          rec.betaZRaw,
+            signalQualityMeanSpikes:      rec.signalQualityMeanSpikes,
+            signalQualityAlphaPowerRatio: rec.signalQualityAlphaPowerRatio,
+            potatoFlaggedPct:  rec.potatoFlaggedPct,
+            alphaRelMean:      rec.alphaRelMean,
+            thetaRelMean:      rec.thetaRelMean,
+            betaRelMean:       rec.betaRelMean,
+            ecdfMax:           rec.ecdfMax,
+            ecdfP90:           rec.ecdfP90,
             metricDefinitions: SessionRecorder.metricDefinitions
         )
         appendLine(footer)
@@ -1120,7 +1251,17 @@ final class SessionRecorder: ObservableObject {
         "deepFraction": "fraction of session time where gate.inDeepState==true; [0,1].",
         "enterThresholdAtSession": "ecdfDisplay threshold required to enter deep state (default 0.65).",
         "fitEventsPerMin": "count of contact-state allGood flips per minute; lower=better.",
-        "hrSamplesRejected": "count of raw heartRateBPM samples rejected by B117 absolute bounds gate [35,120]. nil if no samples rejected."
+        "hrSamplesRejected": "count of raw heartRateBPM samples rejected by B117 absolute bounds gate [35,120]. nil if no samples rejected.",
+        "betaZRaw": "Unclipped beta z-score: (calibrationBetaMean - mainBetaMean) / max(calibrationBetaStd, 0.10). betaZScore clamps at bz=2 (score=50); betaZRaw shows true magnitude for longitudinal tracking. B122.",
+        "signalQualityMeanSpikes": "Mean spikesRemoved per active denoiseStats frame. >15 = elevated artifact load (muscle/motion/EMF). Baseline B120=5.9, B118=9.2. B122.",
+        "signalQualityAlphaPowerRatio": "Mean alpha power preservation ratio after ASR denoising (cleanAlpha/rawAlpha 8-12 Hz). 1.0 = perfect; <0.70 = significant alpha degradation. B122.",
+        "potatoFlaggedPct": "Fraction of active denoiseStats frames where Riemannian Potato declared severe artifact. B122.",
+        "alphaRelMean": "Main-phase mean relative alpha power (alphaRel = alpha8-12Hz / totalBandPower). Calibration-independent; sum with thetaRel+betaRel+... ≈ 1.0. B122.",
+        "thetaRelMean": "Main-phase mean relative theta power. Calibration-independent. B122.",
+        "betaRelMean": "Main-phase mean relative beta power. Calibration-independent. Lower = stronger beta suppression regardless of absolute amplitude. B122.",
+        "ecdfMax": "Peak ecdfDisplay reached during session [0,1]. inDeep gate requires ≥0.70 sustained 10s (kEnterSustained=20 windows). ecdfMax shows whether the threshold was ever approached. B122.",
+        "ecdfP90": "90th-percentile ecdfDisplay across all session samples. Robust peak indicator — unlike ecdfMax, not inflated by single-sample artifact spikes. B122.",
+        "gateEvent": "NDJSON record (_type=gateEvent): path=cleared|timeout, tp9Tier, tp10Tier, time. time=-1.0 if gate fired before session start. B122."
     ]
 
     private func closeNDJSONHandle() {
@@ -1418,6 +1559,15 @@ final class SessionRecorder: ObservableObject {
             rec.stallCount               = f.stallCount
             rec.bleReconnectCount        = f.bleReconnectCount
             rec.timeOfDay                = f.timeOfDay
+            rec.betaZRaw                 = f.betaZRaw
+            rec.signalQualityMeanSpikes  = f.signalQualityMeanSpikes
+            rec.signalQualityAlphaPowerRatio = f.signalQualityAlphaPowerRatio
+            rec.potatoFlaggedPct         = f.potatoFlaggedPct
+            rec.alphaRelMean             = f.alphaRelMean
+            rec.thetaRelMean             = f.thetaRelMean
+            rec.betaRelMean              = f.betaRelMean
+            rec.ecdfMax                  = f.ecdfMax
+            rec.ecdfP90                  = f.ecdfP90
         }
         return rec
     }
