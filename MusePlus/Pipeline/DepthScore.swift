@@ -83,8 +83,12 @@ final class DepthScore {
         // B117 F6 — FAA convention: af8 (right frontal AF8) MINUS af7 (left frontal AF7).
         // Positive => right has more alpha => right-frontal hypoactive => LEFT-active
         //          => textbook Davidson "approach motivation" sign.
-        // EMPIRICAL for this user (Muse++ n=8): NEGATIVE faa predicts depth (r=-0.76 with deepFraction).
-        // This is INVERSE of textbook Davidson interpretation — user-specific.
+        // EMPIRICAL for this user (B122, n=16 sessions): NEGATIVE faa predicts depth.
+        //   r(FAA, depthZ)=-0.43, r(FAA, deepFraction)=-0.48 — direction consistent but NOT
+        //   statistically significant (p≈0.10). Original B117 claim of r=-0.76 was overstated
+        //   (computed from a lucky early-session subset; value dropped as more data accrued).
+        //   Positive FAA reliably predicts zero depth (B95, B109: no exceptions in 16 sessions).
+        //   Negative FAA is necessary but not sufficient — many negative-FAA sessions still missed depth.
         // Do NOT flip sign without re-validating against historical session data first.
         // Footer exports faaConvention="af8-af7" so analysis tooling self-documents this.
         let faa = af8Alpha - af7Alpha

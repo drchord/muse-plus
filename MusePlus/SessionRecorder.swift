@@ -1221,7 +1221,7 @@ final class SessionRecorder: ObservableObject {
     // Entries marked SOURCE=... cite the file:line where the formula lives in code.
     // Entries marked PARTIAL/UNVERIFIED admit incomplete grounding — fix in B118.
     static let metricDefinitions: [String: String] = [
-        "faa": "af8Alpha - af7Alpha on frontal channels (right-minus-left log10 µV²). SOURCE=Pipeline/DepthScore.swift:~83. Empirically (Muse++ n=8) NEGATIVE faa predicts depth for Sugato (r=-0.76).",
+        "faa": "af8Alpha - af7Alpha on frontal channels (right-minus-left log10 µV²). SOURCE=Pipeline/DepthScore.swift:~83. Empirically (n=16 sessions) NEGATIVE faa predicts depth: r(FAA,depthZ)=-0.43, r(FAA,deepFraction)=-0.48 (direction consistent, p≈0.10, NOT significant at p<0.05). Original B117 claim r=-0.76 was overstated from n=8 early sessions.",
         "ecdfDisplay": "smoothedDisplay = Kalman-filtered Personal-ECDF mapping of depthZ to [0,1]. SOURCE=Audio/DepthGate.swift:~162 (smoothedDisplay = kalmanDepth).",
         "depthZ": "max(-3.0, min(8.0, (idx - baselineMean) / max(baselineStd, 0.01))) where idx is aperiodic-corrected meditationIndex (or raw if correction disabled). SOURCE=Pipeline/DepthScore.swift:~119.",
         "meditationIndex": "0.7*((alpha + theta) - 2*beta) + 0.3*max(0, theta - alpha) on log10 µV² band powers. Peniston alpha-theta crossover term added. SOURCE=Muse/MuseTypes.swift:~44.",
