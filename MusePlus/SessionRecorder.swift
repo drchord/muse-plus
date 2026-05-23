@@ -691,7 +691,7 @@ final class SessionRecorder: ObservableObject {
         if let calBeta = rec.calibrationBetaMean,
            let calBetaStd = rec.calibrationBetaStd,
            let sessBeta = rec.mainBetaMean,
-           calBetaStd > 0 {
+           calBetaStd >= 0 {
             rec.betaZRaw = (calBeta - sessBeta) / max(calBetaStd, 0.10)
         }
 
@@ -707,13 +707,15 @@ final class SessionRecorder: ObservableObject {
             if !betaRels.isEmpty  { rec.betaRelMean  = betaRels.reduce(0, +)  / Float(betaRels.count)  }
         }
 
-        // B122: ecdfDisplay peak and p90. inDeep fires at ecdfDisplay>=0.70 sustained 10s;
-        // ecdfMax shows whether the gate was ever approached even if not sustained.
-        let ecdfVals = rec.samples.compactMap(\.ecdfDisplay).sorted()
-        if !ecdfVals.isEmpty {
-            rec.ecdfMax = ecdfVals.last
-            let p90idx  = max(0, Int(Double(ecdfVals.count) * 0.90) - 1)
-            rec.ecdfP90 = ecdfVals[p90idx]
+        // B122: main-phase ecdfDisplay peak and p90. Scoped to phase=="main" so warmup
+        // spikes don't inflate ecdfMax — inDeep fires only during main phase.
+        // Threshold is adaptive: 0.55 (0 sessions) → 0.60 (<5) → 0.65 (<20) → 0.70 (≥20).
+        // kEnterSustained default = 20 windows × 0.5s = 10s; tunable 6–24 via UserDefaults.
+        let mainEcdfVals = rec.samples.filter { $0.phase == "main" }.compactMap(\.ecdfDisplay).sorted()
+        if !mainEcdfVals.isEmpty {
+            rec.ecdfMax = mainEcdfVals.last
+            let p90idx  = max(0, Int(Double(mainEcdfVals.count) * 0.90) - 1)
+            rec.ecdfP90 = mainEcdfVals[p90idx]
         }
 
         // B122: denoise quality from per-frame accumulators. Exclude bypass frames (buffer_warming
@@ -1039,6 +1041,7 @@ final class SessionRecorder: ObservableObject {
     }
 
     // B122: gate event — written to NDJSON when temporal gate clears or times out.
+    // Internal access (same MusePlus module; App.swift calls via SessionRecorder.shared).
     // If called before session start, the event is buffered in pendingGateEvents and
     // flushed at the next startSession() (time=-1.0 marks pre-session origin).
     func appendGateEvent(path: String, tp9Tier: Int, tp10Tier: Int) {
@@ -1135,7 +1138,7 @@ final class SessionRecorder: ObservableObject {
         if let calBeta = rec.calibrationBetaMean,
            let calBetaStd = rec.calibrationBetaStd,
            let sessBeta = rec.mainBetaMean,
-           calBetaStd > 0 {
+           calBetaStd >= 0 {
             let bz = (calBeta - sessBeta) / max(calBetaStd, 0.10)
             betaZScore = min(max(bz / 2.0 * 50.0, 0.0), 50.0)
         } else {
