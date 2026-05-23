@@ -2270,8 +2270,11 @@ private struct FAABarView: View {
                         .frame(width: 1, height: 10)
                         .offset(x: mid - 0.5, y: -3)
                     // Indicator dot
+                    // B122: empirically (n=8) NEGATIVE faa predicts depth (r=-0.76) for Sugato —
+                    // inverse of Davidson standard. Green = negative (depth zone), orange = positive
+                    // (arousal). Matches WarmupFAAReadiness coloring: faa≤-0.08 → green "Brain ready".
                     Circle()
-                        .fill(clamped >= 0
+                        .fill(clamped < 0
                               ? Color(red: 0.30, green: 0.90, blue: 0.50)
                               : Color(red: 0.95, green: 0.55, blue: 0.20))
                         .frame(width: 10, height: 10)
@@ -2281,10 +2284,10 @@ private struct FAABarView: View {
             }
             .frame(height: 10)
             HStack {
-                Text("withdrawal")
+                Text("depth zone")
                     .font(.system(size: 9)).foregroundStyle(.white.opacity(0.22))
                 Spacer()
-                Text("approach")
+                Text("arousal")
                     .font(.system(size: 9)).foregroundStyle(.white.opacity(0.22))
             }
         }
