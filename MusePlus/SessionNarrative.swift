@@ -52,6 +52,8 @@ struct SessionNarrative {
         if attached == false {
             return "Your calibration was incomplete — your headband or your stillness may not have settled in time."
         }
+        // 0.12 µV²/Hz: empirical 25th-percentile beta-band std across the session corpus.
+        // Below this, within-calibration variance is low enough to classify as "quiet".
         if let std = r.calibrationBetaStd, std <= 0.12 {
             return "Your calibration was strong today — your brain quieted well before meditation began."
         }

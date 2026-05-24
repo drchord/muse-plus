@@ -417,7 +417,9 @@ final class Probe: ObservableObject {
                     Telemetry.recording.error("endSession reason=disconnect")
                     let completedRec = SessionRecorder.shared.endSession(reason: "disconnect")
                     // B126: shape gate for next session even on disconnect.
-                    EnterSustainedShaping.recordSession(deepFraction: completedRec?.deepFraction ?? 0)
+                    if let deepF = completedRec?.deepFraction {
+                        EnterSustainedShaping.recordSession(deepFraction: deepF)
+                    }
                     self?.pipeline.endSession()
                     self?.hrv.reset()
                     self?.rmssd     = nil
@@ -1355,7 +1357,9 @@ final class Probe: ObservableObject {
         let completedRec = SessionRecorder.shared.endSession(reason: effectiveReason)
         // B126: shape the next session's gate based on this session's deepFraction.
         // MUST run after endSession() so deepFraction is finalised in the record.
-        EnterSustainedShaping.recordSession(deepFraction: completedRec?.deepFraction ?? 0)
+        if let deepF = completedRec?.deepFraction {
+            EnterSustainedShaping.recordSession(deepFraction: deepF)
+        }
         pipeline.endSession()
         hrv.reset()
         rmssd     = nil
@@ -1633,7 +1637,9 @@ final class Probe: ObservableObject {
         Telemetry.recording.error("endSession reason=grace-expired")
         let completedRec = SessionRecorder.shared.endSession(reason: "grace-expired")
         // B126: shape gate for next session even on grace-expiry.
-        EnterSustainedShaping.recordSession(deepFraction: completedRec?.deepFraction ?? 0)
+        if let deepF = completedRec?.deepFraction {
+            EnterSustainedShaping.recordSession(deepFraction: deepF)
+        }
         pipeline.endSession()
         hrv.reset()
         rmssd     = nil
@@ -3420,17 +3426,14 @@ private struct SessionSummarySheet: View {
 
     @ViewBuilder private var narrativeSection: some View {
         let narrative = SessionNarrative.compose(from: record)
-        VStack(alignment: .leading, spacing: 8) {
-            Text("What happened")
-                .font(.headline)
-            ForEach(narrative.lines, id: \.self) { line in
+        Section("What happened") {
+            ForEach(Array(narrative.lines.enumerated()), id: \.offset) { _, line in
                 Text(line)
                     .font(.body)
                     .foregroundColor(.primary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.vertical, 8)
     }
 
     @ViewBuilder private var gateRequirementSection: some View {

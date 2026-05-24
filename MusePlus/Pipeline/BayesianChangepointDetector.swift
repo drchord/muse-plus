@@ -71,10 +71,10 @@ struct BayesianChangepointDetector {
         let scale: Float = sum > 1e-30 ? 1 / sum : 1
         vDSP_vsmul(newProbs, 1, [scale], &newProbs, 1, vDSP_Length(newProbs.count))
         // 4. Update sufficient stats.
-        var newMu    = [mu0]
-        var newKappa = [kappa0]
-        var newAlpha = [alpha0]
-        var newBeta  = [beta0]
+        var newMu    = [mu0];    newMu.reserveCapacity(n + 1)
+        var newKappa = [kappa0]; newKappa.reserveCapacity(n + 1)
+        var newAlpha = [alpha0]; newAlpha.reserveCapacity(n + 1)
+        var newBeta  = [beta0];  newBeta.reserveCapacity(n + 1)
         for k in 0..<n where k + 1 <= maxRunLength {
             let kappa_p = kappa[k] + 1
             let mu_p    = (kappa[k] * mu[k] + x) / kappa_p

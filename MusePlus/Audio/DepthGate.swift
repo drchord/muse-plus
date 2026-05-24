@@ -299,9 +299,11 @@ final class DepthGate {
             // gap-prediction so the user does not entrain to a fixed cadence.
             if now.timeIntervalSince(lastSilenceGapAt) >= kSilenceGapEverySec {
                 let dur = Double.random(in: kSilenceGapMinSec...kSilenceGapMaxSec)
-                SoundscapePlayer.shared.enterSilenceGap(durationSec: dur,
-                                                        postGapTarget: kDeepInitialFadeTarget)
+                let target = kDeepInitialFadeTarget
                 lastSilenceGapAt = now
+                DispatchQueue.main.async {
+                    SoundscapePlayer.shared.enterSilenceGap(durationSec: dur, postGapTarget: target)
+                }
             }
 
             // B126: BOCPD drift detection. Derivative measured over 10-sample (5s) lookback
@@ -314,9 +316,11 @@ final class DepthGate {
             let derivative: Float = smoothedDisplayHistory.count == kDriftLookback
                 ? smoothedDisplay - smoothedDisplayHistory[0]
                 : 0
+            let silenceGapRecoveryEnd = lastSilenceGapAt.addingTimeInterval(kSilenceGapMaxSec + 3.5)
             if posterior > kDriftPosteriorThreshold,
                derivative < -kDriftMinDecline,
-               now.timeIntervalSince(lastDriftAlert) >= kDriftAlertCooldown {
+               now.timeIntervalSince(lastDriftAlert) >= kDriftAlertCooldown,
+               now >= silenceGapRecoveryEnd {
                 lastDriftAlert = now
                 let tSec = now.timeIntervalSince(sessionStartDate)
                 onDriftAlert?(tSec, posterior, smoothedDisplay)
@@ -398,7 +402,9 @@ final class DepthGate {
         } else {
             presence = (smoothedDisplay - lo) / (hi - lo)
         }
-        SoundscapePlayer.shared.setAmbientPresence(presence)
+        DispatchQueue.main.async {
+            SoundscapePlayer.shared.setAmbientPresence(presence)
+        }
     }
 
     func reset() {

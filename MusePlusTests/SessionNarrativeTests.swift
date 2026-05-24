@@ -5,7 +5,7 @@ final class SessionNarrativeTests: XCTestCase {
 
     func testZeroDeepFractionMentionsGate() {
         let rec = makeRecord(deepFraction: 0, ecdfMax: 0.94,
-                             enterSustainedAtSession: 3,
+                             enterSustainedAtSession: 6,
                              enterThresholdAtSession: 0.65)
         let n = SessionNarrative.compose(from: rec)
         XCTAssertTrue(n.lines.contains { $0.contains("94") },
