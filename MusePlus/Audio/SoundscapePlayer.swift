@@ -116,6 +116,16 @@ final class SoundscapePlayer: ObservableObject {
     private var nodes:   [SoundLayer: AVAudioPlayerNode] = [:]
     private var buffers: [SoundLayer: AVAudioPCMBuffer]  = [:]
     private var eqs:     [SoundLayer: AVAudioUnitEQ]     = [:]
+    // B126: ambient reverb node inserted between mainMixerNode and outputNode.
+    // wetDryMix driven by setAmbientPresence() (0 = dry baseline, 100 = full wet).
+    // Default 0 — no audible effect until ECDF-to-audio mapping activates.
+    private let ambientReverb: AVAudioUnitReverb = {
+        let r = AVAudioUnitReverb()
+        r.loadFactoryPreset(.mediumHall)
+        r.wetDryMix = 0
+        return r
+    }()
+    private var ambientGeneration: Int = 0
     private let sampleRate: Double = 44100
     // 120s: binaural beats at all integer Hz return to phase 0 (integer × 120 = integer cycles).
     // Brown noise loops every 2 min — infrequent enough to be imperceptible in practice.
@@ -137,6 +147,12 @@ final class SoundscapePlayer: ObservableObject {
             engine.connect(eq,   to: engine.mainMixerNode, format: fmt)
             configureEQ(eq, for: layer)
         }
+        // B126: insert ambientReverb between mainMixerNode and outputNode.
+        // Connecting mainMixerNode → ambientReverb automatically disconnects the implicit
+        // mainMixerNode → outputNode path (AVAudioEngine reconnects on explicit connect).
+        engine.attach(ambientReverb)
+        engine.connect(engine.mainMixerNode, to: ambientReverb,     format: fmt)
+        engine.connect(ambientReverb,        to: engine.outputNode,  format: fmt)
         configureSession()
         try? engine.start()
         observeAudio()
@@ -232,6 +248,9 @@ final class SoundscapePlayer: ObservableObject {
                     }
                     self.activeLayers.removeAll()
                     self.isStopping = false
+                    // B126: zero reverb tail and cancel any in-flight ambient fade.
+                    self.ambientReverb.wetDryMix = 0
+                    self.ambientGeneration &+= 1
                     // Stop the engine so AVAudioEngineConfigurationChange + resumeActiveLayers()
                     // cannot resurrect looping nodes during the grace window after session end.
                     // ensureRunning() / restartEngine() restarts it on next layer activation.
@@ -285,7 +304,62 @@ final class SoundscapePlayer: ObservableObject {
         deepStateGain = 1.0
         isDucked = false
         currentDuckMultiplier = 1.0
+        ambientReverb.wetDryMix = 0
+        ambientGeneration &+= 1
         applyProximityGain()
+    }
+
+    /// B126: silence gap — dip deepStateGain to 0.0 over 1.0s, hold for durationSec,
+    /// then restore to postGapTarget over 1.5s. Reuses deepStateGeneration so a new gap
+    /// cancels any in-flight recovery. Reverb tail zeroed before gap starts.
+    /// Caller must only invoke while inDeepState (DepthGate enforces).
+    func enterSilenceGap(durationSec: Double, postGapTarget: Float = 0.20) {
+        setAmbientPresence(0, fadeDuration: 0.5)
+        setDeepStateGainAbsolute(0.0, fadeDuration: 1.0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 + durationSec) { [weak self] in
+            self?.setDeepStateGain(postGapTarget, fadeDuration: 1.5)
+        }
+    }
+
+    /// Like setDeepStateGain but bypasses the max(0.10, ...) floor — for intentional silence.
+    /// NEVER call this for normal deep-state gain changes; use setDeepStateGain instead.
+    private func setDeepStateGainAbsolute(_ target: Float, fadeDuration: Double = 1.0) {
+        let clamped = max(0.0, min(1.0, target))
+        deepStateGeneration &+= 1
+        let gen = deepStateGeneration
+        let steps = max(1, Int(fadeDuration * 30))
+        let stepTime = fadeDuration / Double(steps)
+        let start = deepStateGain
+        for step in 1...steps {
+            let t = Float(step) / Float(steps)
+            let v = start + (clamped - start) * t
+            DispatchQueue.main.asyncAfter(deadline: .now() + stepTime * Double(step)) { [weak self] in
+                guard let self, self.deepStateGeneration == gen else { return }
+                self.deepStateGain = v
+                if !self.isDucked { self.applyProximityGain() }
+            }
+        }
+    }
+
+    /// B126: continuous ECDF-to-audio mapping via reverb wetDryMix (0–100).
+    /// p in [0, 1]: 0 = dry, 1 = full wet. Slewed over fadeDuration seconds so changes
+    /// are felt, not tracked (Brewer 2013: prominent feedback disrupts effortless awareness).
+    /// Guard: caller must not invoke this while inDeepState — DepthGate enforces.
+    func setAmbientPresence(_ p: Float, fadeDuration: Double = 3.0) {
+        let target = max(0, min(1, p)) * 100   // wetDryMix range 0–100
+        let steps = max(1, Int(fadeDuration * 30))
+        let stepTime = fadeDuration / Double(steps)
+        ambientGeneration &+= 1
+        let gen = ambientGeneration
+        let start = ambientReverb.wetDryMix
+        for i in 1...steps {
+            let t = Float(i) / Float(steps)
+            let mix = start + (target - start) * t
+            DispatchQueue.main.asyncAfter(deadline: .now() + stepTime * Double(i)) { [weak self] in
+                guard let self, self.ambientGeneration == gen else { return }
+                self.ambientReverb.wetDryMix = mix
+            }
+        }
     }
 
     /// Duck all layers to level (0.0–1.0 of user volume) over fadeDuration seconds.

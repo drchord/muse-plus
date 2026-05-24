@@ -3,12 +3,10 @@ import Foundation
 // MARK: - Tuning constants (file-level, never change per-instance)
 
 // Score must hold above/below threshold for this many 0.5s windows before chiming.
-// B96: kEnterSustainedWindows UserDefault allows tuning 6–24 (3s–12s) without code deploy.
-// Default 20 (10s). Lower values reward shorter depth holds; useful for users rarely crossing threshold.
-private let kEnterSustained: Int    = {
-    let v = UserDefaults.standard.integer(forKey: "kEnterSustainedWindows")
-    return v >= 6 && v <= 24 ? v : 20
-}()
+// B126: kEnterSustained is now an instance var re-read at every reset() so shaping changes
+// (written by EnterSustainedShaping.recordSession at session end) take effect on the NEXT session
+// without requiring an app relaunch. Within a session this value is never mutated.
+// Default 12 (6s). Range [4, 20]. Managed by EnterSustainedShaping.
 private let kExitSustained:  Int    = 20
 // Minimum gap between two enter/exit chimes (same direction).
 private let kCooldown: TimeInterval = 90   // 1.5 minutes
@@ -49,6 +47,10 @@ private let kDeepeningDelta: Float    = 0.08
 private let kDeepeningCooldown: TimeInterval = 60.0
 
 final class DepthGate {
+    // B126: per-session sustained-window requirement. Re-read from EnterSustainedShaping at
+    // every reset() so shaping changes take effect on the next session, not next app launch.
+    private var kEnterSustained: Int = EnterSustainedShaping.currentWindows()
+
     private(set) var inDeepState   = false
     private(set) var smoothedScore: Float = 0.5      // legacy sigmoid-space; still used by some UI
     private(set) var smoothedDisplay: Float = 0.0    // B77: ECDF display, [0, 1]
@@ -98,6 +100,13 @@ final class DepthGate {
     private var lastFlowChime:     Date  = .distantPast
     private let kFlowCooldown:     TimeInterval = 120.0
 
+    // B126: alpha-theta crossover accumulator (calibrated, good-contact windows only).
+    private var alphaThetaSum:             Double = 0   // Double for precision over long sessions
+    private var alphaThetaCount:           Int    = 0
+    private var alphaThetaCrossoverCount:  Int    = 0      // windows where theta/alpha > 1.0
+    private var alphaThetaCrossoverFirstTimeSec: Double? = nil
+    private var sessionStartDate:          Date   = .distantPast
+
     private let chime = ChimeEngine.shared
     private let zDist = PersonalZDistribution.shared
 
@@ -109,6 +118,18 @@ final class DepthGate {
     /// Clamped to [0.0005, 0.020] by caller; method trusts caller but re-clamps for safety.
     func setQD(_ qD: Float) {
         kalman.qD = max(0.0005, min(0.020, qD))
+    }
+
+    /// B126: set session start time so crossoverFirstTimeSec is relative to session, not app launch.
+    func setSessionStart(_ d: Date) {
+        sessionStartDate = d
+    }
+
+    /// B126: drain alpha-theta summary at session end. Caller passes to SessionRecorder.attachAlphaThetaSummary.
+    /// Returns nil mean when no calibrated samples accumulated (sub-60s session).
+    func alphaThetaSummary() -> (mean: Float?, crossoverCount: Int, crossoverFirstTimeSec: Double?) {
+        let mean: Float? = alphaThetaCount > 0 ? Float(alphaThetaSum / Double(alphaThetaCount)) : nil
+        return (mean, alphaThetaCrossoverCount, alphaThetaCrossoverFirstTimeSec)
     }
 
     func setEcdfThresholds(enter: Float, exit: Float) {
@@ -151,6 +172,19 @@ final class DepthGate {
         }
         contactLossWindows = 0
 
+        // B126: accumulate alpha-theta ratio. Sanity-bounded: <0 or ≥50 = degenerate channel.
+        let atNow = result.alphaTheta
+        if atNow.isFinite && atNow > 0 && atNow < 50 {
+            alphaThetaSum   += Double(atNow)
+            alphaThetaCount += 1
+            if atNow > 1.0 {    // crossover: theta > alpha
+                alphaThetaCrossoverCount += 1
+                if alphaThetaCrossoverFirstTimeSec == nil {
+                    alphaThetaCrossoverFirstTimeSec = Date().timeIntervalSince(sessionStartDate)
+                }
+            }
+        }
+
         // EMA on legacy sigmoid score (retained for any UI callers reading smoothedScore).
         smoothedScore = kEmaAlpha * result.score + (1 - kEmaAlpha) * smoothedScore
 
@@ -169,7 +203,9 @@ final class DepthGate {
             faaBaselineLocked = true
         }
 
-        applyProximityDuck()
+        // B126: replaced applyProximityDuck() with continuous sonification (reverb-driven).
+        // The old method is preserved for emergency rollback via Settings toggle (TBD post-B126).
+        applyContinuousSonification()
 
         let now = Date()
 
@@ -286,7 +322,27 @@ final class DepthGate {
         SoundscapePlayer.shared.setProximityGain(1.0 - t * 0.85)
     }
 
+    /// B126: continuous ECDF-to-audio mapping (replaces applyProximityDuck step function).
+    /// Maps smoothedDisplay to reverb presence linearly between lo and enterThresholdEcdf.
+    /// Below lo: no reverb. At threshold: full reverb (presence = 1). Guard: !inDeepState.
+    private func applyContinuousSonification() {
+        guard !inDeepState else { return }
+        let lo: Float = 0.30
+        let hi = enterThresholdEcdf
+        let presence: Float
+        if smoothedDisplay <= lo {
+            presence = 0
+        } else if smoothedDisplay >= hi {
+            presence = 1
+        } else {
+            presence = (smoothedDisplay - lo) / (hi - lo)
+        }
+        SoundscapePlayer.shared.setAmbientPresence(presence)
+    }
+
     func reset() {
+        // B126: re-read shaping value so the next session reflects the updated UserDefault.
+        kEnterSustained    = EnterSustainedShaping.currentWindows()
         inDeepState        = false
         smoothedScore      = 0.5
         smoothedDisplay    = 0.0
@@ -316,6 +372,11 @@ final class DepthGate {
         consecutiveFlowExit = 0
         inFlowState         = false
         lastFlowChime     = .distantPast
+        alphaThetaSum              = 0.0
+        alphaThetaCount            = 0
+        alphaThetaCrossoverCount   = 0
+        alphaThetaCrossoverFirstTimeSec = nil
+        sessionStartDate           = .distantPast
         // Thresholds reconfigured adaptively on next calibrated update.
     }
 }

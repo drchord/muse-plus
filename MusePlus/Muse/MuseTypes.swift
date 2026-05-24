@@ -55,6 +55,7 @@ struct DepthResult {
     let calibrationProgress: Float // 0–1 during calibration
     let faa: Float                 // Frontal Alpha Asymmetry: af8α - af7α, positive = positive affect
     let alphaPowerRatio: Float   // always 0.5 — denoiser not yet wired (B95). Future: signal quality in [0.3,0.9].
+    let alphaTheta: Float        // B126: frontal (theta/alpha) ratio, mean of AF7+AF8. >1.0 = theta-dominant (crossover). NOT Peniston-Kulkosky (Oz); prefrontal empirical correlate only.
 }
 
 struct BandSample: Identifiable {

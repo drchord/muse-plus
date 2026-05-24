@@ -93,6 +93,16 @@ final class DepthScore {
         // Footer exports faaConvention="af8-af7" so analysis tooling self-documents this.
         let faa = af8Alpha - af7Alpha
 
+        // B126: frontal alpha-theta ratio. >1.0 = theta-dominant (crossover).
+        // Prefrontal theta (AF7/AF8) indexes cognitive disengagement empirically in Sugato's n=16
+        // data (FAA r=-0.43 same channels). NOT Peniston-Kulkosky 1991 (that protocol used Oz).
+        // Floor alpha at 1e-6 to prevent div0 on silent channels.
+        let af7Theta   = powers.first(where: { $0.channel == 1 })?.theta ?? 0
+        let af8Theta   = powers.first(where: { $0.channel == 2 })?.theta ?? 0
+        let atL        = af7Theta / max(af7Alpha, 1e-6)
+        let atR        = af8Theta / max(af8Alpha, 1e-6)
+        let alphaTheta = (atL + atR) * 0.5
+
         let progress = calibrationProgress
 
         if !isCalibrated {
@@ -108,7 +118,8 @@ final class DepthScore {
             onResult?(DepthResult(score: 0.5, z: 0, meditationIndex: idxRaw,
                                   meditationIndexCorrected: idxCorrected,
                                   isCalibrated: false, calibrationProgress: progress,
-                                  faa: faa, alphaPowerRatio: EEGWindowBuffer.shared.latestAlphaPowerRatio))
+                                  faa: faa, alphaPowerRatio: EEGWindowBuffer.shared.latestAlphaPowerRatio,
+                                  alphaTheta: alphaTheta))
             return
         }
 
@@ -126,7 +137,8 @@ final class DepthScore {
         onResult?(DepthResult(score: score, z: z, meditationIndex: idxRaw,
                               meditationIndexCorrected: idxCorrected,
                               isCalibrated: true, calibrationProgress: 1.0,
-                              faa: faa, alphaPowerRatio: EEGWindowBuffer.shared.latestAlphaPowerRatio))
+                              faa: faa, alphaPowerRatio: EEGWindowBuffer.shared.latestAlphaPowerRatio,
+                              alphaTheta: alphaTheta))
     }
 
     /// B117: public entry point so App.swift can force finalization at session start

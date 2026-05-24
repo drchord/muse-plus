@@ -179,6 +179,12 @@ struct SessionRecord: Codable, Identifiable {
     var betaRelMean:  Float? = nil
     var ecdfMax:      Float? = nil
     var ecdfP90:      Float? = nil
+    // B126: sustained-window requirement active for this session. Nil in pre-B126 records.
+    var enterSustainedAtSession: Int? = nil
+    // B126: alpha-theta ratio summary. Nil in pre-B126 records.
+    var alphaThetaMean:              Float?  = nil
+    var alphaThetaCrossoverCount:    Int?    = nil
+    var alphaThetaCrossoverFirstTime: Double? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -298,6 +304,13 @@ private struct NDJSONFooter: Codable {
     // ecdfMax shows whether the gate was ever approached; ecdfP90 is robust to single-sample spikes.
     let ecdfMax: Float?
     let ecdfP90: Float?
+    // B126: sustained-window requirement active for this session (4-20 windows × 0.5s = 2s-10s).
+    // Adapts session-over-session via EnterSustainedShaping. nil in pre-B126 records.
+    let enterSustainedAtSession: Int?
+    // B126: alpha-theta ratio summary. mean(alpha−theta) across all calibrated windows; negative = theta-dominant.
+    let alphaThetaMean:              Float?
+    let alphaThetaCrossoverCount:    Int?     // windows where theta > alpha
+    let alphaThetaCrossoverFirstTime: Double? // seconds from session start to first crossover; nil if none
     // B117 F9: one-line formulas for every exported metric. Self-documenting telemetry.
     let metricDefinitions: [String: String]?
 }
@@ -1207,9 +1220,13 @@ final class SessionRecorder: ObservableObject {
             alphaRelMean:      rec.alphaRelMean,
             thetaRelMean:      rec.thetaRelMean,
             betaRelMean:       rec.betaRelMean,
-            ecdfMax:           rec.ecdfMax,
-            ecdfP90:           rec.ecdfP90,
-            metricDefinitions: SessionRecorder.metricDefinitions
+            ecdfMax:                 rec.ecdfMax,
+            ecdfP90:                 rec.ecdfP90,
+            enterSustainedAtSession: rec.enterSustainedAtSession,
+            alphaThetaMean:              rec.alphaThetaMean,
+            alphaThetaCrossoverCount:    rec.alphaThetaCrossoverCount,
+            alphaThetaCrossoverFirstTime: rec.alphaThetaCrossoverFirstTime,
+            metricDefinitions:       SessionRecorder.metricDefinitions
         )
         appendLine(footer)
         ndjsonHandle?.synchronizeFile()
@@ -1264,7 +1281,11 @@ final class SessionRecorder: ObservableObject {
         "betaRelMean": "Main-phase mean relative beta power. Calibration-independent. Lower = stronger beta suppression regardless of absolute amplitude. B122.",
         "ecdfMax": "Peak ecdfDisplay reached during session [0,1]. inDeep gate requires ≥0.70 sustained 10s (kEnterSustained=20 windows). ecdfMax shows whether the threshold was ever approached. B122.",
         "ecdfP90": "90th-percentile ecdfDisplay across all session samples. Robust peak indicator — unlike ecdfMax, not inflated by single-sample artifact spikes. B122.",
-        "gateEvent": "NDJSON record (_type=gateEvent): path=cleared|timeout, tp9Tier, tp10Tier, time. time=-1.0 if gate fired before session start. B122."
+        "gateEvent": "NDJSON record (_type=gateEvent): path=cleared|timeout, tp9Tier, tp10Tier, time. time=-1.0 if gate fired before session start. B122.",
+        "enterSustainedAtSession": "Sustained-window requirement active for this session (windows × 0.5s = seconds). Adapts via EnterSustainedShaping: 3 zero-deep sessions → -2 windows (min 4); 3 hit sessions → +1 window (max 20). Default 12 (6s). B126.",
+        "alphaThetaMean": "Mean of (frontalAlpha − frontalTheta) over all calibrated windows (log10 µV²). Negative = theta-dominant on average. AF7+AF8 channels only. B126.",
+        "alphaThetaCrossoverCount": "Count of 0.5s windows where frontal theta > frontal alpha (alphaTheta < 0). Each window ≈ 2 EEG FFT frames. B126.",
+        "alphaThetaCrossoverFirstTime": "Seconds from session start to first window where theta > alpha. nil if no crossover occurred. B126."
     ]
 
     private func closeNDJSONHandle() {
@@ -1652,6 +1673,26 @@ extension SessionRecorder {
             guard isRecording else { return }
             current?.eventStream = events
             Telemetry.recording.notice("eventStream attached: \(events.count, privacy: .public) events")
+        }
+    }
+
+    /// B126: stash the per-session sustained-window requirement so the footer exports it.
+    /// Called from App.swift immediately after startSession(). Uses queue.sync to match
+    /// the pattern of attachEnterThreshold (same guard: isRecording must be true).
+    func attachEnterSustained(_ windows: Int) {
+        queue.sync {
+            guard isRecording else { return }
+            current?.enterSustainedAtSession = windows
+        }
+    }
+
+    /// B126: stash alpha-theta summary at session end so the footer exports it.
+    func attachAlphaThetaSummary(mean: Float?, crossoverCount: Int, crossoverFirstTime: Double?) {
+        queue.sync {
+            guard isRecording else { return }
+            current?.alphaThetaMean              = mean
+            current?.alphaThetaCrossoverCount    = crossoverCount
+            current?.alphaThetaCrossoverFirstTime = crossoverFirstTime
         }
     }
 

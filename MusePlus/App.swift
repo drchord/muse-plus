@@ -120,7 +120,7 @@ final class Probe: ObservableObject {
                                                      meditationIndexCorrected: 0,
                                                      isCalibrated: false,
                                                      calibrationProgress: 0, faa: 0,
-                                                     alphaPowerRatio: 0.5)
+                                                     alphaPowerRatio: 0.5, alphaTheta: 0)
     // B77: subjective tap-to-mark collector. Cleared on session start.
     @Published var marks = MarkCollector()
     // B77: SDK Elements tracker for cross-validation against our pipeline.
@@ -405,8 +405,19 @@ final class Probe: ObservableObject {
                         }
                     }
                     self?.recordingStartedAt = nil
+                    // B126: attach alpha-theta summary before endSession closes the record.
+                    if let g = self?.gate {
+                        let atDisconnect = g.alphaThetaSummary()
+                        SessionRecorder.shared.attachAlphaThetaSummary(
+                            mean: atDisconnect.mean,
+                            crossoverCount: atDisconnect.crossoverCount,
+                            crossoverFirstTime: atDisconnect.crossoverFirstTimeSec
+                        )
+                    }
                     Telemetry.recording.error("endSession reason=disconnect")
                     let completedRec = SessionRecorder.shared.endSession(reason: "disconnect")
+                    // B126: shape gate for next session even on disconnect.
+                    EnterSustainedShaping.recordSession(deepFraction: completedRec?.deepFraction ?? 0)
                     self?.pipeline.endSession()
                     self?.hrv.reset()
                     self?.rmssd     = nil
@@ -1041,6 +1052,12 @@ final class Probe: ObservableObject {
                     calibrationIndexMean: self.scorer.calibrationIndexMean,
                     calibrationIndexStd:  self.scorer.calibrationIndexStd
                 )
+                // B126: record the sustained-window requirement for this session in the footer.
+                // gate already read this value at its own construction (reset() re-reads it),
+                // so this call is telemetry only — it does not drive gate behaviour.
+                SessionRecorder.shared.attachEnterSustained(EnterSustainedShaping.currentWindows())
+                // B126: anchor session start so alphaThetaCrossoverFirstTimeSec is relative to session.
+                self.gate.setSessionStart(Date())
                 // B109: attachCalibrationBeta moved to AFTER startSession so isRecording=true
                 // when the guard fires. Previously called before startSession → guard blocked it
                 // → calibrationBetaMean always nil → betaZScore always 0.
@@ -1316,10 +1333,20 @@ final class Probe: ObservableObject {
         if let alpha = HRVPipeline.computeDFAAlpha1(sessionRR) {
             SessionRecorder.shared.attachDFAAlpha1(alpha)
         }
+        // B126: attach alpha-theta summary before endSession closes the record.
+        let atGraceful = gate.alphaThetaSummary()
+        SessionRecorder.shared.attachAlphaThetaSummary(
+            mean: atGraceful.mean,
+            crossoverCount: atGraceful.crossoverCount,
+            crossoverFirstTime: atGraceful.crossoverFirstTimeSec
+        )
         Telemetry.recording.notice("endSession reason=\(effectiveReason, privacy: .public)")
         // B98: endSession() returns the completed SessionRecord directly — eliminates the
         // prior file-decode path (try? dec.decode silently returned nil, showing Duration:0s).
         let completedRec = SessionRecorder.shared.endSession(reason: effectiveReason)
+        // B126: shape the next session's gate based on this session's deepFraction.
+        // MUST run after endSession() so deepFraction is finalised in the record.
+        EnterSustainedShaping.recordSession(deepFraction: completedRec?.deepFraction ?? 0)
         pipeline.endSession()
         hrv.reset()
         rmssd     = nil
@@ -1586,9 +1613,18 @@ final class Probe: ObservableObject {
         if let alpha = HRVPipeline.computeDFAAlpha1(sessionRR) {
             SessionRecorder.shared.attachDFAAlpha1(alpha)
         }
+        // B126: attach alpha-theta summary before endSession closes the record.
+        let atGrace = gate.alphaThetaSummary()
+        SessionRecorder.shared.attachAlphaThetaSummary(
+            mean: atGrace.mean,
+            crossoverCount: atGrace.crossoverCount,
+            crossoverFirstTime: atGrace.crossoverFirstTimeSec
+        )
         recordingStartedAt = nil
         Telemetry.recording.error("endSession reason=grace-expired")
         let completedRec = SessionRecorder.shared.endSession(reason: "grace-expired")
+        // B126: shape gate for next session even on grace-expiry.
+        EnterSustainedShaping.recordSession(deepFraction: completedRec?.deepFraction ?? 0)
         pipeline.endSession()
         hrv.reset()
         rmssd     = nil
