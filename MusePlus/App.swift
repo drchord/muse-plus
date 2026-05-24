@@ -1059,10 +1059,13 @@ final class Probe: ObservableObject {
                 // B126: anchor session start so alphaThetaCrossoverFirstTimeSec is relative to session.
                 self.gate.setSessionStart(Date())
                 // B126: BOCPD drift alert — write NDJSON record + soft haptic feedback.
-                self.gate.onDriftAlert = { [weak self] tSec, posterior, ecdf in
-                    guard self != nil else { return }
+                // onDriftAlert fires on the EEG pipeline queue (background thread); UIKit haptics
+                // require main thread, so dispatch there. appendDriftAlert uses queue.async internally.
+                self.gate.onDriftAlert = { tSec, posterior, ecdf in
                     SessionRecorder.shared.appendDriftAlert(time: tSec, posterior: posterior, ecdfAtAlert: ecdf)
-                    UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.4)
+                    DispatchQueue.main.async {
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.4)
+                    }
                 }
                 // B109: attachCalibrationBeta moved to AFTER startSession so isRecording=true
                 // when the guard fires. Previously called before startSession → guard blocked it

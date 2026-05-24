@@ -59,7 +59,8 @@ struct SessionNarrative {
     }
 
     private static func gateLine(_ r: SessionRecord) -> String {
-        let secs = r.enterSustainedAtSession.map { Double($0) * 0.5 } ?? 3.0
+        let secs = r.enterSustainedAtSession.map { Double($0) * 0.5 }
+                   ?? Double(EnterSustainedShaping.currentWindows()) * 0.5
         let secStr = secs == floor(secs) ? "\(Int(secs))" : String(format: "%.1f", secs)
         let deepF = r.deepFraction ?? 0
         if deepF > 0.15 {
