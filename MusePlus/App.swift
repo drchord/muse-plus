@@ -1058,6 +1058,12 @@ final class Probe: ObservableObject {
                 SessionRecorder.shared.attachEnterSustained(EnterSustainedShaping.currentWindows())
                 // B126: anchor session start so alphaThetaCrossoverFirstTimeSec is relative to session.
                 self.gate.setSessionStart(Date())
+                // B126: BOCPD drift alert — write NDJSON record + soft haptic feedback.
+                self.gate.onDriftAlert = { [weak self] tSec, posterior, ecdf in
+                    guard self != nil else { return }
+                    SessionRecorder.shared.appendDriftAlert(time: tSec, posterior: posterior, ecdfAtAlert: ecdf)
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.4)
+                }
                 // B109: attachCalibrationBeta moved to AFTER startSession so isRecording=true
                 // when the guard fires. Previously called before startSession → guard blocked it
                 // → calibrationBetaMean always nil → betaZScore always 0.

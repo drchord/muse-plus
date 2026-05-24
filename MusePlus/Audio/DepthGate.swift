@@ -119,6 +119,21 @@ final class DepthGate {
     private let kFirstChimeBlackoutSec: Double = 60.0   // suppress playDeepening for first 60s
     private var lastSilenceGapAt:       Date   = .distantPast
 
+    // B126 — BOCPD drift alert. Observes smoothedDisplay at 2Hz while inDeepState.
+    // Fires when: posterior > 0.75 AND smoothedDisplay declined ≥0.05 over 10-sample (5s) lookback.
+    // Cooldown 90s between alerts.
+    private var driftDetector = BayesianChangepointDetector(hazardRate: 1.0 / 250.0)
+    private var smoothedDisplayHistory: [Float] = []
+    private let kDriftLookback:          Int    = 10
+    private let kDriftMinDecline:        Float  = 0.05
+    private var lastDriftAlert:          Date   = .distantPast
+    private let kDriftAlertCooldown:     TimeInterval = 90.0
+    private let kDriftPosteriorThreshold: Float = 0.75
+
+    /// B126: fired when BOCPD detects a downward drift in deep state.
+    /// Parameters: (sessionElapsedSec, posterior, ecdfAtAlert).
+    var onDriftAlert: ((Double, Float, Float) -> Void)?
+
     private let chime = ChimeEngine.shared
     private let zDist = PersonalZDistribution.shared
 
@@ -289,6 +304,24 @@ final class DepthGate {
                 lastSilenceGapAt = now
             }
 
+            // B126: BOCPD drift detection. Derivative measured over 10-sample (5s) lookback
+            // on smoothedDisplay (not on the posterior itself).
+            let posterior = driftDetector.observe(smoothedDisplay)
+            smoothedDisplayHistory.append(smoothedDisplay)
+            if smoothedDisplayHistory.count > kDriftLookback {
+                smoothedDisplayHistory.removeFirst()
+            }
+            let derivative: Float = smoothedDisplayHistory.count == kDriftLookback
+                ? smoothedDisplay - smoothedDisplayHistory[0]
+                : 0
+            if posterior > kDriftPosteriorThreshold,
+               derivative < -kDriftMinDecline,
+               now.timeIntervalSince(lastDriftAlert) >= kDriftAlertCooldown {
+                lastDriftAlert = now
+                let tSec = now.timeIntervalSince(sessionStartDate)
+                onDriftAlert?(tSec, posterior, smoothedDisplay)
+            }
+
             if smoothedDisplay < exitThresholdEcdf {
                 consecutiveBelow += 1
                 consecutiveAbove  = 0
@@ -406,6 +439,9 @@ final class DepthGate {
         alphaThetaCrossoverCount   = 0
         alphaThetaCrossoverFirstTimeSec = nil
         sessionStartDate           = .distantPast
+        driftDetector          = BayesianChangepointDetector(hazardRate: 1.0 / 250.0)
+        smoothedDisplayHistory = []
+        lastDriftAlert         = .distantPast
         // Thresholds reconfigured adaptively on next calibrated update.
     }
 }

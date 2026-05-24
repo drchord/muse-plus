@@ -329,6 +329,13 @@ private struct NDJSONGateEvent: Codable {
     let tp10Tier: Int
 }
 
+private struct NDJSONDriftAlert: Codable {
+    var _type = "driftAlert"
+    let time:        Double   // session elapsed seconds
+    let posterior:   Float    // BOCPD posterior at alert
+    let ecdfAtAlert: Float    // smoothedDisplay at alert
+}
+
 private struct NDJSONMark: Codable {
     var _type = "mark"
     let time: Double
@@ -1068,6 +1075,17 @@ final class SessionRecorder: ObservableObject {
             } else {
                 self.pendingGateEvents.append((path: path, tp9Tier: tp9Tier, tp10Tier: tp10Tier))
             }
+        }
+    }
+
+    // B126: drift alert event — written to NDJSON when BOCPD detects downward drift in deep state.
+    // Uses queue.async + current != nil guard (mirrors appendGateEvent pattern).
+    // Only fires while inDeepState (enforced by DepthGate call site).
+    func appendDriftAlert(time: Double, posterior: Float, ecdfAtAlert: Float) {
+        queue.async { [weak self] in
+            guard let self, self.current != nil else { return }
+            let ev = NDJSONDriftAlert(time: time, posterior: posterior, ecdfAtAlert: ecdfAtAlert)
+            self.appendLine(ev)
         }
     }
 
