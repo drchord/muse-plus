@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-23 (B122 — 9 new footer fields + NDJSONGateEvent + FAABarView color/label fix: negative FAA now green "depth zone", consistent with WarmupFAAReadiness empirical calibration)
+**Last updated:** 2026-05-24 (B126 — closed-loop depth: adaptive gate shaping, alpha-theta crossover, ECDF→reverb sonification, deep state maintenance, BOCPD drift alert, SessionNarrative. CI pending.)
 
 ---
 
@@ -28,9 +28,156 @@
 | **109** | 116 | calibrationBeta ordering fix, scoreComponents export, disconnect HRV attach, grace-expired diagnostics, fitsPerMin fix | ✅ CI run 26092291419 |
 | **118** | 118 | F1 dynamic buildTag (from CFBundleVersion), F2 HR absolute bounds [35,120] + reject counter, F3 forceFinalize → calibrationSummary NDJSON record, F4 calibrationBetaAttached flag in footer, F5 unconditional calibrationBeta Telemetry, F6 faaConvention "af8-af7" in footer + DepthScore comment, F9 metricDefinitions dict (31 formulas with SOURCE cites) in footer, C5 NDJSONCoach + recordCoach() at 8 trigger sites (foundation for B119+ state-contingent coaching) | 🟡 CI run 26158572518 — first attempt 26158289551 failed on ambiguous queue.sync (String.init overload); fix pushed |
 | **119** | 120 | Remove Documents/Sounds fallback from EndGongPlayer.bundleURL() — ChimeEngine is now primary fallback for success/failure gong. Remove BowlAudioGenerator.generateIfNeeded() from App init. Long sessions (≥15 min) ending via BLE grace-expiry now receive playSuccess() instead of playFailure(). | ✅ Session 2026-05-22: NDJSON generated but JSON missing (save() bug fixed in B120) |
-| **120** | — | (1) Fix `save()` + `CrashRecovery` file protection: `.completeFileProtection` → `.completeFileProtectionUnlessOpen`. (2) Fix `synthesiseRecord()`: decode full NDJSONFooter → 19 biomarkers on crash-recovery. (3) Fix `attachCalibrationBeta` guard: `isRecording` → `current != nil` — root cause of betaZScore=0 every session. (4) Add `sdnn`/`sd1`/`sd2` to NDJSONFooter + `appendFooter()` + `synthesiseRecord()`. (5) Git config: user.name → "Sugato Chakravarty". | 🔴 Pending CI push |
-| **121** | — | Temporal contact gate: `doConnect()` defers `startCalibration()` until TP9 + TP10 `hsiStableTier` both ≤ 2 (not-bad, 4-of-5 majority). 15s timeout force-starts calibration if HSI never arrives (firmware/SDK variant). Only TP9/TP10 buffers reset on connect (AF7/AF8 unchanged). `FitStabilityBannerView` shows tier-colored dots + "Seat TP9 + TP10 to begin" while blocked. | ✅ B121 session confirmed: betaZScore=50, calibrationBetaAttached=True, sdnn/sd1/sd2 present, rmssdDepthDelta=+5.64, physiologicalScore=97 |
-| **122** | — | (1) `betaZRaw` in footer: unclipped bz before clamping (B121 bz=5.1 masked by score ceiling=50). (2) Signal quality in footer: `signalQualityMeanSpikes`, `signalQualityAlphaPowerRatio`, `potatoFlaggedPct` from denoiseStats accumulator — B121 had 33.3 spikes/frame (5.6× B120) previously invisible in JSON. (3) Relative band power in footer: `alphaRelMean`, `thetaRelMean`, `betaRelMean` (calibration-independent; B121 showed contradictory absolute depth vs relative band power). (4) ecdf peak diagnostics: `ecdfMax`, `ecdfP90` — B121 reached 0.944 max, never sustained for inDeep trigger. (5) `NDJSONGateEvent` record (path=cleared/timeout, tp9Tier, tp10Tier) — gates B121-style were OSLog-only, now in NDJSON. `pendingGateEvents` buffer for pre-session fires. (6) `FAABarView` color + label fix: dot was green for positive FAA (Davidson "approach"), orange for negative. For Sugato negative FAA predicts depth (r=-0.76, n=8). Now green=negative="depth zone", orange=positive="arousal". Consistent with WarmupFAAReadiness which already correctly used green for faa≤-0.08. | 🔴 Pending CI push |
+| **120** | — | (1) Fix `save()` + `CrashRecovery` file protection: `.completeFileProtection` → `.completeFileProtectionUnlessOpen`. (2) Fix `synthesiseRecord()`: decode full NDJSONFooter → 19 biomarkers on crash-recovery. (3) Fix `attachCalibrationBeta` guard: `isRecording` → `current != nil`. (4) Add `sdnn`/`sd1`/`sd2` to NDJSONFooter + `appendFooter()` + `synthesiseRecord()`. (5) Git config: user.name → "Sugato Chakravarty". | ✅ |
+| **121** | — | Temporal contact gate: `doConnect()` defers `startCalibration()` until TP9 + TP10 `hsiStableTier` both ≤ 2. 15s timeout force-starts. `FitStabilityBannerView` added. | ✅ Session confirmed: betaZScore=50, physiologicalScore=97, calibrationBetaAttached=True |
+| **122→125** | — | 9 new footer fields (betaZRaw, signal quality ×3, relative band power ×3, ecdfMax, ecdfP90), NDJSONGateEvent, FAABarView color/label fix, FAA r=-0.76→r=-0.43 correction. Code review fixes: calBetaStd guard, ecdf main-phase scope, appendGateEvent comment. | ✅ CI run 26341344481, B125 green |
+| **126** | — | Closed-loop depth: EnterSustainedShaping (adaptive default 12→6s, ±streak), alpha-theta crossover tracking (NDJSONFooter + DepthResult), continuous ECDF→reverb sonification (AVAudioUnitReverb wetDryMix), deep state maintenance (30s initial fade, 2-min silence gaps 8-12s, 60s chime blackout), BOCPD drift alert (BayesianChangepointDetector NIG conjugate + haptic), SessionNarrative plain-English summary, SessionSummarySheet narrative + gate-requirement UI. | 🔴 CI pending |
+
+---
+
+## B126 Changes (2026-05-24)
+
+### Motivation — B125 session gap analysis + closed-loop depth plan
+
+- **kEnterSustained=20 (10s) too hard:** 16-session dataset shows gate rarely fires. Adaptive shaping added (default 12=6s).
+- **ecdf proximity duck binary:** sudden volume change at threshold instead of continuous sonification. Replaced with ECDF→reverb mapping.
+- **Deep state entry abrupt:** volume jumps to target immediately. 30s fade + periodic silence gaps for grounded presence.
+- **No drift detection in deep state:** user can exit without warning. BOCPD detects EEG downward drift → haptic + NDJSON record.
+- **Post-session narrative absent:** session review was raw numbers only. SessionNarrative adds plain-English 6-dimension summary.
+
+### Changes
+
+#### Phase A — EnterSustainedShaping (DepthGate.swift, SessionRecorder.swift, App.swift)
+- `EnterSustainedShaping.swift` (NEW): default 12 windows (6s), range [4, 20]; `recordSession(deepFraction:)` adjusts on 3-streak (zero-deep → −2, hit → +1)
+- `DepthGate`: `kEnterSustained` is now instance var reading `currentWindows()` at init/reset
+- `SessionRecord` + `NDJSONFooter`: `enterSustainedAtSession: Int?`
+- `App.swift`: `attachEnterSustained()` + `EnterSustainedShaping.recordSession()` at all 3 session-end paths
+
+#### Phase B — Alpha-theta crossover (DepthScore.swift, MuseTypes.swift, DepthGate.swift, SessionRecorder.swift, App.swift)
+- `DepthResult.alphaTheta: Float` — (AF7+AF8 theta) / (AF7+AF8 alpha); >1.0 = theta-dominant
+- Crossover accumulator in `DepthGate`: `alphaThetaCrossoverCount`, `alphaThetaCrossoverFirstTimeSec`
+- `SessionRecord` + `NDJSONFooter`: `alphaThetaMean`, `alphaThetaCrossoverCount`, `alphaThetaCrossoverFirstTime`
+
+#### Phase C — Continuous ECDF→reverb sonification (DepthGate.swift, SoundscapePlayer.swift)
+- `AVAudioUnitReverb` (mediumHall) spliced after mainMixerNode; `wetDryMix` driven by `applyContinuousSonification()`
+- Linear ramp: 0 presence at [0, 0.30], full presence at enterThreshold; replaces binary proximity duck
+- `SoundscapePlayer`: `setAmbientPresence(_:fadeDuration:)`, `enterSilenceGap(durationSec:postGapTarget:)`, `setDeepStateGainAbsolute(_:fadeDuration:)`
+
+#### Phase D — Deep state maintenance (DepthGate.swift)
+- 8 constants: kDeepInitialFadeSec=30.0, kDeepInitialFadeTarget=0.20, kDeepExitFadeSec=5.0, kSilenceGapEverySec=120.0, kSilenceGapMinSec=8.0, kSilenceGapMaxSec=12.0, kFirstChimeBlackoutSec=60.0
+- Entry: `setDeepStateGain(0.20, fadeDuration: 30.0)` + `lastSilenceGapAt = now`
+- Silence gap scheduler fires every 120s: `Double.random(in: 8...12)` seconds at 0.0 then restore
+- `playDeepening()` gated: `now.timeIntervalSince(deepStateEnteredAt) >= 60.0`
+- Exit: `fadeDuration: 5.0`
+
+#### Phase E — BOCPD drift alert (new files + DepthGate.swift, SessionRecorder.swift, App.swift)
+- `BayesianChangepointDetector.swift` (NEW): logit-transform input, NIG conjugate prior, hazardRate=1/250, maxRunLength=7200
+- `BayesianChangepointDetectorTests.swift` (NEW): 3 tests
+- `DepthGate`: observes `smoothedDisplay` while `inDeepState`; fires when posterior>0.75 + derivative<−0.05 over 10-sample lookback; 90s cooldown
+- `SessionRecorder`: `NDJSONDriftAlert` struct + `appendDriftAlert()` (queue.async)
+- `App.swift`: `onDriftAlert` wired — `appendDriftAlert` + `UIImpactFeedbackGenerator(.soft, intensity:0.4)`
+
+#### Phase F — SessionNarrative TDD (new files)
+- `SessionNarrative.swift` (NEW, 130 lines): pure-Swift deterministic, `struct SessionNarrative { let lines: [String] }`, `static func compose(from: SessionRecord) -> SessionNarrative`
+- Six dimensions: calibration quality, gate requirement, depth achievement, signal quality, physiology, alpha-theta crossover
+- `SessionNarrativeTests.swift` (NEW, 86 lines): 6 tests incl. jargon-leak + crash-on-empty
+
+#### Phase G — SessionSummarySheet UI (App.swift)
+- `narrativeSection` @ViewBuilder: calls `SessionNarrative.compose`, renders each line as Text row
+- `gateRequirementSection` @ViewBuilder: `enterSustainedAtSession` → "X seconds of sustained focus required"
+- `narrativeSection` inserted as first section; `gateRequirementSection` after depth trace chart
+
+### B126 Validation Checklist (first session on B126)
+- [ ] NDJSON footer: `enterSustainedAtSession` present + equals `EnterSustainedShaping.currentWindows()` at session start
+- [ ] NDJSON footer: `alphaThetaMean`, `alphaThetaCrossoverCount`, `alphaThetaCrossoverFirstTime` present (may be 0/nil if no crossover)
+- [ ] NDJSON stream: reverb wetDryMix audible during proximity approach (not a binary duck)
+- [ ] Deep state entry: volume fades slowly over 30s (not instant jump)
+- [ ] Silence gap fires ~2min into deep state (audible dip, then restore to 0.20)
+- [ ] No deep-state chime in first 60s after entry
+- [ ] If deep state exits early: NDJSON stream contains `{"_type":"driftAlert",...}` record
+- [ ] Session summary sheet: narrative section shows plain-English lines (no raw field names)
+- [ ] Session summary sheet: gate requirement shows "X seconds" in human language
+
+---
+
+## B122→B125 Changes (2026-05-23) — CI run 26341344481
+
+### Motivation — B121 session analysis (session_2026-05-23_0538.json)
+
+- physiologicalScore=97/100 (betaZ=50 ceiling, rmssd=27/30, coherence=20/20) — strongest body score yet
+- **betaZScore ceiling exposed:** bz=5.125 clamped to score=50. Three additional units of beta suppression invisible. betaZRaw added.
+- **Signal quality invisible in JSON:** B121 had 33.3 spikes/frame (5.6× B120's 5.9). alphaPowerRatio=0.744 (better than B120's 0.699 despite more spikes). These were NDJSON-only — no JSON summary.
+- **ecdf peak visible without sustaining:** ecdfDisplay max=0.944, never sustained 10s → deepFraction=0. Gate diagnostic needed.
+- **Gate path untraced:** timeout vs cleared was OSLog-only.
+- **FAA correlation corrected:** Original B117 claim r=-0.76 computed from n=8 early sessions. Actual from n=16: r(FAA, depthZ)=-0.43, r(FAA, deepFraction)=-0.48, p≈0.10. Direction consistent but NOT statistically significant. Positive FAA reliably predicts zero depth (no exceptions, n=16).
+- **FAABarView color inverted:** was green for clamped≥0 (Davidson "approach" = Davidson convention). WarmupFAAReadiness already correctly used green for faa≤-0.08. FAABarView was inconsistent.
+
+### Changes
+
+#### SessionRecorder.swift — 9 new NDJSONFooter fields + NDJSONGateEvent
+
+| Field | Type | Formula / Source |
+|-------|------|-----------------|
+| `betaZRaw` | Float? | `(calBeta - sessBeta) / max(calBetaStd, 0.10)` — no clamping. calBetaStd guard changed `> 0` → `>= 0` (max() floor already handles zero). |
+| `signalQualityMeanSpikes` | Float? | Mean spikes/frame from frames where `bypassReason == nil` (active denoising only) |
+| `signalQualityAlphaPowerRatio` | Float? | Mean alphaPowerRatio from active-denoising frames |
+| `potatoFlaggedPct` | Float? | Fraction of active-denoising frames with Riemannian Potato verdict |
+| `alphaRelMean` | Float? | Mean relative alpha power (main phase) — calibration-independent |
+| `thetaRelMean` | Float? | Mean relative theta power (main phase) |
+| `betaRelMean` | Float? | Mean relative beta power (main phase) |
+| `ecdfMax` | Float? | Peak ecdfDisplay during main phase (`phase == "main"` filter — warmup excluded) |
+| `ecdfP90` | Float? | 90th-percentile ecdfDisplay during main phase |
+
+**NDJSONGateEvent** (`_type: "gateEvent"`): written when temporal gate fires (cleared or timeout). Fields: `time`, `path` ("cleared"/"timeout"), `tp9Tier`, `tp10Tier`. Pre-session gate events buffered in `pendingGateEvents` and flushed at `startSession()` with `time=-1.0`. Pattern mirrors `pendingGongEvents`.
+
+**Private accumulators** reset at `startSession()`: `denoiseSpikesSum`, `denoiseAlphaPowerSum`, `denoiseFrameCount`, `denoisePotatoes`, `pendingGateEvents`.
+
+`synthesiseRecord()` and `metricDefinitions` dict updated for all 9 new fields. FAA entry in metricDefinitions updated with corrected r=-0.43 (n=16, p≈0.10, not significant).
+
+#### App.swift — gate event calls + FAABarView fix
+
+- `doConnect()` gate timeout: `appendGateEvent(path: "timeout", tp9Tier, tp10Tier)`
+- HSI sink gate clear: `appendGateEvent(path: "cleared", tp9Tier, tp10Tier)`
+- `FAABarView` color: `clamped >= 0 → green` → `clamped < 0 → green` (negative FAA = right-frontal dominant = depth predictor for Sugato)
+- `FAABarView` labels: "approach"/"withdrawal" → "left-frontal"/"right-frontal" (anatomical; avoids overclaiming psychological interpretation)
+
+#### DepthScore.swift — FAA comment correction
+
+- r=-0.76 (n=8, overstated) → r=-0.43 (n=16, p≈0.10, not significant)
+- "direction consistent but NOT statistically significant" explicit
+- "Positive FAA reliably predicts zero depth — no exceptions in 16 sessions"
+- "Negative FAA necessary but not sufficient"
+
+#### Code review fixes (code-review session, 2026-05-23)
+
+| Fix | Location | Issue |
+|-----|----------|-------|
+| calBetaStd `>= 0` | `SessionRecorder.swift:694,1138` | Strict `> 0` guard caused betaZRaw=nil while betaZScore was set (via else-branch fallback) when calBetaStd=0.0. Inconsistency in longitudinal data. `max(calBetaStd, 0.10)` already prevents division-by-zero. |
+| `ecdfVals` → `mainEcdfVals` | `SessionRecorder.swift:712` | CI error `invalid redeclaration of 'ecdfVals'` — same name used at line ~590 in same function scope. Renamed to `mainEcdfVals` and scoped to `phase=="main"`. |
+| ecdf main-phase filter | `SessionRecorder.swift:712` | `rec.samples.compactMap(\.ecdfDisplay)` → `rec.samples.filter { $0.phase == "main" }.compactMap(\.ecdfDisplay)`. inDeep gate only fires in main phase; warmup spikes would inflate ecdfMax. |
+| appendGateEvent comment | `SessionRecorder.swift:1041` | Added "Internal access (same MusePlus module)" — no access modifier = internal by default (correct, not a bug). |
+| ecdf comment corrected | `SessionRecorder.swift:710` | Was "≥0.70 sustained 10s". Corrected to adaptive threshold table: 0.55 (0 sessions) → 0.60 (<5) → 0.65 (<20) → 0.70 (≥20). kEnterSustained default=20 windows=10s, tunable 6–24. |
+
+### B122 Validation Checklist (first session on B125)
+
+1. Footer `betaZRaw` non-nil — will be non-zero for Sugato (bz typically 2–5).
+2. Footer `signalQualityMeanSpikes`, `signalQualityAlphaPowerRatio`, `potatoFlaggedPct` all non-nil.
+3. Footer `alphaRelMean`, `thetaRelMean`, `betaRelMean` non-nil (main phase samples required).
+4. Footer `ecdfMax`, `ecdfP90` non-nil and ≤ 1.0.
+5. NDJSON stream contains `{"_type":"gateEvent","path":"cleared",...}` (or "timeout") — gate always fires at connect.
+6. `FAABarView` dot is green when FAA < 0 (right-frontal dominant) — verify in session UI.
+7. Footer `metricDefinitions.faa` cites r=-0.43 (NOT r=-0.76).
+
+### B122 Architecture Invariants
+
+**B122+:**
+- `calBetaStd >= 0` guard in BOTH `betaZRaw` and `betaZScore` computations — `max(calBetaStd, 0.10)` is the safety floor, not the guard.
+- `ecdfMax`/`ecdfP90` scoped to `phase == "main"` only — warmup ecdfDisplay excluded.
+- `appendDenoiseStats` accumulates ONLY when `bypassReason == nil`. Never accumulate bypass frames.
+- `pendingGateEvents` buffer mirrors `pendingGongEvents` — flush in `startSession()` AFTER `openNDJSONHandle()`.
+- FAA convention: `af8Alpha - af7Alpha`. For Sugato: negative = right-frontal = green. NEVER flip sign without revalidating all 16 sessions.
+- `metricDefinitions` FAA entry: r=-0.43 (n=16, p≈0.10, not significant). Do NOT restore r=-0.76.
+- `FAABarView` color gate: `clamped < 0` → green. Consistent with `WarmupFAAReadiness` faa≤-0.08 → green.
 
 ---
 
