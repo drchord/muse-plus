@@ -107,6 +107,18 @@ final class DepthGate {
     private var alphaThetaCrossoverFirstTimeSec: Double? = nil
     private var sessionStartDate:          Date   = .distantPast
 
+    // B126 — Deep state maintenance protocol (Lane 1998; Wahbeh 2007; Pfurtscheller 1999).
+    // Once in deep state, FADE soundscape rather than holding it. Internally-generated
+    // theta is the signal; external soundscape is now a distraction.
+    private let kDeepInitialFadeSec:    Double = 30.0   // was 2.0 (B125 default)
+    private let kDeepInitialFadeTarget: Float  = 0.20   // was 0.15 (slightly louder floor)
+    private let kDeepExitFadeSec:       Double = 5.0    // was 3.0 — slower exit signal
+    private let kSilenceGapEverySec:    Double = 120.0  // every 2 minutes in deep
+    private let kSilenceGapMinSec:      Double = 8.0
+    private let kSilenceGapMaxSec:      Double = 12.0
+    private let kFirstChimeBlackoutSec: Double = 60.0   // suppress playDeepening for first 60s
+    private var lastSilenceGapAt:       Date   = .distantPast
+
     private let chime = ChimeEngine.shared
     private let zDist = PersonalZDistribution.shared
 
@@ -225,7 +237,11 @@ final class DepthGate {
                 deepStateEnteredAt = now
                 lastAnchorAboveTop = false
                 SoundscapePlayer.shared.setProximityGain(1.0)
-                SoundscapePlayer.shared.setDeepStateGain(0.15, fadeDuration: 2.0)
+                // B126: longer initial fade (30s vs 2s) lets internally-generated theta emerge.
+                // Target 0.20 (slightly louder than B125's 0.15 to remain audible as an anchor).
+                SoundscapePlayer.shared.setDeepStateGain(kDeepInitialFadeTarget,
+                                                         fadeDuration: kDeepInitialFadeSec)
+                lastSilenceGapAt = now   // arm the 2-min silence-gap clock
                 chime.playEnterDeep()
             }
         } else {
@@ -256,10 +272,21 @@ final class DepthGate {
             if deepeningRingFilled >= kDeepeningWindow {
                 let rise = smoothedDisplay - oldestVal
                 if rise >= kDeepeningDelta,
-                   now.timeIntervalSince(lastDeepeningCue) >= kDeepeningCooldown {
+                   now.timeIntervalSince(lastDeepeningCue) >= kDeepeningCooldown,
+                   now.timeIntervalSince(deepStateEnteredAt) >= kFirstChimeBlackoutSec {
                     lastDeepeningCue = now
                     chime.playDeepening()
                 }
+            }
+
+            // B126: silence gap every 2 minutes after first entry. Random duration
+            // [kSilenceGapMinSec, kSilenceGapMaxSec] introduces noise into the
+            // gap-prediction so the user does not entrain to a fixed cadence.
+            if now.timeIntervalSince(lastSilenceGapAt) >= kSilenceGapEverySec {
+                let dur = Double.random(in: kSilenceGapMinSec...kSilenceGapMaxSec)
+                SoundscapePlayer.shared.enterSilenceGap(durationSec: dur,
+                                                        postGapTarget: kDeepInitialFadeTarget)
+                lastSilenceGapAt = now
             }
 
             if smoothedDisplay < exitThresholdEcdf {
@@ -274,7 +301,8 @@ final class DepthGate {
                 inDeepState      = false
                 consecutiveBelow = 0
                 lastExitChime    = now
-                SoundscapePlayer.shared.setDeepStateGain(1.0, fadeDuration: 3.0)
+                // B126: slower exit fade (5s vs 3s) — less abrupt re-entry of soundscape.
+                SoundscapePlayer.shared.setDeepStateGain(1.0, fadeDuration: kDeepExitFadeSec)
                 chime.playExitDeep()
                 inFlowState         = false
                 consecutiveFlow     = 0
@@ -357,6 +385,7 @@ final class DepthGate {
         lastExitChime      = .distantPast
         deepStateEnteredAt = .distantPast
         lastAnchorDate     = .distantPast
+        lastSilenceGapAt   = .distantPast
         lastAnchorAboveTop = false
         contactLossWindows = 0
         thresholdConfigured = false
