@@ -3100,6 +3100,7 @@ private struct SessionSummarySheet: View {
     var body: some View {
         NavigationStack {
             List {
+                narrativeSection
                 if let score = record.qualityScore {
                     Section("Session Quality") {
                         HStack(spacing: 16) {
@@ -3159,6 +3160,7 @@ private struct SessionSummarySheet: View {
                             .font(.caption2)
                     }
                 }
+                gateRequirementSection
                 Section("Insight") {
                     Text(coachingLine)
                         .font(.subheadline)
@@ -3404,6 +3406,31 @@ private struct SessionSummarySheet: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder private var narrativeSection: some View {
+        let narrative = SessionNarrative.compose(from: record)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("What happened")
+                .font(.headline)
+            ForEach(narrative.lines, id: \.self) { line in
+                Text(line)
+                    .font(.body)
+                    .foregroundColor(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    @ViewBuilder private var gateRequirementSection: some View {
+        if let windows = record.enterSustainedAtSession {
+            let secs = Double(windows) * 0.5
+            let secStr = secs == floor(secs) ? "\(Int(secs))" : String(format: "%.1f", secs)
+            Text("Gate required: \(secStr) seconds sustained above threshold")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 
