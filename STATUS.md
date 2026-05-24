@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-24 (B126 — closed-loop depth: adaptive gate shaping, alpha-theta crossover, ECDF→reverb sonification, deep state maintenance, BOCPD drift alert, SessionNarrative. CI pending.)
+**Last updated:** 2026-05-24 (B126 — closed-loop depth: adaptive gate shaping, alpha-theta crossover, ECDF→reverb sonification, deep state maintenance, BOCPD drift alert, SessionNarrative + 8-issue audit-fix pass. Pushed to origin/main. CI pending.)
 
 ---
 
@@ -31,7 +31,7 @@
 | **120** | — | (1) Fix `save()` + `CrashRecovery` file protection: `.completeFileProtection` → `.completeFileProtectionUnlessOpen`. (2) Fix `synthesiseRecord()`: decode full NDJSONFooter → 19 biomarkers on crash-recovery. (3) Fix `attachCalibrationBeta` guard: `isRecording` → `current != nil`. (4) Add `sdnn`/`sd1`/`sd2` to NDJSONFooter + `appendFooter()` + `synthesiseRecord()`. (5) Git config: user.name → "Sugato Chakravarty". | ✅ |
 | **121** | — | Temporal contact gate: `doConnect()` defers `startCalibration()` until TP9 + TP10 `hsiStableTier` both ≤ 2. 15s timeout force-starts. `FitStabilityBannerView` added. | ✅ Session confirmed: betaZScore=50, physiologicalScore=97, calibrationBetaAttached=True |
 | **122→125** | — | 9 new footer fields (betaZRaw, signal quality ×3, relative band power ×3, ecdfMax, ecdfP90), NDJSONGateEvent, FAABarView color/label fix, FAA r=-0.76→r=-0.43 correction. Code review fixes: calBetaStd guard, ecdf main-phase scope, appendGateEvent comment. | ✅ CI run 26341344481, B125 green |
-| **126** | — | Closed-loop depth: EnterSustainedShaping (adaptive default 12→6s, ±streak), alpha-theta crossover tracking (NDJSONFooter + DepthResult), continuous ECDF→reverb sonification (AVAudioUnitReverb wetDryMix), deep state maintenance (30s initial fade, 2-min silence gaps 8-12s, 60s chime blackout), BOCPD drift alert (BayesianChangepointDetector NIG conjugate + haptic), SessionNarrative plain-English summary, SessionSummarySheet narrative + gate-requirement UI. | 🔴 CI pending |
+| **126** | — | Closed-loop depth: EnterSustainedShaping (adaptive default 12→6s, ±streak), alpha-theta crossover tracking (NDJSONFooter + DepthResult), continuous ECDF→reverb sonification (AVAudioUnitReverb wetDryMix), deep state maintenance (30s initial fade, 2-min silence gaps 8-12s, 60s chime blackout), BOCPD drift alert (BayesianChangepointDetector NIG conjugate + haptic), SessionNarrative plain-English summary, SessionSummarySheet narrative + gate-requirement UI. 8-issue audit-fix pass (f311a01). | 🟡 CI pending (pushed 2026-05-24) |
 
 ---
 
@@ -87,6 +87,23 @@
 - `gateRequirementSection` @ViewBuilder: `enterSustainedAtSession` → "X seconds of sustained focus required"
 - `narrativeSection` inserted as first section; `gateRequirementSection` after depth trace chart
 
+### B126 Audit Fixes (commit f311a01, 2026-05-24)
+
+8 issues found in swift-reviewer audit pass, all fixed:
+
+| # | Severity | File | Fix |
+|---|----------|------|-----|
+| 1 | CRITICAL | `SessionNarrativeTests.swift:8` | `enterSustainedAtSession: 3` → `6` — was producing "1.5s" gate line; assertion checked "3 seconds"; would fail CI |
+| 2 | HIGH | `DepthGate.applyContinuousSonification()` | `setAmbientPresence` wrapped in `DispatchQueue.main.async` — was mutating AVAudioNode from EEG pipeline background thread |
+| 3 | HIGH | `DepthGate` silence gap scheduler | `enterSilenceGap` dispatched to main; `lastSilenceGapAt = now` kept on pipeline thread (prevents re-fire before main drains queue) |
+| 4 | HIGH | `App.swift` × 3 | `EnterSustainedShaping.recordSession(deepFraction: rec?.deepFraction ?? 0)` → `if let deepF` guard — `?? 0` silently biased shaping on nil records (phantom disconnect before beginSession) |
+| 5 | MEDIUM | `DepthGate` BOCPD block | Gate drift alert behind `silenceGapRecoveryEnd = lastSilenceGapAt + kSilenceGapMaxSec + 3.5s` — silence gap drops smoothedDisplay→0, causing false negative derivative |
+| 6 | MEDIUM | `App.swift narrativeSection` | Bare VStack → `Section("What happened")` — List renders VStack as single unseparated cell |
+| 7 | MEDIUM | `App.swift narrativeSection` | `ForEach(id: \.self)` → `id: \.offset` — string-identity collision when two narrative lines are identical |
+| 8 | MEDIUM | `BayesianChangepointDetector.swift` | `reserveCapacity(n + 1)` on all 4 NIG arrays — eliminates O(n) heap reallocs in 7200-step hot path |
+
++1 comment: `SessionNarrative.swift` calibrationBetaStd 0.12 threshold documented as "empirical 25th-percentile beta-band std across session corpus."
+
 ### B126 Validation Checklist (first session on B126)
 - [ ] NDJSON footer: `enterSustainedAtSession` present + equals `EnterSustainedShaping.currentWindows()` at session start
 - [ ] NDJSON footer: `alphaThetaMean`, `alphaThetaCrossoverCount`, `alphaThetaCrossoverFirstTime` present (may be 0/nil if no crossover)
@@ -97,6 +114,20 @@
 - [ ] If deep state exits early: NDJSON stream contains `{"_type":"driftAlert",...}` record
 - [ ] Session summary sheet: narrative section shows plain-English lines (no raw field names)
 - [ ] Session summary sheet: gate requirement shows "X seconds" in human language
+
+### B126 Architecture Invariants
+
+- `EnterSustainedShaping.recordSession()` MUST be called with a non-nil `deepFraction` from a completed record. Never call with `?? 0` default — biases shaping on phantom sessions.
+- `DepthGate.applyContinuousSonification()` and silence gap scheduler: ALL `SoundscapePlayer` mutations must be dispatched to `DispatchQueue.main`. Pipeline thread owns state reads; main thread owns audio mutations.
+- `lastSilenceGapAt = now` on pipeline thread BEFORE the `DispatchQueue.main.async` block — prevents gap re-fire while main queue drains.
+- BOCPD drift alert gated behind `silenceGapRecoveryEnd = lastSilenceGapAt + kSilenceGapMaxSec + 3.5s`. Never fire during gap recovery window.
+- `narrativeSection` uses `Section("What happened")` (inside List) and `ForEach(id: \.offset)` — stable identity, correct List styling. Never revert to bare VStack or `id: \.self`.
+- `BayesianChangepointDetector.observe()`: `reserveCapacity(n + 1)` on all 4 NIG arrays before the update loop. Never remove.
+- `kEnterSustained` in `DepthGate` re-read at `reset()` so each session picks up the updated UserDefault.
+- BOCPD `maxRunLength = 7200` (60 min × 2 Hz). Do not reduce — run-length truncation causes posterior underflow in long sessions.
+- BOCPD fires `onDriftAlert` only when `posterior > 0.75 AND derivative < -0.05 AND cooldown 90s AND silenceGapRecoveryEnd passed`. All four conditions load-bearing.
+- `EnterSustainedShaping` streak counters: zero-deep streak → −2 windows; hit streak (deepFraction > 0.15 twice) → +1 window. Range clamped [4, 20].
+- `SessionNarrative` is pure-Swift deterministic: no Date, no AVAudioEngine, no Muse SDK. Composes from `SessionRecord` only. Keep it that way.
 
 ---
 
@@ -829,7 +860,18 @@ Full analysis artifacts: `C:\Users\sugat\MusePlus\analysis\` (sessions_extracted
 ## How to Resume
 
 1. Read STATUS.md (this file) — canonical.
-2. `gh run list --limit 5` — verify CI green.
-3. Install TestFlight build and run B92 Validation Checklist above.
-4. Run B94 Validation Checklist above on physical device.
+2. Read CONTINUATION_PROMPT.md — current state, what B126 shipped, next candidates.
+3. `gh run list --limit 5` — verify B126 CI green (was pending as of 2026-05-24 push).
+4. Install TestFlight build, run B126 Validation Checklist above on physical device.
 5. Hard rule: never push without explicit "go" per `MusePlus/CLAUDE.md`.
+
+## Top Next Candidate (B127)
+
+**Binaural beats theta entrainment** — real-time binaural beat generator at user's dominant theta peak frequency, layered under existing reverb sonification. Carrier ~200 Hz, beat frequency from FFT peak in 4–8 Hz band. Requires:
+- `SoundscapePlayer`: new `setBinauralBeat(frequency: Float)` + stereo sine-wave generator (left: carrier, right: carrier + beat)
+- `DepthGate`: read dominant theta peak from `smoothedDisplayHistory` FFT (or fixed 5.5 Hz default)
+- UserDefault: `binauralBeatEnabled` Bool + `binauralBeatHz` Float (override manual)
+- No new hardware needed — works on existing Muse S
+- Estimated: ~200 lines, ~1 session day
+
+Do NOT implement until B126 CI is green and one real session validates B126 checklist.
