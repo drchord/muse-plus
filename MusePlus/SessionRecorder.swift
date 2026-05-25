@@ -1301,8 +1301,8 @@ final class SessionRecorder: ObservableObject {
         "ecdfP90": "90th-percentile ecdfDisplay across all session samples. Robust peak indicator — unlike ecdfMax, not inflated by single-sample artifact spikes. B122.",
         "gateEvent": "NDJSON record (_type=gateEvent): path=cleared|timeout, tp9Tier, tp10Tier, time. time=-1.0 if gate fired before session start. B122.",
         "enterSustainedAtSession": "Sustained-window requirement active for this session (windows × 0.5s = seconds). Adapts via EnterSustainedShaping: 3 zero-deep sessions → -2 windows (min 4); 3 hit sessions → +1 window (max 20). Default 12 (6s). B126.",
-        "alphaThetaMean": "Mean of (frontalAlpha − frontalTheta) over all calibrated windows (log10 µV²). Negative = theta-dominant on average. AF7+AF8 channels only. B126.",
-        "alphaThetaCrossoverCount": "Count of 0.5s windows where frontal theta > frontal alpha (alphaTheta < 0). Each window ≈ 2 EEG FFT frames. B126.",
+        "alphaThetaMean": "Mean of (frontalTheta / frontalAlpha) ratio in linear band power, averaged over all calibrated windows. Values >1.0 = theta-dominant. Computed per channel then averaged: (af7Theta/af7Alpha + af8Theta/af8Alpha)/2. B126.",
+        "alphaThetaCrossoverCount": "Count of 0.5s windows where frontal theta/alpha ratio > 1.0 (theta exceeds alpha in linear band power). Each window ≈ 2 EEG FFT frames. B126.",
         "alphaThetaCrossoverFirstTime": "Seconds from session start to first window where theta > alpha. nil if no crossover occurred. B126."
     ]
 

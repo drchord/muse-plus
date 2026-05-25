@@ -1060,6 +1060,13 @@ final class Probe: ObservableObject {
                 SessionRecorder.shared.attachEnterSustained(EnterSustainedShaping.currentWindows())
                 // B126: anchor session start so alphaThetaCrossoverFirstTimeSec is relative to session.
                 self.gate.setSessionStart(Date())
+                // B127 Option A: prime binaural Hz from ITPFTracker cross-session estimate if reliable.
+                // Reliable = sessionCount >= 3 AND cleanMinutes >= 10. Falls back to preset (theta 6 Hz).
+                // updateAdaptiveDepth() keeps this updated each 0.5s once live iTPF arrives.
+                if self.pipeline.iTPFTracker.isReliable,
+                   let itpf = self.pipeline.iTPFTracker.currentEstimate {
+                    SoundscapePlayer.shared.customBinauralHz = Double(max(4.0, min(8.0, itpf)))
+                }
                 // B126: BOCPD drift alert — write NDJSON record + soft haptic feedback.
                 // onDriftAlert fires on the EEG pipeline queue (background thread); UIKit haptics
                 // require main thread, so dispatch there. appendDriftAlert uses queue.async internally.

@@ -62,7 +62,9 @@ final class SoundscapePlayer: ObservableObject {
     // Min 0.05 — fully silent binaural is useless; user should manually turn it off at that point.
     @Published var binauralFadeLevel: Float = {
         (UserDefaults.standard.object(forKey: "binauralFadeLevel") as? Float) ?? 1.0
-    }()
+    }() {
+        didSet { _binauralAmp = 0.45 * binauralFadeLevel }
+    }
 
     var successfulSessionCount: Int {
         UserDefaults.standard.integer(forKey: "successfulSessionCount")
@@ -84,11 +86,7 @@ final class SoundscapePlayer: ObservableObject {
         guard next != binauralFadeLevel else { return }
         binauralFadeLevel = next
         UserDefaults.standard.set(next, forKey: "binauralFadeLevel")
-        if activeLayers.contains(.binaural) {
-            buffers.removeValue(forKey: .binaural)
-            nodes[.binaural]?.stop()
-            startLayer(.binaural)
-        }
+        // B127: _binauralAmp already updated via binauralFadeLevel.didSet — source node picks it up on next render frame.
     }
 
     func resetBinauralFade() {
@@ -97,18 +95,23 @@ final class SoundscapePlayer: ObservableObject {
         UserDefaults.standard.set(0, forKey: "successfulSessionCount")
     }
 
-    @Published var binauralPreset: BinauralPreset      = .theta {
+    @Published var binauralPreset: BinauralPreset = .theta {
         didSet {
-            guard activeLayers.contains(.binaural) else { return }
+            // B127: source node picks up new preset via _binauralBeatHz update in setter
             customBinauralHz = nil
-            buffers.removeValue(forKey: .binaural)
-            nodes[.binaural]?.stop()
-            startLayer(.binaural)
         }
     }
 
-    // Adaptive binaural: set by updateAdaptiveDepth; nil = use binauralPreset
-    var customBinauralHz: Double? = nil
+    // B127: adaptive binaural frequency — writes update _binauralBeatHz for the render callback immediately.
+    // Main-thread writes to an aligned Double on ARM64 are single-instruction (no tearing).
+    private var _customBinauralHz: Double? = nil
+    var customBinauralHz: Double? {
+        get { _customBinauralHz }
+        set { _customBinauralHz = newValue; _binauralBeatHz = newValue ?? binauralPreset.beatHz }
+    }
+    private var _binauralBeatHz: Double = 6.0  // read by AVAudioSourceNode render callback
+    private var _binauralAmp:    Float  = 0.45 // read by AVAudioSourceNode render callback
+    private var binauralSourceNode: AVAudioSourceNode?
 
     private let engine = AVAudioEngine()
     // B83 — public read-only flag for SessionRecorder.appendAudioState diagnostics.
@@ -136,7 +139,7 @@ final class SoundscapePlayer: ObservableObject {
     init() {
         // Explicit stereo format — prevents crash after BT route change
         let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
-        for layer in SoundLayer.allCases {
+        for layer in SoundLayer.allCases where layer != .binaural {
             let node = AVAudioPlayerNode()
             let eq   = AVAudioUnitEQ(numberOfBands: 2)
             nodes[layer] = node
@@ -147,6 +150,20 @@ final class SoundscapePlayer: ObservableObject {
             engine.connect(eq,   to: engine.mainMixerNode, format: fmt)
             configureEQ(eq, for: layer)
         }
+        // B127: binaural uses AVAudioSourceNode for phase-continuous real-time frequency updates.
+        // Pre-generated looping buffer would require a 120s cycle before any frequency change takes effect.
+        _binauralAmp    = 0.45 * binauralFadeLevel  // sync (didSet doesn't fire on initial declaration)
+        _binauralBeatHz = binauralPreset.beatHz      // theta 6 Hz default
+        let binEQ = AVAudioUnitEQ(numberOfBands: 2)
+        eqs[.binaural] = binEQ
+        engine.attach(binEQ)
+        engine.connect(binEQ, to: engine.mainMixerNode, format: fmt)
+        configureEQ(binEQ, for: .binaural)
+        let srcNode = makeBinauralSourceNode(format: fmt)
+        binauralSourceNode = srcNode
+        engine.attach(srcNode)
+        engine.connect(srcNode, to: binEQ, format: fmt)
+        srcNode.volume = 0  // silent until activate(.binaural)
         // B126: insert ambientReverb between mainMixerNode and outputNode.
         // Connecting mainMixerNode → ambientReverb automatically disconnects the implicit
         // mainMixerNode → outputNode path (AVAudioEngine reconnects on explicit connect).
@@ -216,7 +233,11 @@ final class SoundscapePlayer: ObservableObject {
     func setVolume(_ v: Float, for layer: SoundLayer) {
         layerVolumes[layer] = v
         guard !isDucked else { return }
-        nodes[layer]?.volume = v * min(proximityGain, deepStateGain)
+        if layer == .binaural {
+            binauralSourceNode?.volume = v * min(proximityGain, deepStateGain)
+        } else {
+            nodes[layer]?.volume = v * min(proximityGain, deepStateGain)
+        }
     }
 
     /// Fade all active layers to silence, stop them, then clear activeLayers.
@@ -239,10 +260,16 @@ final class SoundscapePlayer: ObservableObject {
                 guard let self else { return }
                 let t = 1.0 - Float(step) / Float(steps)
                 for layer in layersToStop {
-                    self.nodes[layer]?.volume = (self.layerVolumes[layer] ?? 0.35) * effectiveAtStop * t
+                    let vol = (self.layerVolumes[layer] ?? 0.35) * effectiveAtStop * t
+                    if layer == .binaural {
+                        self.binauralSourceNode?.volume = vol
+                    } else {
+                        self.nodes[layer]?.volume = vol
+                    }
                 }
                 if step == steps {
-                    for layer in layersToStop {
+                    self.binauralSourceNode?.volume = 0
+                    for layer in layersToStop where layer != .binaural {
                         self.nodes[layer]?.stop()
                         self.nodes[layer]?.volume = self.layerVolumes[layer] ?? 0.35
                     }
@@ -273,7 +300,11 @@ final class SoundscapePlayer: ObservableObject {
         guard !isDucked else { return }
         let effective = min(proximityGain, deepStateGain)
         for layer in activeLayers {
-            nodes[layer]?.volume = (layerVolumes[layer] ?? 0.35) * effective
+            if layer == .binaural {
+                binauralSourceNode?.volume = (layerVolumes[.binaural] ?? 0.35) * effective
+            } else {
+                nodes[layer]?.volume = (layerVolumes[layer] ?? 0.35) * effective
+            }
         }
     }
 
@@ -372,23 +403,20 @@ final class SoundscapePlayer: ObservableObject {
         fade(to: 1.0, over: fadeDuration)
     }
 
-    /// Called from depth pipeline. Tracks adaptive binaural tier but does NOT restart
-    /// the playing node mid-session — frequency changes cause audible gaps and are more
-    /// disruptive than beneficial during active meditation.
-    /// iTPF: individual theta peak in Hz from ITPFTracker (nil → falls back to fixed 6 Hz).
+    /// Called from depth pipeline every 0.5s. Tracks iTPF and writes to _binauralBeatHz via
+    /// customBinauralHz setter. B127: AVAudioSourceNode picks up changes on the next render frame
+    /// (~23ms) — phase-continuous, no gap. 0.10 Hz hysteresis prevents spurious writes.
+    /// iTPF: individual theta peak in Hz from ITPFTracker (nil = tracker not yet reliable → no-op).
     func updateAdaptiveDepth(_ depthScore: Float, iTPF: Float? = nil) {
-        let thetaHz = iTPF.map { Double($0) } ?? 6.0
-        let newHz: Double = depthScore > 0.70
-            ? max(4.0, thetaHz - 2.0)
-            : depthScore > 0.45 ? thetaHz : 10.0
-        // Record the tier for next activation but never interrupt a running buffer.
-        guard newHz != customBinauralHz else { return }
+        guard let rawHz = iTPF.map({ Double($0) }) else { return }
+        let newHz = max(4.0, min(8.0, rawHz))      // clamp to theta band; use iTPF directly
+        guard abs(newHz - _binauralBeatHz) > 0.10 else { return }
         customBinauralHz = newHz
     }
 
-    /// Set binaural frequency from iTPF at deep state entry.
+    /// Set binaural frequency from iTPF at deep state entry (Option B).
     /// Only fires if binaural layer is active and new Hz differs by >0.3 from current.
-    /// Effect deferred to next buffer loop (≤120s latency) — no restart, no audible gap.
+    /// B127: AVAudioSourceNode picks up the change on next render frame (~23ms), phase-continuous.
     /// Valid iTPF range: 4.0–9.0 Hz (frontal theta band).
     func setAdaptiveBinauralIfActive(hz: Double) {
         guard activeLayers.contains(.binaural) else { return }
@@ -424,8 +452,9 @@ final class SoundscapePlayer: ObservableObject {
         // Capture starting volumes synchronously — true linear interpolation regardless of
         // any concurrent applyProximityGain calls between steps.
         let startVols: [SoundLayer: Float] = Dictionary(
-            uniqueKeysWithValues: activeLayers.compactMap { layer in
-                nodes[layer].map { (layer, $0.volume) }
+            uniqueKeysWithValues: activeLayers.compactMap { layer -> (SoundLayer, Float)? in
+                if layer == .binaural { return binauralSourceNode.map { (layer, $0.volume) } }
+                return nodes[layer].map { (layer, $0.volume) }
             }
         )
         fadeGeneration &+= 1
@@ -441,7 +470,12 @@ final class SoundscapePlayer: ObservableObject {
                     let startVol = startVols[layer] ?? base
                     // Deep state owns the floor: chime can never push volume below deepStateGain.
                     let stepTarget = base * min(multiplier, self.deepStateGain)
-                    self.nodes[layer]?.volume = startVol + t * (stepTarget - startVol)
+                    let newVol = startVol + t * (stepTarget - startVol)
+                    if layer == .binaural {
+                        self.binauralSourceNode?.volume = newVol
+                    } else {
+                        self.nodes[layer]?.volume = newVol
+                    }
                 }
                 if step == steps {
                     let finalWouldBe   = min(multiplier, self.deepStateGain)
@@ -454,9 +488,17 @@ final class SoundscapePlayer: ObservableObject {
     }
 
     private func activate(_ layer: SoundLayer) {
-        isStopping = false   // new activation always cancels pending stop state
+        isStopping = false
         activeLayers.insert(layer)
-        if let buf = buffers[layer] {
+        if layer == .binaural {
+            // B127: source node renders while engine is running; ensure it's started before unmuting.
+            ensureRunning()
+            let vol = layerVolumes[.binaural] ?? 0.35
+            let effective = min(proximityGain, deepStateGain)
+            binauralSourceNode?.volume = isDucked
+                ? vol * min(currentDuckMultiplier, deepStateGain)
+                : vol * effective
+        } else if let buf = buffers[layer] {
             startNode(nodes[layer]!, buffer: buf)
         } else {
             startLayer(layer)
@@ -464,8 +506,9 @@ final class SoundscapePlayer: ObservableObject {
     }
 
     private func startLayer(_ layer: SoundLayer) {
+        guard layer != .binaural else { return }  // B127: binaural uses AVAudioSourceNode, not startLayer
         let vol  = layerVolumes[layer] ?? 0.35
-        let beat = (layer == .binaural) ? (customBinauralHz ?? binauralPreset.beatHz) : 0.0
+        let beat = 0.0
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let buf: AVAudioPCMBuffer
@@ -489,7 +532,11 @@ final class SoundscapePlayer: ObservableObject {
 
     private func deactivate(_ layer: SoundLayer) {
         activeLayers.remove(layer)
-        nodes[layer]?.stop()
+        if layer == .binaural {
+            binauralSourceNode?.volume = 0
+        } else {
+            nodes[layer]?.stop()
+        }
     }
 
     private func startNode(_ node: AVAudioPlayerNode, buffer: AVAudioPCMBuffer) {
@@ -497,6 +544,38 @@ final class SoundscapePlayer: ObservableObject {
         ensureRunning()
         node.scheduleBuffer(buffer, at: nil, options: .loops)
         node.play()
+    }
+
+    // MARK: - Binaural Streaming (B127)
+
+    /// Phase-continuous binaural render callback. Reads _binauralBeatHz and _binauralAmp
+    /// which are written on the main thread. ARM64 aligned 64/32-bit stores are single-instruction;
+    /// a torn read yields a value between two nearby frequencies — inaudible in practice.
+    private func makeBinauralSourceNode(format: AVAudioFormat) -> AVAudioSourceNode {
+        var phaseL: Double = 0.0
+        var phaseR: Double = 0.0
+        let sr = sampleRate
+        let carrier = 200.0
+        return AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList in
+            guard let self else { return noErr }
+            let abl    = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            let beatHz = self._binauralBeatHz
+            let amp    = Double(self._binauralAmp)
+            let incL   = carrier         / sr
+            let incR   = (carrier + beatHz) / sr
+            let n      = Int(frameCount)
+            if abl.count >= 2,
+               let L = abl[0].mData?.assumingMemoryBound(to: Float.self),
+               let R = abl[1].mData?.assumingMemoryBound(to: Float.self) {
+                for i in 0..<n {
+                    L[i] = Float(sin(phaseL * 2.0 * .pi) * amp)
+                    R[i] = Float(sin(phaseR * 2.0 * .pi) * amp)
+                    phaseL += incL; if phaseL >= 1.0 { phaseL -= 1.0 }
+                    phaseR += incR; if phaseR >= 1.0 { phaseR -= 1.0 }
+                }
+            }
+            return noErr
+        }
     }
 
     private func ensureRunning() {
@@ -545,18 +624,22 @@ final class SoundscapePlayer: ObservableObject {
     private func resumeActiveLayers() {
         guard !isStopping else { return }  // block resurrection during session-end fade
         for layer in activeLayers {
+            if layer == .binaural { continue }  // B127: source node survives engine restart automatically
             guard let node = self.nodes[layer],
                   let buf  = self.buffers[layer],
                   !node.isPlaying else { continue }
             node.scheduleBuffer(buf, at: nil, options: .loops)
             node.play()
         }
-        // Restore correct gain after route change. If chime is active, applyProximityGain()
-        // would return early (isDucked guard) leaving nodes at AVAudioPlayerNode default
-        // (full volume) — audible surge. Restore duck level explicitly instead.
+        // Restore correct gain after route change.
         if isDucked {
             for layer in activeLayers {
-                nodes[layer]?.volume = (layerVolumes[layer] ?? 0.35) * min(currentDuckMultiplier, deepStateGain)
+                let vol = (layerVolumes[layer] ?? 0.35) * min(currentDuckMultiplier, deepStateGain)
+                if layer == .binaural {
+                    binauralSourceNode?.volume = vol
+                } else {
+                    nodes[layer]?.volume = vol
+                }
             }
         } else {
             applyProximityGain()
