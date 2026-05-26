@@ -4,82 +4,69 @@
 
 ---
 
-## Current State (2026-05-24)
+## Current State (2026-05-25)
 
-**B126 pushed to origin/main** — 8 commits, CI pending as of 2026-05-24 ~06:00 ET.  
-Last confirmed green: B125 (CI run 26341344481).  
-**Last session data:** B121 (2026-05-23_0538) — physiologicalScore=97, deepFraction=0 (ecdfMax=0.944, never sustained 10s, gate correct).
-
----
-
-## What B126 Shipped (commits 519b8bd → f311a01)
-
-### Phase A — EnterSustainedShaping
-- `EnterSustainedShaping.swift` (NEW): default 12 windows (6s), range [4,20]; `recordSession(deepFraction:)` adjusts on 3-streak
-- `DepthGate.kEnterSustained` now instance var, re-read at `reset()` from UserDefaults
-- `SessionRecord` + `NDJSONFooter`: `enterSustainedAtSession: Int?`
-- `App.swift`: `attachEnterSustained()` + `recordSession()` at all 3 session-end paths (nil-guarded)
-
-### Phase B — Alpha-theta crossover
-- `DepthResult.alphaTheta: Float` — (AF7+AF8 theta) / (AF7+AF8 alpha); >1.0 = theta-dominant
-- Crossover accumulators in `DepthGate`: `alphaThetaCrossoverCount`, `alphaThetaCrossoverFirstTimeSec`
-- `SessionRecord` + `NDJSONFooter`: `alphaThetaMean`, `alphaThetaCrossoverCount`, `alphaThetaCrossoverFirstTime`
-
-### Phase C — Continuous ECDF→reverb sonification
-- `AVAudioUnitReverb` (mediumHall) wired after mainMixerNode; `wetDryMix` driven by `applyContinuousSonification()`
-- Linear map: 0 at display ≤ 0.30, full at enterThreshold; replaces binary proximity duck
-- `SoundscapePlayer`: `setAmbientPresence(_:fadeDuration:)`, `enterSilenceGap(durationSec:postGapTarget:)`, `setDeepStateGainAbsolute(_:fadeDuration:)`
-
-### Phase D — Deep state maintenance
-- Entry: `setDeepStateGain(0.20, fadeDuration: 30.0)`; silence gap scheduler fires every 120s (8-12s random gap); 60s chime blackout after entry
-- `kDeepInitialFadeSec=30`, `kDeepInitialFadeTarget=0.20`, `kDeepExitFadeSec=5.0`, `kSilenceGapEverySec=120`, `kSilenceGapMinSec=8`, `kSilenceGapMaxSec=12`, `kFirstChimeBlackoutSec=60`
-
-### Phase E — BOCPD drift alert
-- `BayesianChangepointDetector.swift` (NEW): logit-transform, NIG conjugate prior, hazardRate=1/250, maxRunLength=7200
-- `BayesianChangepointDetectorTests.swift` (NEW): 3 tests
-- Fires `onDriftAlert` when posterior>0.75 AND derivative<-0.05 (10-sample lookback) AND cooldown 90s AND outside silence gap recovery window
-- `SessionRecorder`: `NDJSONDriftAlert` + `appendDriftAlert()`
-- `App.swift`: `onDriftAlert` → `appendDriftAlert` + `UIImpactFeedbackGenerator(.soft, 0.4)` on main thread
-
-### Phase F — SessionNarrative TDD
-- `SessionNarrative.swift` (NEW): pure-Swift deterministic struct, 6 dimensions (calibration, gate, signal, physiology, crossover, insight)
-- `SessionNarrativeTests.swift` (NEW): 6 tests
-
-### Phase G — SessionSummarySheet UI
-- `narrativeSection`: `Section("What happened")` + `ForEach(id: \.offset)` in List
-- `gateRequirementSection`: "X seconds of sustained focus required"
-
-### Phase H — STATUS.md + CFBundleVersion bump
-
-### Audit fixes (f311a01) — 8 issues, all fixed
-| # | File | Fix |
-|---|------|-----|
-| 1 CRITICAL | `SessionNarrativeTests:8` | `enterSustainedAtSession: 3→6` (3×0.5=1.5s ≠ "3 seconds"; 6×0.5=3.0s ✓) |
-| 2 HIGH | `DepthGate.applyContinuousSonification` | `setAmbientPresence` → `DispatchQueue.main.async` |
-| 3 HIGH | `DepthGate` silence gap scheduler | `enterSilenceGap` → `DispatchQueue.main.async`; `lastSilenceGapAt` stays on pipeline thread |
-| 4 HIGH | `App.swift` ×3 | `recordSession(?? 0)` → `if let deepF` guard |
-| 5 MEDIUM | `DepthGate` BOCPD | Gate behind `silenceGapRecoveryEnd = lastSilenceGapAt + kSilenceGapMaxSec + 3.5s` |
-| 6 MEDIUM | `App.swift narrativeSection` | Bare VStack → `Section("What happened")` |
-| 7 MEDIUM | `App.swift narrativeSection` | `id: \.self` → `id: \.offset` |
-| 8 MEDIUM | `BayesianChangepointDetector` | `reserveCapacity(n+1)` on 4 NIG arrays |
+**B127 pushed to origin/main** — CI run 26408036846, in progress as of 2026-05-25 ~11:00 ET.  
+Last confirmed green: B126 (CI run 26358648681).  
+**B126 validated:** Two sessions this morning — S1 deepFraction=0.954 (best ever), S2 deepFraction=0.890.
 
 ---
 
-## B126 Validation Checklist (first session)
+## What B127 Shipped
 
-- [ ] NDJSON footer: `enterSustainedAtSession` present + equals `EnterSustainedShaping.currentWindows()` at session start
-- [ ] NDJSON footer: `alphaThetaMean`, `alphaThetaCrossoverCount`, `alphaThetaCrossoverFirstTime` present
-- [ ] Reverb audible during approach (not binary duck) — continuous gradient as ecdfDisplay rises
-- [ ] Deep state entry: volume fades slowly over ~30s (not instant)
-- [ ] Silence gap fires ~2min into deep state (audible dip, then restore to 0.20)
-- [ ] No deepening chime in first 60s after deep state entry
-- [ ] If deep state exits early: NDJSON stream contains `{"_type":"driftAlert",...}`
-- [ ] Session summary: "What happened" Section shows plain-English lines
-- [ ] Session summary: gate line shows "X seconds" in human language (no raw field names)
+### Root Cause Fixed: Binaural Dead-Write
+
+Pre-B127: `startNode(buffer, options:.loops)` creates an infinite looping buffer with no completion callback. ALL `customBinauralHz` writes during a session were dead — frequency never changed until layer restarted. `updateAdaptiveDepth`'s `iTPF - 2.0` tier formula also pushed the beat to ~3.78 Hz (delta range) for typical iTPF=5.78 Hz. Neither bug was audible as a crash; both silently sabotaged the entrainment effect.
+
+### Option C — AVAudioSourceNode (backbone)
+
+`SoundscapePlayer.makeBinauralSourceNode(format:)` creates an `AVAudioSourceNode` with two phase accumulators (`phaseL`, `phaseR`). On each ~23ms render frame it reads `_binauralBeatHz` (Double) and `_binauralAmp` (Float) — both written only from the main thread. ARM64 aligned 64/32-bit stores are single-instruction; no lock needed. Phase is continuous across frequency changes — no click, no gap.
+
+Engine graph: `AVAudioSourceNode → binauralEQ(AVAudioUnitEQ) → mainMixerNode → ambientReverb → output`
+
+The source node starts at `volume = 0` in `init()`. `activate(.binaural)` calls `ensureRunning()` then sets volume. `deactivate(.binaural)` sets volume to 0. No `startNode(buffer:options:.loops)` is ever called for binaural.
+
+`customBinauralHz` is now a computed property: setter writes both `_customBinauralHz` and `_binauralBeatHz`. `binauralFadeLevel.didSet` writes `_binauralAmp`. All downstream consumers of `customBinauralHz` (updateAdaptiveDepth, setAdaptiveBinauralIfActive, binauralPreset.didSet) automatically propagate to the render callback.
+
+### Option A — Session-start priming (App.swift, line ~1063)
+
+At `SessionRecorder.shared.startSession()` (calibration end), if `pipeline.iTPFTracker.isReliable` (sessionCount ≥ 3 AND cleanMinutes ≥ 10), `customBinauralHz` is set from `iTPFTracker.currentEstimate`. For today's data: starts at ~5.78 Hz instead of 6.0 Hz preset. Falls back silently if not reliable. Once live iTPF arrives (via `updateAdaptiveDepth` every 0.5s), it overrides the primed value within the hysteresis band.
+
+### Option B — Deep-entry live update
+
+`setAdaptiveBinauralIfActive(hz: Double(iTPF))` already fires at deep entry (App.swift line 903-904). With Option C as transport, the write is now live on next audio frame. Comment on the function corrected from "≤120s latency" to "~23ms". No call-site change needed.
+
+### Bug Fixes
+
+| Bug | Fix |
+|-----|-----|
+| `updateAdaptiveDepth` `iTPF - 2.0` → delta range | Now: `max(4.0, min(8.0, rawHz))` with 0.10 Hz hysteresis. Returns early if iTPF nil. |
+| `activate(.binaural)` missing `ensureRunning()` | Found in pre-push audit: engine stopped after `stopAll()`. Fixed. |
+| `alphaThetaMean` description wrong | "log10 µV² difference" → "linear theta/alpha ratio >1.0 = theta-dominant" |
+| `alphaThetaCrossoverCount` description wrong | "alphaTheta < 0" → "theta/alpha ratio > 1.0" |
+
+---
+
+## B127 Validation Checklist (first session on B127 TestFlight)
+
+- [ ] Binaural starts at ~5.78 Hz (not 6.0 Hz) if ITPFTracker.isReliable — listen for slightly slower beat than before
+- [ ] No click or gap at deep state entry — frequency update is seamless
+- [ ] `customBinauralHz` in Telemetry/logs tracks iTPF drift (≥0.10 Hz changes)
+- [ ] `binauralFadeLevel` still decrements after successful sessions; amplitude fades correctly
+- [ ] Binaural survives BT route change (engine restart): volume restored correctly by `resumeActiveLayers()`
+- [ ] `alphaThetaMean` description in NDJSON footer `metricDefinitions` reflects corrected text
 
 ---
 
 ## Architecture Invariants (cumulative — all must be preserved)
+
+**B127+:**
+- Binaural = `AVAudioSourceNode` + phase accumulators. No pre-generated buffer for binaural.
+- `customBinauralHz` setter ALWAYS writes `_binauralBeatHz`. Never assign `_binauralBeatHz` directly from outside `SoundscapePlayer`.
+- `_binauralBeatHz` / `_binauralAmp`: main-thread writes only. Audio render reads without lock (ARM64 safe).
+- `activate(.binaural)` calls `ensureRunning()` before volume set.
+- `startLayer()` guards `layer != .binaural`.
+- `updateAdaptiveDepth`: returns early if `iTPF == nil`. [4,8] Hz theta only. No `10.0` alpha tier.
 
 **B126+:**
 - `EnterSustainedShaping.recordSession()` only with non-nil `deepFraction` — never `?? 0` default
@@ -103,15 +90,6 @@ Last confirmed green: B125 (CI run 26341344481).
 - `.completeFileProtectionUnlessOpen` for all file writes
 - `synthesiseRecord()` decodes full NDJSONFooter — add new footer fields here too
 
-**B118+:**
-- buildTag dynamic from `CFBundleVersion` — never hardcode
-- All coaching events through `recordCoach()`
-
-**B109+:**
-- `attachCalibrationBeta` MUST be called AFTER `startSession`
-- `recordingStartedAt` must not be nil before `buildDiagnostics`
-- All 3 session-end paths carry full HRV attachment block
-
 **Always:**
 - `handleIsGood` 5s rate limit — NEVER REMOVE
 - `SoundscapePlayer.stopAll()` BEFORE `EndGongPlayer.playSuccess()` — ordering load-bearing
@@ -132,6 +110,19 @@ Last confirmed green: B125 (CI run 26341344481).
 
 ---
 
+## B126 Session Data (2026-05-25, validated)
+
+| Session | Score | deepFraction | rmssd | alphaThetaCrossoverCount | iTPF median |
+|---------|-------|-------------|-------|--------------------------|-------------|
+| S1 (0406, 61min) | 96 | **0.954** (best ever) | 72.1ms | 143 | 5.78 Hz |
+| S2 (0622, 30min) | 95 | 0.890 | 66.9ms | 5 | 5.63 Hz |
+
+S1: theta broke through alpha at t=0.53s, held for 51.2 min continuous deep. EnterSustainedShaping adaptive gate worked (gate had dropped from 12→6 windows after May 20/21/23 zero-deep streak).
+
+S2: back-to-back session, alpha-dominant state (brain residual from S1). alphaThetaMean=4.303 with crossoverCount=5 is mathematically anomalous — potential back-to-back session reset issue. `enterSustainedAtSession=None` in S2 footer also anomalous. Both flagged for investigation if it recurs.
+
+---
+
 ## Score Decomposition (reference)
 
 `physiologicalScore = betaZScore(0–50) + rmssdScore(0–30) + coherenceScore(0–20)`
@@ -143,8 +134,6 @@ Last confirmed green: B125 (CI run 26341344481).
 | rmssdScore | `<40ms→0-10, 40-65ms→10-25, 65-100ms→25-30, ≥100ms→30` |
 | coherenceScore | `frontalGoodFrac × 20.0` |
 
-B121: betaZ=50 (bz=5.125 ceiling), rmssd=27, coherence=20 → total=97.
-
 ---
 
 ## DepthGate Entry Logic (reference)
@@ -152,30 +141,17 @@ B121: betaZ=50 (bz=5.125 ceiling), rmssd=27, coherence=20 → total=97.
 ```
 enterThresholdEcdf: n=0→0.55, n<5→0.60, n<20→0.65, n≥20→0.70
 exitThresholdEcdf:  n=0→0.40, n<5→0.45, n<20→0.48, n≥20→0.50
-kEnterSustained:    B126 default 12 windows × 0.5s = 6s (adaptive, range [4,20])
+kEnterSustained:    B127 current ~6 windows × 0.5s = 3s (adapted down from 12 after May 20/21/23 zero-deep streak)
 ```
-
-At n=16 sessions (Sugato current): threshold=0.65. B126 gate default now 6s (was 10s in B125).
 
 ---
 
-## Top Next Candidate (B127) — do NOT build until B126 CI green + one validated session
+## Top Next (B128) — do NOT build until B127 CI green + one validated session
 
-**Binaural beats theta entrainment** — real-time binaural beat generator layered under reverb sonification.
-
-- Carrier ~200 Hz, beat = user's dominant theta peak (4–8 Hz) from FFT or fixed 5.5 Hz default
-- `SoundscapePlayer`: `setBinauralBeat(frequency: Float)` + stereo sine-wave generator (left: carrier, right: carrier + beat)
-- `DepthGate`: call `setBinauralBeat` at deep state entry with dominant theta freq
-- UserDefaults: `binauralBeatEnabled: Bool`, `binauralBeatHz: Float`
-- ~200 lines, no hardware change, works on Muse S
-- Neuroscience basis: theta binaural entrainment (4.5–6 Hz) directly stimulates occipital theta even without Oz electrode — highest-impact single remaining software feature
-
-### B127 Deferred list (from B118)
-- State-contingent coaching triggers (C1) — EEG-state-driven, not 360/600/900s timers
-- Differential diagnosis per induction-stall (C2) — highArousal vs overEfforting vs drowsy
-- Positive anchoring at ecdfDisplay ≥ 0.80 sustained ≥3 samples (C3)
-- Ectopic-RR filter (F8) — needs offline validation first
-- Phase-continuous iTPF binaural ramp (backlog B94)
+1. **State-contingent coaching (C1/C2)** — replace 360/600/900s timers with EEG-state-driven triggers + differential diagnosis. Foundation (C5 NDJSONCoach) already in B118.
+2. **Positive anchoring (C3)** — soft tone when ecdfDisplay ≥ 0.80 sustained ≥3 samples.
+3. **Ectopic-RR filter (F8)** — needs offline validation against historical sessions.
+4. **TrendsView time-of-day stratification** — `timeOfDay` field captured since B96; UTC→local needed.
 
 ---
 
@@ -184,18 +160,16 @@ At n=16 sessions (Sugato current): threshold=0.65. B126 gate default now 6s (was
 | File | Purpose |
 |------|---------|
 | `STATUS.md` | Canonical build state — READ FIRST |
-| `MusePlus/App.swift` | Session management, gate events, FAABarView, all 3 session-end paths |
-| `MusePlus/SessionRecorder.swift` | Score, NDJSON footer, denoise accumulators, gateEvent, driftAlert |
-| `MusePlus/Audio/DepthGate.swift` | Gate logic, deep state maintenance, BOCPD, alpha-theta, silence gap |
-| `MusePlus/Audio/SoundscapePlayer.swift` | Gain composition, reverb, silence gap, binaural |
-| `MusePlus/Audio/EnterSustainedShaping.swift` | Adaptive gate shaping, UserDefaults, streak counters |
-| `MusePlus/Pipeline/BayesianChangepointDetector.swift` | BOCPD NIG conjugate, logit-transform, Accelerate |
-| `MusePlus/SessionNarrative.swift` | Plain-English session summary, 6 dimensions |
+| `MusePlus/App.swift` | Session management, Option A priming (~line 1063), deep-entry Option B (~line 903) |
+| `MusePlus/Audio/SoundscapePlayer.swift` | AVAudioSourceNode binaural, gain composition, reverb |
+| `MusePlus/SessionRecorder.swift` | Score, NDJSON footer, metricDefinitions |
+| `MusePlus/Audio/DepthGate.swift` | Gate logic, BOCPD, alpha-theta, silence gap |
+| `MusePlus/Audio/EnterSustainedShaping.swift` | Adaptive gate shaping |
+| `MusePlus/Pipeline/ITPFTracker.swift` | Kalman cross-session theta peak tracker |
+| `MusePlus/Pipeline/EEGPipeline.swift` | `iTPFTracker` instance (line 35), onITPFUpdate callback |
+| `MusePlus/Pipeline/BayesianChangepointDetector.swift` | BOCPD NIG conjugate |
+| `MusePlus/SessionNarrative.swift` | Plain-English session summary |
 | `MusePlus/TrendsView.swift` | Cross-session charts |
-| `MusePlus/Pipeline/DepthScore.swift` | meditationIndex, FAA, betaZRaw, calibration |
-| `MusePlus/Pipeline/HRVPipeline.swift` | RMSSD, SDNN, SD1, SD2, DFA α1 |
-| `MusePlusTests/SessionNarrativeTests.swift` | 6 narrative tests (all pass after f311a01) |
-| `MusePlusTests/BayesianChangepointDetectorTests.swift` | 3 BOCPD tests |
 | `analysis/` | Python session analysis scripts |
 | `G:\My Drive\session_*.json` | Session JSON (Google Drive desktop sync) |
 
@@ -208,4 +182,4 @@ gh run list --limit 5            # CI status
 gh run view <id>                 # run details
 ```
 
-Console filter: category `Telemetry.recording` — calibration beta, score computation, gate events, drift alerts.
+Console filter: category `Telemetry.recording` — calibration beta, score computation, gate events, drift alerts, iTPF updates.

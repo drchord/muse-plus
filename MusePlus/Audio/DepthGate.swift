@@ -87,19 +87,6 @@ final class DepthGate {
     private var deepeningRingFilled = 0
     private var lastDeepeningCue:  Date = .distantPast
 
-    // B94 — FAA flow state
-    private var smoothedFaa:       Float = 0.0
-    private let kFaaAlpha:         Float = 0.10          // tau ≈ 5s at 0.5s update rate
-    private(set) var faaBaseline:  Float = -0.092        // population median; overwritten at calib end
-    private var faaBaselineLocked: Bool  = false
-    private let kFaaFlowMargin:    Float = 0.25          // ≈ top 25% of session FAA distribution
-    private let kFaaSustained:     Int   = 10            // 5s at 0.5s update rate
-    private var consecutiveFlow:   Int   = 0
-    private var consecutiveFlowExit: Int = 0
-    private(set) var inFlowState:  Bool  = false
-    private var lastFlowChime:     Date  = .distantPast
-    private let kFlowCooldown:     TimeInterval = 120.0
-
     // B126: alpha-theta crossover accumulator (calibrated, good-contact windows only).
     private var alphaThetaSum:             Double = 0   // Double for precision over long sessions
     private var alphaThetaCount:           Int    = 0
@@ -223,13 +210,6 @@ final class DepthGate {
         smoothedDisplay = kalmanDepth
         duckDisplay     = kDuckAlpha * displayNow + (1 - kDuckAlpha) * duckDisplay
 
-        // FAA smoothing and baseline lock at calibration end
-        smoothedFaa = kFaaAlpha * result.faa + (1 - kFaaAlpha) * smoothedFaa
-        if result.isCalibrated && !faaBaselineLocked {
-            faaBaseline       = smoothedFaa
-            faaBaselineLocked = true
-        }
-
         // B126: replaced applyProximityDuck() with continuous sonification (reverb-driven).
         // The old method is preserved for emergency rollback via Settings toggle (TBD post-B126).
         applyContinuousSonification()
@@ -341,32 +321,6 @@ final class DepthGate {
                 // B126: slower exit fade (5s vs 3s) — less abrupt re-entry of soundscape.
                 SoundscapePlayer.shared.setDeepStateGain(1.0, fadeDuration: kDeepExitFadeSec)
                 chime.playExitDeep()
-                inFlowState         = false
-                consecutiveFlow     = 0
-                consecutiveFlowExit = 0
-            }
-
-            // B94 — FAA flow state: deep + positive frontal asymmetry sustained 5s
-            let flowSignal = smoothedFaa > faaBaseline + kFaaFlowMargin
-            consecutiveFlow = flowSignal ? consecutiveFlow + 1 : 0
-            if consecutiveFlow >= kFaaSustained,
-               !inFlowState,
-               now.timeIntervalSince(lastFlowChime) >= kFlowCooldown {
-                inFlowState   = true
-                lastFlowChime = now
-                chime.playFlow()
-            }
-            // Exit flow only after 3 consecutive samples below threshold (1.5s hysteresis).
-            // Single-sample exit would collapse genuine flow state on momentary FAA noise.
-            if smoothedFaa < faaBaseline + kFaaFlowMargin * 0.3 {
-                consecutiveFlowExit += 1
-                if consecutiveFlowExit >= 3 {
-                    inFlowState         = false
-                    consecutiveFlow     = 0
-                    consecutiveFlowExit = 0
-                }
-            } else {
-                consecutiveFlowExit = 0
             }
         }
     }
@@ -433,13 +387,6 @@ final class DepthGate {
         deepeningRingFilled = 0
         lastDeepeningCue   = .distantPast
         lastKnownITPF      = nil
-        smoothedFaa       = 0.0
-        faaBaselineLocked = false
-        faaBaseline       = -0.092
-        consecutiveFlow     = 0
-        consecutiveFlowExit = 0
-        inFlowState         = false
-        lastFlowChime     = .distantPast
         alphaThetaSum              = 0.0
         alphaThetaCount            = 0
         alphaThetaCrossoverCount   = 0

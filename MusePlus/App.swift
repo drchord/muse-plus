@@ -229,6 +229,9 @@ final class Probe: ObservableObject {
     private var approachWindowCount   = 0
     private var lastApproachChimeDate = Date.distantPast
     private let approachChimeCooldown: TimeInterval = 120.0
+    // B128: main-thread snapshot of gate.smoothedDisplay — stall guards read this instead of
+    // reading gate directly (gate writes on scorer background thread; stall runs on main).
+    private var ecdfSnapshot: Float = 0
     // B76 had a 300s recording delay after calibration; B77 records from calibration end and
     // tags first 300s as "warmup" instead. No data loss; analysis can still filter warmup.
     private var recordingStartWork: DispatchWorkItem?  // legacy field; kept to avoid wider refactor
@@ -791,6 +794,8 @@ final class Probe: ObservableObject {
             self.depth = result
             let wasDeep = self.gate.inDeepState
             self.gate.update(result)
+            let _snap = self.gate.smoothedDisplay   // capture on writer's thread — no race
+            DispatchQueue.main.async { [weak self] in self?.ecdfSnapshot = _snap }
 
             // B102: approach zone — ecdfDisplay in [0.5×gdt, gdt), not in deep, sustained 20s.
             // Fires 360 Hz bowl so user knows they are close without disrupting concentration.
@@ -819,7 +824,7 @@ final class Probe: ObservableObject {
                             )
                         }
                     }
-                } else {
+                } else if gate.smoothedDisplay < 0.5 * gate.enterThresholdEcdf {
                     approachWindowCount = 0
                 }
             } else {
@@ -957,6 +962,10 @@ final class Probe: ObservableObject {
                           SessionRecorder.shared.isRecording,
                           !self.hasEverEnteredDeep,
                           !self.isPausedForReconnect else { return }
+                    guard self.ecdfSnapshot < 0.5 * self.gate.enterThresholdEcdf else {
+                        Telemetry.recording.notice("induction-stall-360 suppressed: ecdf=\(self.ecdfSnapshot, privacy: .public)")
+                        return
+                    }
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     ChimeEngine.shared.playInductionNudge()
                     // B102: spoken coaching fires after nudge chime + its 3s unduck settle.
@@ -991,6 +1000,10 @@ final class Probe: ObservableObject {
                           SessionRecorder.shared.isRecording,
                           !self.hasEverEnteredDeep,
                           !self.isPausedForReconnect else { return }
+                    guard self.ecdfSnapshot < 0.5 * self.gate.enterThresholdEcdf else {
+                        Telemetry.recording.notice("induction-stall-600 suppressed: ecdf=\(self.ecdfSnapshot, privacy: .public)")
+                        return
+                    }
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     let stall600Text = "Follow your breath. Breathe in slowly for five seconds, then out for five."
                     ChimeEngine.shared.speak(stall600Text)
@@ -1019,6 +1032,10 @@ final class Probe: ObservableObject {
                           SessionRecorder.shared.isRecording,
                           !self.hasEverEnteredDeep,
                           !self.isPausedForReconnect else { return }
+                    guard self.ecdfSnapshot < 0.5 * self.gate.enterThresholdEcdf else {
+                        Telemetry.recording.notice("induction-stall-900 suppressed: ecdf=\(self.ecdfSnapshot, privacy: .public)")
+                        return
+                    }
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     let stall900Text = "Let go of trying. You are already here. Just rest."
                     ChimeEngine.shared.speak(stall900Text)
@@ -1066,6 +1083,7 @@ final class Probe: ObservableObject {
                 if self.pipeline.iTPFTracker.isReliable,
                    let itpf = self.pipeline.iTPFTracker.currentEstimate {
                     SoundscapePlayer.shared.customBinauralHz = Double(max(4.0, min(8.0, itpf)))
+                    self.recordEvent(kind: "binaural-prime", detail: String(format: "optionA hz=%.2f", itpf))
                 }
                 // B126: BOCPD drift alert — write NDJSON record + soft haptic feedback.
                 // onDriftAlert fires on the EEG pipeline queue (background thread); UIKit haptics

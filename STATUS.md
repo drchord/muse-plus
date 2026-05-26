@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-24 (B126 — closed-loop depth: adaptive gate shaping, alpha-theta crossover, ECDF→reverb sonification, deep state maintenance, BOCPD drift alert, SessionNarrative + 8-issue audit-fix pass. Pushed to origin/main. CI pending.)
+**Last updated:** 2026-05-25 (B127 — binaural theta entrainment via AVAudioSourceNode streaming; iTPF-2.0 dead-write bug fixed; metric definition corrections. Pushed to origin/main. CI pending.)
 
 ---
 
@@ -31,7 +31,72 @@
 | **120** | — | (1) Fix `save()` + `CrashRecovery` file protection: `.completeFileProtection` → `.completeFileProtectionUnlessOpen`. (2) Fix `synthesiseRecord()`: decode full NDJSONFooter → 19 biomarkers on crash-recovery. (3) Fix `attachCalibrationBeta` guard: `isRecording` → `current != nil`. (4) Add `sdnn`/`sd1`/`sd2` to NDJSONFooter + `appendFooter()` + `synthesiseRecord()`. (5) Git config: user.name → "Sugato Chakravarty". | ✅ |
 | **121** | — | Temporal contact gate: `doConnect()` defers `startCalibration()` until TP9 + TP10 `hsiStableTier` both ≤ 2. 15s timeout force-starts. `FitStabilityBannerView` added. | ✅ Session confirmed: betaZScore=50, physiologicalScore=97, calibrationBetaAttached=True |
 | **122→125** | — | 9 new footer fields (betaZRaw, signal quality ×3, relative band power ×3, ecdfMax, ecdfP90), NDJSONGateEvent, FAABarView color/label fix, FAA r=-0.76→r=-0.43 correction. Code review fixes: calBetaStd guard, ecdf main-phase scope, appendGateEvent comment. | ✅ CI run 26341344481, B125 green |
-| **126** | — | Closed-loop depth: EnterSustainedShaping (adaptive default 12→6s, ±streak), alpha-theta crossover tracking (NDJSONFooter + DepthResult), continuous ECDF→reverb sonification (AVAudioUnitReverb wetDryMix), deep state maintenance (30s initial fade, 2-min silence gaps 8-12s, 60s chime blackout), BOCPD drift alert (BayesianChangepointDetector NIG conjugate + haptic), SessionNarrative plain-English summary, SessionSummarySheet narrative + gate-requirement UI. 8-issue audit-fix pass (f311a01). | 🟡 CI pending (pushed 2026-05-24) |
+| **126** | — | Closed-loop depth: EnterSustainedShaping (adaptive default 12→6s, ±streak), alpha-theta crossover tracking (NDJSONFooter + DepthResult), continuous ECDF→reverb sonification (AVAudioUnitReverb wetDryMix), deep state maintenance (30s initial fade, 2-min silence gaps 8-12s, 60s chime blackout), BOCPD drift alert (BayesianChangepointDetector NIG conjugate + haptic), SessionNarrative plain-English summary, SessionSummarySheet narrative + gate-requirement UI. 8-issue audit-fix pass (f311a01). | ✅ CI run 26358648681. Validated 2026-05-25: S1 deepFraction=0.954 (alphaThetaCrossoverCount=143, crossoverFirst=0.53s), S2 deepFraction=0.890. |
+| **127** | — | Binaural theta entrainment: AVAudioSourceNode streaming render callback (phase-continuous, ~23ms update latency), ITPFTracker session-start priming (Option A), live deep-entry update (Option B now live via Option C), iTPF-2.0 dead-write bug fixed, alphaThetaMean + alphaThetaCrossoverCount metric descriptions corrected. | 🟡 CI pending (pushed 2026-05-25) |
+
+---
+
+## B127 Changes (2026-05-25)
+
+### Motivation — B126 validated sessions + binaural dead-write audit
+
+Two B126 sessions ran this morning (2026-05-25):
+- **S1 (0406):** score=96, deepFraction=0.954 (best ever), rmssd=72.1ms, alphaThetaCrossoverCount=143, crossoverFirst=0.53s, iTPF median=5.78 Hz. Theta broke through alpha early and held all session.
+- **S2 (0622):** score=95, deepFraction=0.890, rmssd=66.9ms, iTPF median=5.63 Hz. Alpha-dominant (residual from S1 back-to-back). Both sessions confirmed B126 working correctly.
+
+Root cause of existing binaural dead-write: `startNode` uses `options:.loops` with no completion callback. Pre-generated 120s buffer loops infinitely. ALL `customBinauralHz` writes during a session are dead — frequency cannot change until the layer is stopped and restarted (120s minimum latency). The `iTPF - 2.0` tier logic in `updateAdaptiveDepth` was also wrong (5.78 - 2.0 = 3.78 Hz = delta range, not theta).
+
+### Architecture Change
+
+Replaced `AVAudioPlayerNode` + pre-generated buffer for binaural with `AVAudioSourceNode` streaming render callback.
+
+**Engine graph (before):** `AVAudioPlayerNode(binaural) → binauralEQ → mainMixerNode → ambientReverb → output`
+**Engine graph (after):** `AVAudioSourceNode(binaural) → binauralEQ → mainMixerNode → ambientReverb → output`
+
+The `AVAudioSourceNode` render callback maintains two phase accumulators (`phaseL`, `phaseR`) and generates sin waves sample-by-sample. Reading `_binauralBeatHz` (Double) and `_binauralAmp` (Float) on each ~23ms audio render frame. Main-thread writes to these values are single-instruction on ARM64 (aligned 64/32-bit store) — effectively atomic without locks.
+
+### Option A — Session-start frequency priming (App.swift)
+
+At `SessionRecorder.shared.startSession()`, if `pipeline.iTPFTracker.isReliable` (sessionCount ≥ 3 AND cleanMinutes ≥ 10), `customBinauralHz` is set from the Kalman cross-session iTPF estimate. For today's data: ~5.78 Hz from session start instead of the 6.0 Hz preset default. Falls back silently to preset if tracker not yet reliable.
+
+### Option B — Deep-entry live update
+
+`setAdaptiveBinauralIfActive(hz:)` already existed in App.swift (line 903-904). With Option C as the transport layer, this write is now live on the next audio frame (~23ms). Comment corrected from "≤120s latency" to "~23ms". No code change to the call site needed.
+
+### Option C — AVAudioSourceNode streaming
+
+`makeBinauralSourceNode(format:)` creates the source node. Phase accumulators captured in the render block closure (written only from audio thread). `_binauralBeatHz` read from audio thread, written from main thread (single-instruction on ARM64).
+
+All volume control paths updated for binaural source node: `activate`, `deactivate`, `setVolume`, `applyProximityGain`, `stopAll`, `fade`, `resumeActiveLayers`. `startLayer()` guarded against binaural. `decrementBinauralFade` restart block removed (`_binauralAmp` now updates via `binauralFadeLevel.didSet`).
+
+### Fixes
+
+| Fix | Details |
+|-----|---------|
+| `updateAdaptiveDepth` tier logic | Removed `iTPF - 2.0` offset (was pushing beat to ~3.78 Hz = delta for typical iTPF=5.78). Now uses direct iTPF clamped to [4, 8] Hz with 0.1 Hz hysteresis. Returns early if iTPF nil (tracker not reliable). |
+| `activate(.binaural)` missing `ensureRunning()` | Bug caught in pre-push audit: binaural-only activation after session end would silently produce nothing (engine stopped by `stopAll()`). Fixed: `ensureRunning()` called in binaural activate path. |
+| `alphaThetaMean` description | Was "Mean of (frontalAlpha − frontalTheta) in log10 µV²". Actual: theta/alpha ratio in linear band power. Fixed in SessionRecorder.swift metricDefinitions. |
+| `alphaThetaCrossoverCount` description | Was "alphaTheta < 0". Actual: theta/alpha ratio > 1.0. Fixed. |
+
+### B127 Validation Checklist (first session on B127)
+
+- [ ] Binaural audible at correct Hz. If ITPFTracker.isReliable (≥3 sessions): starts at ~5.78 Hz, not 6.0 Hz preset
+- [ ] No click or gap at deep state entry — frequency update phase-continuous (~23ms)
+- [ ] `updateAdaptiveDepth` logs: `customBinauralHz` tracking iTPF within 0.10 Hz hysteresis band
+- [ ] `decrementBinauralFade` still works: binauralFadeLevel decrements after successful sessions, amplitude reflects fade level immediately
+- [ ] Binaural survives engine restart (BT route change): source node resumes with correct volume after `resumeActiveLayers()`
+
+### B127 Architecture Invariants
+
+**B127+:**
+- Binaural uses `AVAudioSourceNode` + phase accumulator. No pre-generated buffer, no `startNode(buffer:options:.loops)`.
+- `customBinauralHz` is a computed property. Writing it also writes `_binauralBeatHz` (render callback reads this). Never bypass the setter.
+- `_binauralBeatHz` and `_binauralAmp` are read by audio render callback (audio thread). Written on main thread only. ARM64 aligned store is single-instruction — no lock needed, but also: never write these from background threads.
+- `activate(.binaural)` calls `ensureRunning()` before setting volume — engine may be stopped after session end.
+- `binauralFadeLevel.didSet` updates `_binauralAmp`. Any path that changes `binauralFadeLevel` automatically propagates amplitude to the render callback.
+- `startLayer()` guards `layer != .binaural` — binaural must never go through the buffer-generation path.
+- `updateAdaptiveDepth`: returns early if `iTPF == nil` (tracker not reliable). Never falls back to `10.0` (alpha) — theta band only.
+- ITPFTracker.isReliable requires `sessionCount >= 3 AND cleanMinutes >= 10.0`. Option A silent no-op until then.
 
 ---
 
@@ -818,6 +883,15 @@ Full analysis artifacts: `C:\Users\sugat\MusePlus\analysis\` (sessions_extracted
 - `SessionRecord.enterThresholdAtSession` stored at session end — used by depth trace chart.
 - PersonalZDistribution ingests main-phase samples only — warmup excluded.
 
+**B127+:**
+- Binaural = `AVAudioSourceNode` + phase accumulators. No pre-generated buffer or `scheduleBuffer(options:.loops)` for binaural.
+- `customBinauralHz` computed property. Setter always writes `_binauralBeatHz`. Never assign `_binauralBeatHz` directly outside `SoundscapePlayer`.
+- `_binauralBeatHz` / `_binauralAmp`: main-thread writes only. ARM64 single-instruction store. Audio render callback reads without lock.
+- `activate(.binaural)` calls `ensureRunning()` — engine may be stopped after session end.
+- `startLayer()` guard `layer != .binaural` — binaural never goes through buffer generation.
+- `updateAdaptiveDepth`: returns early if `iTPF nil`. Targets [4, 8] Hz theta only. No alpha (10 Hz) fallback tier.
+- ITPFTracker session-start priming: `isReliable` = sessionCount ≥ 3 AND cleanMinutes ≥ 10.
+
 **B94+:**
 - `DepthGate.smoothedDisplay` is Kalman-filtered (not EMA). `duckDisplay` (EMA α=0.095) used exclusively for proximity duck gain.
 - `DepthGate.inFlowState` — FAA flow detection, requires `inDeepState`. Reset on deep-state exit and session reset.
@@ -860,18 +934,19 @@ Full analysis artifacts: `C:\Users\sugat\MusePlus\analysis\` (sessions_extracted
 ## How to Resume
 
 1. Read STATUS.md (this file) — canonical.
-2. Read CONTINUATION_PROMPT.md — current state, what B126 shipped, next candidates.
-3. `gh run list --limit 5` — verify B126 CI green (was pending as of 2026-05-24 push).
-4. Install TestFlight build, run B126 Validation Checklist above on physical device.
+2. Read CONTINUATION_PROMPT.md — current state, what B127 shipped, next candidates.
+3. `gh run list --limit 5` — verify B127 CI green (pending as of 2026-05-25 push).
+4. Install TestFlight build, run B127 Validation Checklist above on physical device.
 5. Hard rule: never push without explicit "go" per `MusePlus/CLAUDE.md`.
 
-## Top Next Candidate (B127)
+## Top Next Candidate (B128)
 
-**Binaural beats theta entrainment** — real-time binaural beat generator at user's dominant theta peak frequency, layered under existing reverb sonification. Carrier ~200 Hz, beat frequency from FFT peak in 4–8 Hz band. Requires:
-- `SoundscapePlayer`: new `setBinauralBeat(frequency: Float)` + stereo sine-wave generator (left: carrier, right: carrier + beat)
-- `DepthGate`: read dominant theta peak from `smoothedDisplayHistory` FFT (or fixed 5.5 Hz default)
-- UserDefault: `binauralBeatEnabled` Bool + `binauralBeatHz` Float (override manual)
-- No new hardware needed — works on existing Muse S
-- Estimated: ~200 lines, ~1 session day
+**Validate B127 first** — run ≥1 real session on B127 TestFlight, confirm binaural at correct iTPF Hz, no click at deep entry, amplitude fade working.
 
-Do NOT implement until B126 CI is green and one real session validates B126 checklist.
+**After validation, candidates:**
+1. **State-contingent coaching (C1/C2)** — replace 360/600/900s timers with EEG-state-driven triggers + differential diagnosis (highArousal vs overEfforting vs drowsy). Foundation (C5 NDJSONCoach) already in B118.
+2. **Positive anchoring (C3)** — soft tone when ecdfDisplay ≥ 0.80 sustained ≥3 samples.
+3. **Ectopic-RR filter (F8)** — needs offline validation against historical sessions first.
+4. **TrendsView time-of-day stratification** — `timeOfDay` field captured since B96; UTC→local correction needed.
+
+Do NOT implement B128 until B127 CI green + one validated session.
