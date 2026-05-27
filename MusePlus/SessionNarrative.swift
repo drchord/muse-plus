@@ -72,13 +72,16 @@ struct SessionNarrative {
         if deepF > 0 {
             return "You touched the deep state briefly today — the gate currently requires \(secStr) seconds of sustained focus."
         }
-        // No entry. Reach for ecdfMax if present.
+        // No entry. Show personal-history percentile and gap to threshold.
         if let m = r.ecdfMax {
-            let pct = Int((m * 100).rounded())
-            if pct >= 80 {
-                return "You came very close to deep state — your peak depth was \(pct)% of what's needed. The gate currently requires \(secStr) seconds of sustained focus."
+            let myPct     = Int((m * 100).rounded())
+            let thresh    = r.enterThresholdAtSession ?? 0.70
+            let threshPct = Int((thresh * 100).rounded())
+            let gap       = threshPct - myPct
+            if gap <= 3 {
+                return "Your best depth today was at the \(myPct)th percentile of your personal history — just \(gap) point\(gap == 1 ? "" : "s") below the \(threshPct)th-percentile gate. The gate requires \(secStr) seconds sustained above it."
             }
-            return "You reached about \(pct)% of the depth needed for entry. The gate currently requires \(secStr) seconds of sustained focus."
+            return "Your best depth today was at the \(myPct)th percentile of your personal history — \(gap) points below the \(threshPct)th-percentile gate. The gate requires \(secStr) seconds sustained."
         }
         return "You did not reach deep state today. The gate currently requires \(secStr) seconds of sustained focus."
     }

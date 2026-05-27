@@ -185,6 +185,9 @@ struct SessionRecord: Codable, Identifiable {
     var alphaThetaMean:              Float?  = nil
     var alphaThetaCrossoverCount:    Int?    = nil
     var alphaThetaCrossoverFirstTime: Double? = nil
+    // B129: aperiodic slope drift — lateMainChiMean minus warmupChiMean. Positive = slope steepened
+    // (typical during deep absorption). >|0.3| triggers telemetry notice. Nil if <5 chi samples.
+    var chiDrift: Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -311,6 +314,8 @@ private struct NDJSONFooter: Codable {
     let alphaThetaMean:              Float?
     let alphaThetaCrossoverCount:    Int?     // windows where theta > alpha
     let alphaThetaCrossoverFirstTime: Double? // seconds from session start to first crossover; nil if none
+    // B129: aperiodic slope drift (lateMainChiMean - warmupChiMean). Nil if <5 chi samples in either window.
+    let chiDrift: Float?
     // B117 F9: one-line formulas for every exported metric. Self-documenting telemetry.
     let metricDefinitions: [String: String]?
 }
@@ -630,11 +635,19 @@ final class SessionRecorder: ObservableObject {
         rec.summarySampleCount = rec.samples.count
         rec.deepFraction       = durSec > 0 ? rec.deepMinutes * 60.0 / durSec : 0
 
-        // B94 quality score: deep fraction (40) + ecdf smoothness (25) + contact (35).
+        // B129 quality score: deep fraction (30) + approach zone (10) + ecdf smoothness (25) + contact (35).
+        // deepScore reduced 40→30; approachScore rewards time near the gate even without entry.
+        // Approach zone: ecdfDisplay ∈ [0.5×threshold, threshold). Full 10pts at 30% of session in zone.
         let mainSamples: [SessionSample] = rec.samples.filter { $0.phase == "main" }
         let ecdfVals: [Float]            = mainSamples.compactMap(\.ecdfDisplay)
         let deepFrac: Float              = Float(rec.deepFraction ?? 0)
-        let deepScore: Float             = min(40.0, deepFrac / 0.70 * 40.0)
+        let deepScore: Float             = min(30.0, deepFrac / 0.70 * 30.0)
+
+        let thresh: Float      = rec.enterThresholdAtSession ?? 0.70
+        let halfThresh: Float  = 0.5 * thresh
+        let approachCount      = ecdfVals.filter { $0 >= halfThresh && $0 < thresh }.count
+        let approachFrac: Float = ecdfVals.isEmpty ? 0 : Float(approachCount) / Float(ecdfVals.count)
+        let approachScore: Float = min(10.0, approachFrac / 0.30 * 10.0)
 
         let smoothScore: Float
         if ecdfVals.count > 1 {
@@ -648,7 +661,7 @@ final class SessionRecorder: ObservableObject {
         let frontalGoodCount: Int = mainSamples.filter { $0.frontalGood == true }.count
         let frontalGoodFrac: Float = mainSamples.isEmpty ? 0.0
             : Float(frontalGoodCount) / Float(mainSamples.count)
-        rec.qualityScore = Int((deepScore + smoothScore + frontalGoodFrac * 35.0).rounded())
+        rec.qualityScore = Int((deepScore + approachScore + smoothScore + frontalGoodFrac * 35.0).rounded())
 
         // B96 meditationIndex / ecdfDisplay Pearson correlation.
         let paired: [(Float, Float)] = mainSamples.compactMap { s -> (Float, Float)? in
@@ -684,6 +697,20 @@ final class SessionRecorder: ObservableObject {
             let logBeta  = rec.mainBetaMean  ?? Float(0)
             let logAlpha = rec.mainAlphaMean ?? Float(0)
             Telemetry.recording.notice("mainBeta=\(logBeta, privacy: .public) mainAlpha=\(logAlpha, privacy: .public) n=\(mainSamples.count, privacy: .public)")
+        }
+
+        // B129: aperiodic slope drift — warmup chi vs late-main chi. Positive = slope steepened.
+        let warmupChiVals: [Float]   = rec.samples.filter { $0.phase == "warmup" }.compactMap(\.aperiodicSlopeMean)
+        let mainChiVals:   [Float]   = mainSamples.compactMap(\.aperiodicSlopeMean)
+        let lateMainChiVals: [Float] = mainChiVals.count >= 10 ? Array(mainChiVals.suffix(120)) : mainChiVals
+        if warmupChiVals.count >= 5 && lateMainChiVals.count >= 5 {
+            let earlyMean = warmupChiVals.reduce(0, +) / Float(warmupChiVals.count)
+            let lateMean  = lateMainChiVals.reduce(0, +) / Float(lateMainChiVals.count)
+            let drift     = lateMean - earlyMean
+            rec.chiDrift  = drift
+            if abs(drift) > 0.3 {
+                Telemetry.recording.notice("chiDrift=\(drift, privacy: .public) earlyMean=\(earlyMean, privacy: .public) lateMean=\(lateMean, privacy: .public) — aperiodic slope shifted during session")
+            }
         }
 
         // B100 warmup FAA mean.
@@ -1244,6 +1271,7 @@ final class SessionRecorder: ObservableObject {
             alphaThetaMean:              rec.alphaThetaMean,
             alphaThetaCrossoverCount:    rec.alphaThetaCrossoverCount,
             alphaThetaCrossoverFirstTime: rec.alphaThetaCrossoverFirstTime,
+            chiDrift:                rec.chiDrift,
             metricDefinitions:       SessionRecorder.metricDefinitions
         )
         appendLine(footer)
@@ -1266,7 +1294,7 @@ final class SessionRecorder: ObservableObject {
         "meditationIndexCorrected": "Same formula as meditationIndex but on aperiodic-corrected band powers (FOOOF-style 1/f subtracted); equals raw when chi unavailable. SOURCE=Pipeline/AperiodicCorrection.swift.",
         "betaZScore": "bz = (calibrationBetaMean - mainBetaMean) / max(calibrationBetaStd, 0.10); score = clamp(bz/2.0*50, 0, 50). Meaningless unless calibrationBetaAttached=true. SOURCE=SessionRecorder.swift:~1013.",
         "rmssdScore": "Piecewise ABSOLUTE thresholds (B108+): sr<40→sr/40*10; 40≤sr<65→10+(sr-40)/25*15; 65≤sr<100→min(30,25+(sr-65)/35*5); sr≥100→30. Calibration-INDEPENDENT (was relative pre-B108). SOURCE=SessionRecorder.swift:~1018-1033.",
-        "coherenceScore": "frontalGoodFrac * 20.0 where frontalGoodFrac is fraction of main-phase samples with frontalGood=true. SOURCE=SessionRecorder.swift:~1034.",
+        "coherenceScore": "Contact quality (NOT EEG coherence): frontalGoodFrac × 20.0, where frontalGoodFrac = fraction of main-phase samples with frontalGood=true (AF7+AF8 electrode contact flag). Legacy misnomer — JSON key preserved for backwards compatibility. SOURCE=SessionRecorder.swift:~1034.",
         "physiologicalScore": "Int(round(betaZScore + rmssdScore + coherenceScore)); range 0-100. SOURCE=SessionRecorder.swift:~1036.",
         "rmssdDepthDelta": "mean RMSSD at ecdfDisplay>=0.50 minus mean at ecdfDisplay<0.25 (ms). Positive = HRV rises during depth. nil if either bucket <5 samples. SOURCE=B97 spec.",
         "dfaAlpha1": "Detrended Fluctuation Analysis short-range scaling exponent. ~1.0=healthy pink-noise resting; ->0.5=random walk (may indicate artifact); >1.2=Brownian. SOURCE=Pipeline/HRVPipeline.swift computeDFAAlpha1.",
@@ -1285,7 +1313,7 @@ final class SessionRecorder: ObservableObject {
         "calibrationIndexMean": "median of meditationIndex over calibration samples (robust to outliers). SOURCE=Pipeline/DepthScore.swift:~137.",
         "calibrationIndexStd": "max(MAD*1.4826, 0.10) over calibration samples; consistent-Gaussian-σ estimate. SOURCE=Pipeline/DepthScore.swift:~149.",
         "calibrationRmssd": "mean RMSSD computed over calibration-window RR intervals (ms).",
-        "qualityScore": "deep fraction (40) + ecdf smoothness (25) + contact quality (35); 0-100. SOURCE=B94 spec.",
+        "qualityScore": "deep fraction (30) + approach zone (10) + ecdf smoothness (25) + contact quality (35); 0-100. Approach zone = fraction of main-phase samples with ecdfDisplay ∈ [0.5×threshold, threshold); full 10pts at 30% of session in zone. SOURCE=B129.",
         "deepFraction": "fraction of session time where gate.inDeepState==true; [0,1].",
         "enterThresholdAtSession": "ecdfDisplay threshold required to enter deep state (default 0.65).",
         "fitEventsPerMin": "count of contact-state allGood flips per minute; lower=better.",
@@ -1303,7 +1331,8 @@ final class SessionRecorder: ObservableObject {
         "enterSustainedAtSession": "Sustained-window requirement active for this session (windows × 0.5s = seconds). Adapts via EnterSustainedShaping: 3 zero-deep sessions → -2 windows (min 4); 3 hit sessions → +1 window (max 20). Default 12 (6s). B126.",
         "alphaThetaMean": "Mean of (frontalTheta / frontalAlpha) ratio in linear band power, averaged over all calibrated windows. Values >1.0 = theta-dominant. Computed per channel then averaged: (af7Theta/af7Alpha + af8Theta/af8Alpha)/2. B126.",
         "alphaThetaCrossoverCount": "Count of 0.5s windows where frontal theta/alpha ratio > 1.0 (theta exceeds alpha in linear band power). Each window ≈ 2 EEG FFT frames. B126.",
-        "alphaThetaCrossoverFirstTime": "Seconds from session start to first window where theta > alpha. nil if no crossover occurred. B126."
+        "alphaThetaCrossoverFirstTime": "Seconds from session start to first window where theta > alpha. nil if no crossover occurred. B126.",
+        "chiDrift": "Aperiodic slope drift: mean χ over last 120 main-phase samples minus mean χ over warmup-phase samples (chi = IRASA 1/f exponent, AperiodicSlope.swift). Positive = slope steepened (typical in deep absorption); >|0.3| triggers telemetry notice. Nil if <5 chi samples in either window. B129."
     ]
 
     private func closeNDJSONHandle() {
@@ -1610,6 +1639,7 @@ final class SessionRecorder: ObservableObject {
             rec.betaRelMean              = f.betaRelMean
             rec.ecdfMax                  = f.ecdfMax
             rec.ecdfP90                  = f.ecdfP90
+            rec.chiDrift                 = f.chiDrift
         }
         return rec
     }

@@ -97,6 +97,27 @@ enum WarmupFAAReadiness {
     }
 }
 
+// MARK: - BatteryWarning
+
+// B129: Pre-session battery warning. Thresholds based on Muse spec (~5hr battery life = ~20%/hr drain).
+// Critical (<15%): session will end before 60 min at spec drain rate (~45 min max).
+// Low (15–24%): may not complete a full 60-minute session (~45–72 min of headroom).
+struct BatteryWarning: Identifiable {
+    let id = UUID()
+    let pct: Int
+    let isCritical: Bool
+
+    var title: String {
+        isCritical ? "Battery Too Low for a Full Session" : "Low Battery"
+    }
+    var message: String {
+        let estMinutes = Int(Double(pct) / 20.0 * 60)
+        return isCritical
+            ? "Headband is at \(pct)%. At typical drain rates the session will end in ~\(estMinutes) minutes — not enough for a full hour. Charge to at least 25% before starting."
+            : "Headband is at \(pct)%. Battery may be tight for a 60-minute session (~\(estMinutes) min of headroom). Consider charging first."
+    }
+}
+
 // MARK: - Probe
 
 final class Probe: ObservableObject {
@@ -218,6 +239,9 @@ final class Probe: ObservableObject {
     // B99: warmup FAA readiness + induction-stall alert state
     @Published var warmupFAAReadiness: WarmupFAAReadiness? = nil
     @Published var showInductionStall: Bool = false
+    // B129: pre-session battery warning
+    @Published var batteryWarning: BatteryWarning? = nil
+    private var batteryCheckedThisSession = false
     private var warmupFAASamples:    [Float] = []
     private var warmupTransitionFired = false
     private var hasEverEnteredDeep    = false
@@ -327,6 +351,9 @@ final class Probe: ObservableObject {
                     // B80(C): reset diagnostic counters and start liveness watchdog.
                     self?.sessionDiagCounters = SessionDiagCounters()
                     self?.sessionEvents = []
+                    // B129: reset battery check so the warning can fire again on the next session.
+                    self?.batteryCheckedThisSession = false
+                    self?.batteryWarning = nil
                     self?.fitEventCount = 0
                     self?.lastHsiRaw = []
                     LivenessWatchdog.shared.start()
@@ -479,7 +506,17 @@ final class Probe: ObservableObject {
 
         client.battery
             .receive(on: RunLoop.main)
-            .assign(to: &$battery)
+            .sink { [weak self] batt in
+                guard let self else { return }
+                self.battery = batt
+                // B129: one-shot battery check per session. Fires on RunLoop.main (safe to write @Published).
+                // batt > 0 guards against the SDK emitting 0 before the first real read.
+                if !self.batteryCheckedThisSession && batt > 0 {
+                    self.batteryCheckedThisSession = true
+                    self.checkBatteryBeforeSession(pct: Int(batt.rounded()))
+                }
+            }
+            .store(in: &bag)
 
         // B80: configure liveness watchdog callback before subscribing to eegPacket.
         LivenessWatchdog.shared.onStallDetected = { [weak self] gap in
@@ -968,8 +1005,9 @@ final class Probe: ObservableObject {
                     }
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     ChimeEngine.shared.playInductionNudge()
-                    // B102: spoken coaching fires after nudge chime + its 3s unduck settle.
-                    let stall360Text = "Soften your focus. Stop trying to meditate."
+                    // B129: spoken coaching is state-contingent — fires after nudge chime + 3s unduck settle.
+                    let snap360      = self.coachSnapshot()
+                    let stall360Text = self.stallMessage(atMinute: 6, snapshot: snap360)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
                         ChimeEngine.shared.speak(stall360Text)
                     }
@@ -981,7 +1019,7 @@ final class Probe: ObservableObject {
                         diagnosis: "no-deep",
                         intervention: "chime+speech+haptic",
                         speechText: stall360Text,
-                        snapshot: self.coachSnapshot()
+                        snapshot: snap360
                     )
                     withAnimation { self.showInductionStall = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
@@ -1005,7 +1043,8 @@ final class Probe: ObservableObject {
                         return
                     }
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    let stall600Text = "Follow your breath. Breathe in slowly for five seconds, then out for five."
+                    let snap600      = self.coachSnapshot()
+                    let stall600Text = self.stallMessage(atMinute: 10, snapshot: snap600)
                     ChimeEngine.shared.speak(stall600Text)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
                         ChimeEngine.shared.playBreathPacer(cycles: 3)
@@ -1018,7 +1057,7 @@ final class Probe: ObservableObject {
                         diagnosis: "no-deep",
                         intervention: "speech+breath-pacer+haptic",
                         speechText: stall600Text,
-                        snapshot: self.coachSnapshot()
+                        snapshot: snap600
                     )
                 }
                 self.inductionStallTimer600 = stallWork600
@@ -1037,7 +1076,8 @@ final class Probe: ObservableObject {
                         return
                     }
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    let stall900Text = "Let go of trying. You are already here. Just rest."
+                    let snap900      = self.coachSnapshot()
+                    let stall900Text = self.stallMessage(atMinute: 15, snapshot: snap900)
                     ChimeEngine.shared.speak(stall900Text)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                         ChimeEngine.shared.playInductionNudge()
@@ -1050,7 +1090,7 @@ final class Probe: ObservableObject {
                         diagnosis: "no-deep",
                         intervention: "speech+chime+haptic",
                         speechText: stall900Text,
-                        snapshot: self.coachSnapshot()
+                        snapshot: snap900
                     )
                 }
                 self.inductionStallTimer900 = stallWork900
@@ -1292,6 +1332,37 @@ final class Probe: ObservableObject {
         )
     }
 
+    // B129: state-contingent stall coaching. Selects message based on live EEG/HR state.
+    private func stallMessage(atMinute minute: Int, snapshot: CoachStateSnapshot) -> String {
+        let ecdf    = snapshot.ecdfDisplay ?? 0
+        let alpha   = snapshot.alpha       ?? 0
+        let theta   = snapshot.theta       ?? 0
+        let thresh  = gate.enterThresholdEcdf
+        let near    = ecdf >= 0.75 * thresh
+        let thetaUp = theta > alpha
+
+        switch minute {
+        case 6:
+            if near    { return "You're very close — release the watching and let the depth come to you." }
+            if thetaUp { return "Your brain is already moving in the right direction. Soften the effort and stay." }
+            return "Soften your focus. Stop trying to meditate."
+        case 10:
+            if let hr = snapshot.heartRateBPM, hr > 75 {
+                return "Your heart is still active. Follow your breath — in for five seconds, out for five."
+            }
+            if alpha > theta * 1.5 {
+                return "Alpha is leading. Slow the breath to let theta rise — in for five seconds, out for five."
+            }
+            return "Follow your breath. Breathe in slowly for five seconds, then out for five."
+        case 15:
+            if near    { return "You've been at the edge for fifteen minutes. Stop measuring — just breathe and rest." }
+            if thetaUp { return "Your brain is reaching for depth but can't hold it. Let go of the effort — rest." }
+            return "Let go of trying. You are already here. Just rest."
+        default:
+            return "Stay with your practice."
+        }
+    }
+
     /// B96: Rolling-median HR filter. Rejects values where |bpm - median5| > 35.
     /// Physiologically impossible values (30, 192 BPM seen in session data) are sensor artifacts.
     /// B117: Added absolute bounds gate [35, 120] before buffer append.
@@ -1444,6 +1515,17 @@ final class Probe: ObservableObject {
     // or .disconnected. Prevents the button staying permanently in spinner state if the
     // SDK silently fails (e.g., headband out of range after getMuses() returned it).
     private var connectingTimeoutWork: DispatchWorkItem?
+
+    // B129: Battery thresholds for a 60-minute session.
+    // Muse spec: ~5hr battery life → ~20%/hr drain.
+    //   <15%: ~45 min max at spec rate — won't complete a full hour.
+    //  15–24%: ~45–72 min — may be tight.
+    //    ≥25%: ~75+ min — sufficient.
+    private func checkBatteryBeforeSession(pct: Int) {
+        guard pct < 25 else { return }
+        batteryWarning = BatteryWarning(pct: pct, isCritical: pct < 15)
+        Telemetry.recording.notice("B129 battery warning level=\(pct < 15 ? "critical" : "low", privacy: .public) pct=\(pct, privacy: .public)")
+    }
 
     func connectFirst() {
         guard !isConnecting, connection != "Connected" else { return }
@@ -2173,6 +2255,19 @@ private struct MeditationView: View {
                     .padding(.top, 60)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
+        }
+        // B129: pre-session battery warning alert
+        .alert(
+            probe.batteryWarning?.title ?? "",
+            isPresented: Binding(
+                get: { probe.batteryWarning != nil },
+                set: { if !$0 { probe.batteryWarning = nil } }
+            ),
+            presenting: probe.batteryWarning
+        ) { _ in
+            Button("OK") { probe.batteryWarning = nil }
+        } message: { warning in
+            Text(warning.message)
         }
         // D3: "Session saved" toast — driven by probe.sessionSavedToast (set in endSessionGracefully).
         .toast(message: $toastMessage)
