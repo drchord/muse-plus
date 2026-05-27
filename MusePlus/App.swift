@@ -3229,8 +3229,9 @@ private struct DepthTraceChart: View {
 private struct SessionSummarySheet: View {
     let record: SessionRecord
     let onDismiss: () -> Void
-    @State private var displayScore: Int = 0
-    @State private var showTrends = false
+    @State private var displayScore:   Int  = 0
+    @State private var showTrends     = false
+    @State private var showDashboard  = false
 
     var body: some View {
         NavigationStack {
@@ -3311,9 +3312,19 @@ private struct SessionSummarySheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Trends") { showTrends = true }
                 }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showDashboard = true
+                    } label: {
+                        Label("Dashboard", systemImage: "chart.xyaxis.line")
+                    }
+                }
             }
             .sheet(isPresented: $showTrends) {
                 NavigationStack { TrendsView() }
+            }
+            .sheet(isPresented: $showDashboard) {
+                NavigationStack { SessionDashboardView(record: record) }
             }
         }
     }

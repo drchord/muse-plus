@@ -1,6 +1,6 @@
 # MusePlus — STATUS
 
-**Last updated:** 2026-05-25 (B127 — binaural theta entrainment via AVAudioSourceNode streaming; iTPF-2.0 dead-write bug fixed; metric definition corrections. Pushed to origin/main. CI pending.)
+**Last updated:** 2026-05-27 (B130 — SessionDashboardView post-session review: 4 annotated charts + plain-English explanations + actionable items. Uncommitted — awaiting "go".)
 
 ---
 
@@ -24,15 +24,128 @@
 | **103** | 106 | Spotify depth-responsive volume (6 bugs fixed) | ✅ |
 | **107** | 112 | HRV scalars (SDNN/SD1/SD2/DFA α1), physiologicalScore, BLE resilience, TrendsView expansion | ✅ Session 2026-05-18: deepFraction=0.836 |
 | **108** | 115 | physiologicalScore rmssdScore fix, NDJSON calibration data export, betaZScore telemetry, 3 new TrendsView charts | ✅ Session 2026-05-19: physScore=47, deepFraction=0 (signal oscillatory, gate correct) |
-| **109** | 116 | calibrationBeta ordering fix, scoreComponents export, disconnect HRV attach, grace-expired diagnostics, fitsPerMin fix | ✅ Session 2026-05-20 (motivated B118 analysis — see B118 section) |
 | **109** | 116 | calibrationBeta ordering fix, scoreComponents export, disconnect HRV attach, grace-expired diagnostics, fitsPerMin fix | ✅ CI run 26092291419 |
-| **118** | 118 | F1 dynamic buildTag (from CFBundleVersion), F2 HR absolute bounds [35,120] + reject counter, F3 forceFinalize → calibrationSummary NDJSON record, F4 calibrationBetaAttached flag in footer, F5 unconditional calibrationBeta Telemetry, F6 faaConvention "af8-af7" in footer + DepthScore comment, F9 metricDefinitions dict (31 formulas with SOURCE cites) in footer, C5 NDJSONCoach + recordCoach() at 8 trigger sites (foundation for B119+ state-contingent coaching) | 🟡 CI run 26158572518 — first attempt 26158289551 failed on ambiguous queue.sync (String.init overload); fix pushed |
-| **119** | 120 | Remove Documents/Sounds fallback from EndGongPlayer.bundleURL() — ChimeEngine is now primary fallback for success/failure gong. Remove BowlAudioGenerator.generateIfNeeded() from App init. Long sessions (≥15 min) ending via BLE grace-expiry now receive playSuccess() instead of playFailure(). | ✅ Session 2026-05-22: NDJSON generated but JSON missing (save() bug fixed in B120) |
-| **120** | — | (1) Fix `save()` + `CrashRecovery` file protection: `.completeFileProtection` → `.completeFileProtectionUnlessOpen`. (2) Fix `synthesiseRecord()`: decode full NDJSONFooter → 19 biomarkers on crash-recovery. (3) Fix `attachCalibrationBeta` guard: `isRecording` → `current != nil`. (4) Add `sdnn`/`sd1`/`sd2` to NDJSONFooter + `appendFooter()` + `synthesiseRecord()`. (5) Git config: user.name → "Sugato Chakravarty". | ✅ |
-| **121** | — | Temporal contact gate: `doConnect()` defers `startCalibration()` until TP9 + TP10 `hsiStableTier` both ≤ 2. 15s timeout force-starts. `FitStabilityBannerView` added. | ✅ Session confirmed: betaZScore=50, physiologicalScore=97, calibrationBetaAttached=True |
-| **122→125** | — | 9 new footer fields (betaZRaw, signal quality ×3, relative band power ×3, ecdfMax, ecdfP90), NDJSONGateEvent, FAABarView color/label fix, FAA r=-0.76→r=-0.43 correction. Code review fixes: calBetaStd guard, ecdf main-phase scope, appendGateEvent comment. | ✅ CI run 26341344481, B125 green |
-| **126** | — | Closed-loop depth: EnterSustainedShaping (adaptive default 12→6s, ±streak), alpha-theta crossover tracking (NDJSONFooter + DepthResult), continuous ECDF→reverb sonification (AVAudioUnitReverb wetDryMix), deep state maintenance (30s initial fade, 2-min silence gaps 8-12s, 60s chime blackout), BOCPD drift alert (BayesianChangepointDetector NIG conjugate + haptic), SessionNarrative plain-English summary, SessionSummarySheet narrative + gate-requirement UI. 8-issue audit-fix pass (f311a01). | ✅ CI run 26358648681. Validated 2026-05-25: S1 deepFraction=0.954 (alphaThetaCrossoverCount=143, crossoverFirst=0.53s), S2 deepFraction=0.890. |
-| **127** | — | Binaural theta entrainment: AVAudioSourceNode streaming render callback (phase-continuous, ~23ms update latency), ITPFTracker session-start priming (Option A), live deep-entry update (Option B now live via Option C), iTPF-2.0 dead-write bug fixed, alphaThetaMean + alphaThetaCrossoverCount metric descriptions corrected. | 🟡 CI pending (pushed 2026-05-25) |
+| **118** | 118 | F1 dynamic buildTag, F2 HR bounds, F3 calibrationSummary NDJSON, F4 calibrationBetaAttached, F5 telemetry, F6 faaConvention, F9 metricDefinitions (31 formulas), C5 NDJSONCoach + recordCoach() | ✅ CI run 26158572518 |
+| **119** | 120 | Remove Documents/Sounds fallback; long grace-expiry → playSuccess() | ✅ |
+| **120** | — | File protection fix, synthesiseRecord() full footer decode, attachCalibrationBeta guard fix, sdnn/sd1/sd2 footer | ✅ |
+| **121** | — | Temporal contact gate (TP9+TP10 hsiStableTier≤2 before calibration), FitStabilityBannerView | ✅ Session: betaZScore=50, physScore=97 |
+| **122→125** | — | 9 new footer fields, NDJSONGateEvent, FAABarView fix, FAA r=-0.43 | ✅ CI run 26341344481 |
+| **126** | — | EnterSustainedShaping, alpha-theta crossover, ECDF→reverb, deep state maintenance, BOCPD, SessionNarrative, SessionSummarySheet narrative UI | ✅ CI run 26358648681. S1 deepFraction=0.954, S2=0.890 |
+| **127** | — | Binaural AVAudioSourceNode streaming, iTPF priming (Option A), live deep-entry update, iTPF-2.0 dead-write fix | ✅ CI run 26408036846 |
+| **128** | — | Approach counter bug fix, stall EEG guard (ecdfSnapshot), FAA dead-code removal, binaural-prime logging | ✅ CI run 26476768869. TestFlight uploaded. |
+| **129** | — | qualityScore 40→30+10 (approachScore), coherenceScore label fix, state-contingent stall coaching (CoachStateSnapshot), gateLine() percentile framing, chiDrift telemetry, battery warning | ✅ CI run 26507757669 |
+| **130** | — | SessionDashboardView: 4-chart post-session review (depth, bands, HRV, chi) + explanations + actionable items. Dashboard button in SessionSummarySheet. | 🟡 Local — uncommitted, awaiting "go" |
+
+---
+
+## B130 Changes (2026-05-27) — awaiting push
+
+### Motivation
+
+Post-session summary was raw numbers + narrative text only. No way to see HOW depth, bands, HRV, or chi evolved over the session — when something happened, how long it lasted, or whether the second half differed from the first.
+
+### What shipped
+
+**`SessionDashboardView.swift`** (NEW — `MusePlus/Views/SessionDashboardView.swift`, 383 lines)
+
+Four annotated time-series chart cards, each with plain-English explanation and optional actionable item:
+
+| Card | Data | Key annotations |
+|------|------|----------------|
+| Depth Over Time | `ecdfDisplay` (cyan line) | Green shaded episodes, orange dashed threshold, 🔔 stall verticals (`kind=="induction-stall"`), purple α/θ first crossover |
+| Alpha · Theta · Beta | `alphaRel`/`thetaRel`/`betaRel` (LineMark series) | Color-coded scale (cyan/purple/green), α/θ first crossover dashed rule |
+| Heart Rate Variability | `rmssd` (pink line) | Background zones: red <40ms, orange 40–65ms, green 65ms+; dashed rules at 40 and 65ms |
+| Aperiodic Slope (1/f) | `aperiodicSlopeMean` (yellow line) | Green dashed absorption reference at χ = −1.5; chiDrift in subtitle |
+
+Downsampling: max 400 points per series (stride = count/400) — prevents frame stalls on 60-min sessions (7200 samples).
+
+Actionable items keyed on: deepFraction, episode length, crossover count vs gate, mean RMSSD zone, chiDrift direction/magnitude, mean chi vs −1.0.
+
+**`App.swift`** (MODIFIED)
+- `@State private var showDashboard = false` in `SessionSummarySheet`
+- `ToolbarItem(placement: .topBarLeading)` with `chart.xyaxis.line` icon → `showDashboard = true`
+- `.sheet(isPresented: $showDashboard) { NavigationStack { SessionDashboardView(record: record) } }`
+
+### B130 Invariants
+
+- `SessionDashboardView` is read-only — takes `let record: SessionRecord`, no mutations.
+- Cards for bands/HRV/chi are conditional on non-empty point arrays — no empty chart frames.
+- `fmtSecs(_:)` helper is private to the view — do not extract to shared utility.
+
+### B130 Validation Checklist
+
+1. "Dashboard" button (chart icon) visible in SessionSummarySheet top-left toolbar.
+2. Tapping opens full-sheet dashboard with 4 cards (or 1–3 if session lacks band/HRV/chi data).
+3. Depth chart: green bands where `inDeepState` was true, orange threshold dashed line, 🔔 on stall events.
+4. Band chart: cyan=alpha, purple=theta, green=beta; legend visible.
+5. HRV chart: colored zone backgrounds (red/orange/green), pink RMSSD line.
+6. Chi chart: yellow line, green dashed absorption reference at −1.5.
+7. Each card shows subtitle (e.g. "Mean RMSSD 71ms · good"), explanation, and actionable if triggered.
+8. Sessions with no RMSSD data: HRV card absent (no empty frame).
+
+---
+
+## B129 Changes (2026-05-26)
+
+### Motivation — B128 validation session + 5 engineering items
+
+B128 validation session (2026-05-26, 0336, 59min): deepFraction=0.893, depthZ mean=+1.698, HR=52.6bpm, RMSSD=70.9ms, iTPF=5.612 Hz. Confirmed two bugs: approach-zone counter never triggered chime; stall speech fired at t=360s with ecdfDisplay=0.542 (user in approach zone = stall guard wrong). Also: 5 engineering improvements identified and deferred from B128.
+
+### Changes
+
+#### Item 1 — approachScore added to qualityScore (`SessionRecorder.swift`)
+- Formula change: deepScore 40→30pts, new approachScore 0–10pts.
+- `approachScore = min(10.0, approachFrac / 0.30 * 10.0)` where `approachFrac` = fraction of main-phase samples with `ecdfDisplay ∈ [0.5×threshold, threshold)`.
+- Full 10pts at 30% of session in approach zone.
+- `metricDefinitions["qualityScore"]` updated: now 30+10+25+35 breakdown.
+
+#### Item 2 — coherenceScore label fix (`SessionRecorder.swift`)
+- `metricDefinitions["coherenceScore"]` corrected: "Contact quality (NOT EEG coherence): frontalGoodFrac × 20.0..."
+- JSON key preserved for backwards compatibility.
+
+#### Item 3 — state-contingent stall coaching (`App.swift`)
+- `stallMessage(atMinute:snapshot:)` — selects message from live `CoachStateSnapshot` based on ecdf proximity to threshold, alpha vs theta dominance, HR > 75.
+- Messages differ at 6/10/15 min: near-gate vs theta-up vs general, breath-pacer trigger on elevated HR.
+- Stall work items now call `coachSnapshot()` at fire time (not setup time) for live state.
+
+#### Item 4 — gateLine() percentile framing (`SessionNarrative.swift`)
+- No-entry branch: "Your best depth today was at the Nth percentile of your personal history — X points below the Pth-percentile gate."
+- ≤3 point gap: "just X point(s)" framing.
+- Correctly distinguishes personal-history percentile from percentage of threshold.
+
+#### Item 5 — chiDrift telemetry (`SessionRecorder.swift`)
+- `chiDrift: Float?` in `SessionRecord` + `NDJSONFooter` + `synthesiseRecord()`.
+- `lateMean - earlyMean` where early = warmup-phase `aperiodicSlopeMean` samples (n≥5), late = last 120 main-phase samples (n≥5).
+- `|drift| > 0.3` triggers `Telemetry.recording.notice`.
+- `metricDefinitions["chiDrift"]` added.
+
+#### Battery warning (`App.swift`)
+- One-shot check at Muse connect: `BatteryWarning` struct, critical <15% / low 15–24%.
+- `.alert` in `MeditationView`.
+- Reset on disconnect.
+
+### B129 Invariants
+
+- `chiDrift` uses warmup-phase samples as early proxy (calibration chi not stored). Requires warmup_n ≥ 5 AND lateMain_n ≥ 5 — silent nil otherwise.
+- `stallMessage` is called AT fire time inside the DispatchQueue.main work item, not at scheduling time.
+- `coherenceScore` JSON key preserved as-is for backwards compatibility.
+- qualityScore formula: `deepScore(0-30) + approachScore(0-10) + smoothScore(0-25) + frontalGoodFrac×35`.
+
+---
+
+## B128 Changes (2026-05-26)
+
+### Fix 1 — Approach counter bug (`App.swift`)
+Inner `else { approachWindowCount = 0 }` only resets when `smoothedDisplay < 0.5 * enterThresholdEcdf`. Previously reset any time user was above gate threshold, making chime impossible for oscillating users.
+
+### Fix 2 — Stall suppression (`App.swift`)
+All three stall work items (360s/600s/900s) guard on `ecdfSnapshot < 0.5 * enterThresholdEcdf`. Added `ecdfSnapshot: Float` main-thread property (updated each 0.5s) to avoid reading `gate.smoothedDisplay` off main thread.
+
+### Fix 3 — FAA dead code removed (`DepthGate.swift`)
+Full removal of FAA flow state (12 properties + EMA update + deep-exit reset + flow block + reset() cleanup). Confirmed zero external reads. 4/6332 samples ever triggered this in 59min session; code also had wrong polarity.
+
+### Fix 4 — Binaural prime logging (`App.swift`)
+`recordEvent(kind: "binaural-prime", detail: "optionA hz=X.XX")` added at Option A fire site. Fixes observability gap.
 
 ---
 
