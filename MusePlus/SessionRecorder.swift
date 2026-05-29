@@ -128,7 +128,7 @@ struct SessionRecord: Codable, Identifiable {
     var deepFraction:      Double? = nil    // fraction [0, 1] of session time spent in deep state
     // B91 — ECDF entry threshold active for this session; nil in pre-B91 records.
     var enterThresholdAtSession: Float? = nil
-    // B94 — composite quality score 0-100: deep fraction (40) + ecdf smoothness (25) + contact quality (35). Nil in pre-B94 records.
+    // B94 — composite quality score 0-100. B129 formula: deep fraction (30) + approach zone (10) + ecdf smoothness (25) + contact quality (35). Nil in pre-B94 records.
     var qualityScore: Int? = nil
     // B96 — time-of-day bucket when session started. Enables depth stratification by time in TrendsView.
     var timeOfDay: String? = nil  // "early-morning" (<6), "morning" (6-12), "afternoon" (12-17), "evening" (17-21), "night" (≥21)
