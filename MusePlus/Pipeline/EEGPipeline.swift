@@ -192,17 +192,23 @@ final class EEGPipeline {
         var imagp = [Float](repeating: 0, count: n / 2)
         work.withUnsafeBytes { rawBuf in
             let complexPtr = rawBuf.baseAddress!.assumingMemoryBound(to: DSPComplex.self)
-            var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
-            vDSP_ctoz(complexPtr, 1, &split, 1, vDSP_Length(n / 2))
+            realp.withUnsafeMutableBufferPointer { rBuf in
+                imagp.withUnsafeMutableBufferPointer { iBuf in
+                    var split = DSPSplitComplex(realp: rBuf.baseAddress!, imagp: iBuf.baseAddress!)
+                    vDSP_ctoz(complexPtr, 1, &split, 1, vDSP_Length(n / 2))
+                }
+            }
         }
 
-        // 4. Real FFT in-place
-        var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
-        vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
-
-        // 5. Power spectrum (magnitude squared), normalized
+        // 4. Real FFT in-place + 5. Power spectrum (magnitude squared), normalized
         var mag2 = [Float](repeating: 0, count: n / 2)
-        vDSP_zvmags(&split, 1, &mag2, 1, vDSP_Length(n / 2))
+        realp.withUnsafeMutableBufferPointer { rBuf in
+            imagp.withUnsafeMutableBufferPointer { iBuf in
+                var split = DSPSplitComplex(realp: rBuf.baseAddress!, imagp: iBuf.baseAddress!)
+                vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+                vDSP_zvmags(&split, 1, &mag2, 1, vDSP_Length(n / 2))
+            }
+        }
         var scale = 1.0 / Float(n * n)
         vDSP_vsmul(mag2, 1, &scale, &mag2, 1, vDSP_Length(n / 2))
 

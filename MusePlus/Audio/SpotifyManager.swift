@@ -190,7 +190,7 @@ final class SpotifyManager: NSObject, ObservableObject {
     // Calls completion with captured volume, or 100 as safe fallback.
     private func fetchDeviceVolume(_ completion: @escaping (Int) -> Void) {
         withToken { [weak self] token in
-            guard let self, let token else { completion(100); return }
+            guard let token else { completion(100); return }
             var req = URLRequest(url: URL(string: "https://api.spotify.com/v1/me/player")!)
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             URLSession.shared.dataTask(with: req) { data, resp, _ in

@@ -916,7 +916,7 @@ public final class EEGDenoiser {
                     // vDSP_conv: __A=signal(end-to-start), __F=filter, stride 1
                     // Note: vDSP_conv uses a cross-correlation convention, so we
                     // reverse the filter to get convolution.
-                    var revFilter = [Float](upFilter.reversed())
+                    let revFilter = [Float](upFilter.reversed())
                     revFilter.withUnsafeBufferPointer { rfBuf in
                         vDSP_conv(pBuf.baseAddress!, 1,
                                   rfBuf.baseAddress!, 1,
@@ -1040,7 +1040,7 @@ public final class EEGDenoiser {
         let outLen = padded.count - kLen + 1
         var output = [Float](repeating: 0.0, count: outLen)
         padded.withUnsafeBufferPointer { pBuf in
-            var revKernel = [Float](kernel.reversed())
+            let revKernel = [Float](kernel.reversed())
             revKernel.withUnsafeBufferPointer { kBuf in
                 output.withUnsafeMutableBufferPointer { oBuf in
                     vDSP_conv(pBuf.baseAddress!, 1,

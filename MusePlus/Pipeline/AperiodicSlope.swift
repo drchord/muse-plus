@@ -75,8 +75,8 @@ enum AperiodicSlope {
         vDSP_meanv(xs, 1, &mx, vDSP_Length(xs.count))
         vDSP_meanv(ys, 1, &my, vDSP_Length(ys.count))
 
-        var xc = xs.map { $0 - mx }
-        var yc = ys.map { $0 - my }
+        let xc = xs.map { $0 - mx }
+        let yc = ys.map { $0 - my }
 
         var num: Float = 0, den: Float = 0
         vDSP_dotpr(xc, 1, yc, 1, &num, vDSP_Length(xc.count))

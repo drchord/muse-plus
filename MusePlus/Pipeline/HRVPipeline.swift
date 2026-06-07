@@ -210,15 +210,22 @@ final class HRVPipeline {
         var imagp = [Double](repeating: 0, count: nFFT / 2)
         padded.withUnsafeBytes { raw in
             let ptr = raw.baseAddress!.assumingMemoryBound(to: DSPDoubleComplex.self)
-            var split = DSPDoubleSplitComplex(realp: &realp, imagp: &imagp)
-            vDSP_ctozD(ptr, 1, &split, 1, vDSP_Length(nFFT / 2))
+            realp.withUnsafeMutableBufferPointer { rBuf in
+                imagp.withUnsafeMutableBufferPointer { iBuf in
+                    var split = DSPDoubleSplitComplex(realp: rBuf.baseAddress!, imagp: iBuf.baseAddress!)
+                    vDSP_ctozD(ptr, 1, &split, 1, vDSP_Length(nFFT / 2))
+                }
+            }
         }
         let log2N = vDSP_Length(log2(Double(nFFT)).rounded())
-        var split = DSPDoubleSplitComplex(realp: &realp, imagp: &imagp)
-        vDSP_fft_zripD(fftSetup, &split, 1, log2N, FFTDirection(FFT_FORWARD))
-
         var mag2 = [Double](repeating: 0, count: nFFT / 2)
-        vDSP_zvmagsD(&split, 1, &mag2, 1, vDSP_Length(nFFT / 2))
+        realp.withUnsafeMutableBufferPointer { rBuf in
+            imagp.withUnsafeMutableBufferPointer { iBuf in
+                var split = DSPDoubleSplitComplex(realp: rBuf.baseAddress!, imagp: iBuf.baseAddress!)
+                vDSP_fft_zripD(fftSetup, &split, 1, log2N, FFTDirection(FFT_FORWARD))
+                vDSP_zvmagsD(&split, 1, &mag2, 1, vDSP_Length(nFFT / 2))
+            }
+        }
 
         // Band power: frequency resolution = 4 / 2048 ≈ 0.00195 Hz/bin
         let res = Self.interpRate / Double(nFFT)

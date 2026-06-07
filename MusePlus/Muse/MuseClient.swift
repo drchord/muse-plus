@@ -221,7 +221,7 @@ final class MuseClient: NSObject {
 
 extension MuseClient: IXNMuseListener {
     func museListChanged() {
-        let muses = manager.getMuses() as! [IXNMuse]
+        let muses = manager.getMuses()
         DispatchQueue.main.async { self.discoveredMuses.send(muses) }
     }
 }
