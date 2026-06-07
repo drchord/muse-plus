@@ -173,7 +173,10 @@ struct SessionRecord: Codable, Identifiable {
     var betaZRaw:          Float? = nil
     var signalQualityMeanSpikes:      Float? = nil
     var signalQualityAlphaPowerRatio: Float? = nil
-    var potatoFlaggedPct:  Float? = nil
+    var potatoFlaggedPct:       Float? = nil
+    // B132: potato flag rate split by phase. Warmup = first 300s, main = remainder.
+    var warmupPotatoFlaggedPct: Float? = nil
+    var mainPotatoFlaggedPct:   Float? = nil
     var alphaRelMean: Float? = nil
     var thetaRelMean: Float? = nil
     var betaRelMean:  Float? = nil
@@ -188,6 +191,9 @@ struct SessionRecord: Codable, Identifiable {
     // B129: aperiodic slope drift — lateMainChiMean minus warmupChiMean. Positive = slope steepened
     // (typical during deep absorption). >|0.3| triggers telemetry notice. Nil if <5 chi samples.
     var chiDrift: Float? = nil
+    // B132: mean aperiodic slope during warmup phase (first 300s). Key predictor for calibIM.
+    // Nil if warmup has <5 samples with valid aperiodicSlopeMean. More negative = lower arousal at start.
+    var warmupAperiodicSlopeMean: Float? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -297,7 +303,9 @@ private struct NDJSONFooter: Codable {
     // does not require parsing NDJSON denoiseStats records.
     let signalQualityMeanSpikes:      Float?   // mean spikesRemoved/frame; >15 = elevated artifact
     let signalQualityAlphaPowerRatio: Float?   // mean alphaPowerRatio; <0.70 = alpha degraded by noise
-    let potatoFlaggedPct:  Float?              // fraction of frames with Riemannian Potato verdict
+    let potatoFlaggedPct:        Float?    // fraction of frames with Riemannian Potato verdict
+    let warmupPotatoFlaggedPct:  Float?    // B132: potato rate during warmup (t<300s)
+    let mainPotatoFlaggedPct:    Float?    // B132: potato rate during main phase (t>=300s)
     // B122: calibration-independent relative band power for main phase.
     // alphaRel+thetaRel+betaRel+... sum to 1; robust to absolute amplitude shifts from artifact.
     let alphaRelMean: Float?
@@ -316,6 +324,8 @@ private struct NDJSONFooter: Codable {
     let alphaThetaCrossoverFirstTime: Double? // seconds from session start to first crossover; nil if none
     // B129: aperiodic slope drift (lateMainChiMean - warmupChiMean). Nil if <5 chi samples in either window.
     let chiDrift: Float?
+    // B132: mean aperiodic slope during warmup phase (first 300s). Nil if <5 valid warmup chi samples.
+    let warmupAperiodicSlopeMean: Float?
     // B117 F9: one-line formulas for every exported metric. Self-documenting telemetry.
     let metricDefinitions: [String: String]?
 }
@@ -501,10 +511,15 @@ final class SessionRecorder: ObservableObject {
     // NDJSON at session open. path="cleared"|"timeout"; time will be written as -1.0 (pre-session).
     private var pendingGateEvents: [(path: String, tp9Tier: Int, tp10Tier: Int)] = []
     // B122: denoise quality accumulators — all accessed on queue, reset per-session.
-    private var denoiseSpikesSum:      Double = 0
-    private var denoiseAlphaPowerSum:  Double = 0
-    private var denoiseFrameCount:     Int    = 0
-    private var denoisePotatoes:       Int    = 0
+    private var denoiseSpikesSum:          Double = 0
+    private var denoiseAlphaPowerSum:      Double = 0
+    private var denoiseFrameCount:         Int    = 0
+    private var denoisePotatoes:           Int    = 0
+    // B132: phase-split potato counters (warmup = t<300s, main = t>=300s).
+    private var warmupDenoiseFrameCount:   Int    = 0
+    private var warmupDenoisePotatoes:     Int    = 0
+    private var mainDenoiseFrameCount:     Int    = 0
+    private var mainDenoisePotatoes:       Int    = 0
 
     private let iso8601: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -551,10 +566,15 @@ final class SessionRecorder: ObservableObject {
             lastDeepState      = false
             sampleCount        = 0
             // B122: reset denoise accumulators for the new session
-            denoiseSpikesSum     = 0
-            denoiseAlphaPowerSum = 0
-            denoiseFrameCount    = 0
-            denoisePotatoes      = 0
+            denoiseSpikesSum          = 0
+            denoiseAlphaPowerSum      = 0
+            denoiseFrameCount         = 0
+            denoisePotatoes           = 0
+            // B132: reset phase-split potato accumulators
+            warmupDenoiseFrameCount   = 0
+            warmupDenoisePotatoes     = 0
+            mainDenoiseFrameCount     = 0
+            mainDenoisePotatoes       = 0
 
             // Open NDJSON file handle
             openNDJSONHandle(id: id, now: now,
@@ -713,6 +733,12 @@ final class SessionRecorder: ObservableObject {
             }
         }
 
+        // B132: warmup aperiodic slope mean — mean chi over first 300s warmup samples.
+        if warmupChiVals.count >= 5 {
+            rec.warmupAperiodicSlopeMean = warmupChiVals.reduce(0, +) / Float(warmupChiVals.count)
+            Telemetry.recording.notice("warmupAperiodicSlopeMean=\(rec.warmupAperiodicSlopeMean!, privacy: .public) n=\(warmupChiVals.count, privacy: .public)")
+        }
+
         // B100 warmup FAA mean.
         let warmupFAASamples: [Float] = rec.samples.filter { $0.phase == "warmup" }.compactMap(\.faa).filter { $0 != 0 }
         if warmupFAASamples.count >= 30 {
@@ -771,6 +797,13 @@ final class SessionRecorder: ObservableObject {
             rec.signalQualityMeanSpikes      = Float(denoiseSpikesSum / Double(denoiseFrameCount))
             rec.signalQualityAlphaPowerRatio = Float(denoiseAlphaPowerSum / Double(denoiseFrameCount))
             rec.potatoFlaggedPct             = Float(denoisePotatoes) / Float(denoiseFrameCount)
+        }
+        // B132: phase-split potato rates.
+        if warmupDenoiseFrameCount > 0 {
+            rec.warmupPotatoFlaggedPct = Float(warmupDenoisePotatoes) / Float(warmupDenoiseFrameCount)
+        }
+        if mainDenoiseFrameCount > 0 {
+            rec.mainPotatoFlaggedPct = Float(mainDenoisePotatoes) / Float(mainDenoiseFrameCount)
         }
 
         appendFooter(rec: rec, reason: reason)
@@ -1083,6 +1116,14 @@ final class SessionRecorder: ObservableObject {
                 self.denoiseAlphaPowerSum += Double(alphaPowerRatio)
                 self.denoiseFrameCount    += 1
                 if potatoFlagged { self.denoisePotatoes += 1 }
+                // B132: split by warmup (t<300s) vs main phase.
+                if t < 300 {
+                    self.warmupDenoiseFrameCount += 1
+                    if potatoFlagged { self.warmupDenoisePotatoes += 1 }
+                } else {
+                    self.mainDenoiseFrameCount += 1
+                    if potatoFlagged { self.mainDenoisePotatoes += 1 }
+                }
             }
         }
     }
@@ -1261,7 +1302,9 @@ final class SessionRecorder: ObservableObject {
             betaZRaw:          rec.betaZRaw,
             signalQualityMeanSpikes:      rec.signalQualityMeanSpikes,
             signalQualityAlphaPowerRatio: rec.signalQualityAlphaPowerRatio,
-            potatoFlaggedPct:  rec.potatoFlaggedPct,
+            potatoFlaggedPct:           rec.potatoFlaggedPct,
+            warmupPotatoFlaggedPct:     rec.warmupPotatoFlaggedPct,
+            mainPotatoFlaggedPct:       rec.mainPotatoFlaggedPct,
             alphaRelMean:      rec.alphaRelMean,
             thetaRelMean:      rec.thetaRelMean,
             betaRelMean:       rec.betaRelMean,
@@ -1271,8 +1314,9 @@ final class SessionRecorder: ObservableObject {
             alphaThetaMean:              rec.alphaThetaMean,
             alphaThetaCrossoverCount:    rec.alphaThetaCrossoverCount,
             alphaThetaCrossoverFirstTime: rec.alphaThetaCrossoverFirstTime,
-            chiDrift:                rec.chiDrift,
-            metricDefinitions:       SessionRecorder.metricDefinitions
+            chiDrift:                    rec.chiDrift,
+            warmupAperiodicSlopeMean:    rec.warmupAperiodicSlopeMean,
+            metricDefinitions:           SessionRecorder.metricDefinitions
         )
         appendLine(footer)
         ndjsonHandle?.synchronizeFile()
@@ -1322,6 +1366,9 @@ final class SessionRecorder: ObservableObject {
         "signalQualityMeanSpikes": "Mean spikesRemoved per active denoiseStats frame. >15 = elevated artifact load (muscle/motion/EMF). Baseline B120=5.9, B118=9.2. B122.",
         "signalQualityAlphaPowerRatio": "Mean alpha power preservation ratio after ASR denoising (cleanAlpha/rawAlpha 8-12 Hz). 1.0 = perfect; <0.70 = significant alpha degradation. B122.",
         "potatoFlaggedPct": "Fraction of active denoiseStats frames where Riemannian Potato declared severe artifact. B122.",
+        "warmupPotatoFlaggedPct": "Riemannian Potato artifact rate during warmup phase (t<300s). High warmup rate = movement/setup artifact; less predictive of session quality than main phase. SOURCE=SessionRecorder.swift appendDenoiseStats B132.",
+        "mainPotatoFlaggedPct": "Riemannian Potato artifact rate during main phase (t>=300s). High main-phase rate = mid-session signal degradation (headband slip, movement). Stronger predictor of session quality than session-wide potatoFlaggedPct. SOURCE=SessionRecorder.swift appendDenoiseStats B132.",
+        "warmupAperiodicSlopeMean": "Mean 1/f aperiodic slope χ over warmup phase (first 300s). More negative = steeper slope = lower arousal baseline at session start. Leading predictor candidate for calibrationIndexMean. nil if <5 warmup samples have valid χ. SOURCE=SessionRecorder.swift populateSessionBiomarkers B132.",
         "alphaRelMean": "Main-phase mean relative alpha power (alphaRel = alpha8-12Hz / totalBandPower). Calibration-independent; sum with thetaRel+betaRel+... ≈ 1.0. B122.",
         "thetaRelMean": "Main-phase mean relative theta power. Calibration-independent. B122.",
         "betaRelMean": "Main-phase mean relative beta power. Calibration-independent. Lower = stronger beta suppression regardless of absolute amplitude. B122.",
@@ -1633,13 +1680,16 @@ final class SessionRecorder: ObservableObject {
             rec.betaZRaw                 = f.betaZRaw
             rec.signalQualityMeanSpikes  = f.signalQualityMeanSpikes
             rec.signalQualityAlphaPowerRatio = f.signalQualityAlphaPowerRatio
-            rec.potatoFlaggedPct         = f.potatoFlaggedPct
+            rec.potatoFlaggedPct            = f.potatoFlaggedPct
+            rec.warmupPotatoFlaggedPct      = f.warmupPotatoFlaggedPct
+            rec.mainPotatoFlaggedPct        = f.mainPotatoFlaggedPct
             rec.alphaRelMean             = f.alphaRelMean
             rec.thetaRelMean             = f.thetaRelMean
             rec.betaRelMean              = f.betaRelMean
             rec.ecdfMax                  = f.ecdfMax
             rec.ecdfP90                  = f.ecdfP90
-            rec.chiDrift                 = f.chiDrift
+            rec.chiDrift                    = f.chiDrift
+            rec.warmupAperiodicSlopeMean    = f.warmupAperiodicSlopeMean
         }
         return rec
     }
