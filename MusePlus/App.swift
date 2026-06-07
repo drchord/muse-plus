@@ -227,7 +227,7 @@ final class Probe: ObservableObject {
     private var sessionStart = Date()
     private var reconnectAttempts = 0
     // B80 (B2): grace-period state — when a BLE drop occurs mid-session we don't
-    // immediately end the session. We wait up to 30s for the headband to reconnect.
+    // immediately end the session. We wait up to 120s for the headband to reconnect.
     // If reconnect succeeds: session continues, gap is recorded.
     // If grace expires: session ends cleanly with what we have.
     @Published var isPausedForReconnect: Bool = false
@@ -311,7 +311,7 @@ final class Probe: ObservableObject {
                     self?.connectingTimeoutWork = nil
                     self?.isConnecting = false
                     self?.pendingConnect = false
-                    // B80 (B2): if we reconnected within the 30s grace period,
+                    // B80 (B2): if we reconnected within the 120s grace period,
                     // resume the session rather than starting fresh.
                     if self?.isPausedForReconnect == true {
                         let graceDuration = Date().timeIntervalSince(self?.gracePeriodStarted ?? Date())
@@ -372,17 +372,18 @@ final class Probe: ObservableObject {
                     self?.pendingConnect = false
                     let stats: (count30s: Int, lastPacketAge: TimeInterval) = self?.client.eegPacketRollingStats() ?? (count30s: 0, lastPacketAge: 0)
                     Telemetry.eeg.error("post-disconnect packets-last-30s=\(stats.count30s, privacy: .public) lastPacketAge=\(stats.lastPacketAge, privacy: .public)s")
-                    // B80 (B2): if a session is active, enter 30s grace period instead of
+                    // B80 (B2): if a session is active, enter 120s grace period instead of
                     // immediately ending. Soundscape stops (2s fade), alert fires, reconnect
-                    // is scheduled. If headband comes back within 30s the session continues.
+                    // is scheduled. If headband comes back within 120s the session continues.
+                    // B132: extended from 45s to 120s — iOS BT can take 60-90s to auto-reconnect.
                     if wasRecording, self?.isPausedForReconnect == false {
                         self?.isPausedForReconnect = true
                         self?.gracePeriodStarted = Date()
                         // Fade soundscape to silence — abrupt stop would be jarring
                         SoundscapePlayer.shared.stopAll(fadeSeconds: 2.0)
                         AlertCoordinator.shared.sessionPaused(reason: .bleDrop)
-                        Telemetry.connection.notice("entering 45s grace period")
-                        // Schedule 45s grace expiry
+                        Telemetry.connection.notice("entering 120s grace period")
+                        // Schedule 120s grace expiry
                         let gracework = DispatchWorkItem { [weak self] in
                             guard let self, self.isPausedForReconnect else { return }
                             self.isPausedForReconnect = false
@@ -397,7 +398,7 @@ final class Probe: ObservableObject {
                         // B107: record stall for post-session analysis
                         SessionRecorder.shared.recordBLEStall()
                         self?.gracePeriodWork = gracework
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 45, execute: gracework)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: gracework)
                         self?.scheduleReconnect()
                         return
                     }
@@ -1771,7 +1772,9 @@ final class Probe: ObservableObject {
     }
 
     private func scheduleReconnect() {
-        guard reconnectAttempts < 3 else {
+        // B132: extended from 3 attempts at 3s to 6 attempts at 5s (30s active reconnect window).
+        // iOS BT auto-reconnect runs in parallel; after 6 attempts we yield to the OS.
+        guard reconnectAttempts < 6 else {
             reconnectAttempts = 0
             return
         }
@@ -1779,7 +1782,7 @@ final class Probe: ObservableObject {
         // B80: track reconnect attempts for diagnostics.
         sessionDiagCounters.reconnectAttempts += 1
         recordEvent(kind: "reconnect", detail: "attempt \(reconnectAttempts)")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             guard let self, self.connection == "Disconnected" else {
                 self?.reconnectAttempts = 0
                 return
