@@ -104,6 +104,7 @@ struct SessionDashboardView: View {
                 if !bandPts.isEmpty   { bandCard   }
                 if !hrvPts.isEmpty    { hrvCard     }
                 if !chiPts.isEmpty    { chiCard     }
+                physioCard
             }
             .padding(16)
         }
@@ -373,6 +374,72 @@ struct SessionDashboardView: View {
         .padding(14)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    // MARK: - Physiological Readiness Card
+
+    private var physioCard: some View {
+        let calibIM = record.calibrationIndexMean
+        let rmssdSc = record.rmssdScore ?? 0
+        let delta   = record.rmssdDepthDelta
+
+        let calibColor: Color = {
+            guard let v = calibIM else { return .secondary }
+            if v < -0.30 { return .green  }
+            if v < -0.10 { return .yellow }
+            return .orange
+        }()
+
+        let calibText: String = calibIM.map { String(format: "%.3f", $0) } ?? "—"
+
+        let sub = "Score \(record.physiologicalScore ?? 0)/100 · β\(record.betaZScore ?? 0) HRV\(rmssdSc) Q\(record.coherenceScore ?? 0)"
+
+        let explanation = "calibrationIndexMean: warmup EEG quality index. Below −0.30 = low-arousal baseline (required for deep entry). rmssdScore: piecewise HRV component (0–30) using absolute thresholds. rmssdDepthDelta: mean RMSSD at depth (ecdfDisplay ≥ 0.50) minus shallow (< 0.25) in ms — positive = parasympathetic activation at depth."
+
+        let action: String? = {
+            if let v = calibIM, v > -0.10 {
+                return "Calibration index near zero — high baseline arousal at session start. Try 3 minutes of slow exhale breathing before tapping start: target a calm, low-alertness state during calibration."
+            }
+            if rmssdSc < 16 {
+                return "HRV score low (\(rmssdSc)/30). RMSSD below 50ms suggests residual sympathetic tone. Prioritise sleep and reduce caffeine in the 4 hours before the session."
+            }
+            if let d = delta, d < -2.0 {
+                return "Depth–HRV coupling negative (\(String(format: "%.1f", d))ms) — HRV fell at depth attempts, suggesting autonomic exhaustion. Consider resting a day before the next session."
+            }
+            return nil
+        }()
+
+        return card(title: "Physiological Readiness", subtitle: sub,
+                    explanation: explanation, actionable: action) {
+            VStack(spacing: 10) {
+                HStack {
+                    Text("Calibration Index")
+                        .font(.subheadline)
+                    Spacer()
+                    Text(calibText)
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(calibColor)
+                }
+                HStack {
+                    Text("HRV Score")
+                        .font(.subheadline)
+                    Spacer()
+                    Text("\(rmssdSc) / 30")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(rmssdSc >= 20 ? Color.green : rmssdSc >= 12 ? Color.yellow : Color.orange)
+                }
+                if let d = delta {
+                    HStack {
+                        Text("Depth–HRV Coupling")
+                            .font(.subheadline)
+                        Spacer()
+                        Text(String(format: "%+.1f ms", d))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(d > 0 ? Color.green : Color.orange)
+                    }
+                }
+            }
+        }
     }
 
     // MARK: Helpers
