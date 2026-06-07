@@ -143,7 +143,9 @@ final class DepthGate {
     /// Returns nil mean when no calibrated samples accumulated (sub-60s session).
     func alphaThetaSummary() -> (mean: Float?, crossoverCount: Int, crossoverFirstTimeSec: Double?) {
         let mean: Float? = alphaThetaCount > 0 ? Float(alphaThetaSum / Double(alphaThetaCount)) : nil
-        return (mean, alphaThetaCrossoverCount, alphaThetaCrossoverFirstTimeSec)
+        // Defense: distantPast anchor yields ~63.9e9s; any session-relative time >7200s (2h) is garbage.
+        let clampedFirst = alphaThetaCrossoverFirstTimeSec.flatMap { $0 < 7200 ? $0 : nil }
+        return (mean, alphaThetaCrossoverCount, clampedFirst)
     }
 
     func setEcdfThresholds(enter: Float, exit: Float) {
@@ -193,7 +195,7 @@ final class DepthGate {
             alphaThetaCount += 1
             if atNow > 1.0 {    // crossover: theta > alpha
                 alphaThetaCrossoverCount += 1
-                if alphaThetaCrossoverFirstTimeSec == nil {
+                if alphaThetaCrossoverFirstTimeSec == nil, sessionStartDate != .distantPast {
                     alphaThetaCrossoverFirstTimeSec = Date().timeIntervalSince(sessionStartDate)
                 }
             }
