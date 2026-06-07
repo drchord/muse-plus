@@ -735,8 +735,9 @@ final class SessionRecorder: ObservableObject {
 
         // B132: warmup aperiodic slope mean — mean chi over first 300s warmup samples.
         if warmupChiVals.count >= 5 {
-            rec.warmupAperiodicSlopeMean = warmupChiVals.reduce(0, +) / Float(warmupChiVals.count)
-            Telemetry.recording.notice("warmupAperiodicSlopeMean=\(rec.warmupAperiodicSlopeMean!, privacy: .public) n=\(warmupChiVals.count, privacy: .public)")
+            let wam = warmupChiVals.reduce(0, +) / Float(warmupChiVals.count)
+            rec.warmupAperiodicSlopeMean = wam
+            Telemetry.recording.notice("warmupAperiodicSlopeMean=\(wam, privacy: .public) n=\(warmupChiVals.count, privacy: .public)")
         }
 
         // B100 warmup FAA mean.
