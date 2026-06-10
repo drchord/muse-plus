@@ -118,10 +118,19 @@ struct SessionNarrative {
     }
 
     private static func insightLine(_ r: SessionRecord) -> String {
-        // Priority: gate close-call > calibration weak > artifact > steady state
+        // Priority: gate close-call > low readiness > calibration weak > artifact > steady state
         let deepF = r.deepFraction ?? 0
         if deepF == 0, let m = r.ecdfMax, m >= 0.80 {
             return "Insight: you are at the edge — keep the same approach and the gate will yield."
+        }
+        // B135: low readiness score with specific dominant factor
+        if deepF == 0, let rs = r.readinessScore, rs <= 2 {
+            if let f = r.warmupFAAMean, f >= 0 {
+                return "Insight: warmup FAA was positive (\(String(format: "+%.2f", f))) — left-frontal arousal pattern. Right-dominant FAA predicts depth for you. Try sitting still for 2 extra minutes before starting."
+            }
+            if let s = r.warmupAperiodicSlopeMean, s < -1.35 {
+                return "Insight: pre-session brain noise was elevated (slope \(String(format: "%.2f", s))). The brain was not in a low-arousal resting state at start. Earlier sleep and no screens 30 min before may shift this."
+            }
         }
         if r.calibrationBetaAttached == false {
             return "Insight: settle for one extra minute before tapping start so calibration can lock."
@@ -130,6 +139,10 @@ struct SessionNarrative {
             return "Insight: reposition the headband and check ear contact next session."
         }
         if deepF > 0.30 {
+            // B135: note high readiness when depth is confirmed
+            if let rs = r.readinessScore, rs >= 5 {
+                return "Insight: readiness score was \(rs)/6 — all three warmup indicators aligned. Note what felt different at the start of this session."
+            }
             return "Insight: this is a reproducible state for you now — same time, same setup, next session."
         }
         return "Insight: stay with the same practice; depth grows on its own timeline."

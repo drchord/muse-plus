@@ -194,6 +194,11 @@ struct SessionRecord: Codable, Identifiable {
     // B132: mean aperiodic slope during warmup phase (first 300s). Key predictor for calibIM.
     // Nil if warmup has <5 samples with valid aperiodicSlopeMean. More negative = lower arousal at start.
     var warmupAperiodicSlopeMean: Float? = nil
+    // B135: composite readiness score 0–6 from the three top warmup predictors of deep-state entry.
+    // warmupFAAMean(<-0.15=2,<0=1,≥0=0) + warmupAperiodicSlopeMean(≥-1.25=2,≥-1.35=1,<-1.35=0)
+    // + calibrationIndexMean(<-0.30=2,<-0.10=1,≥-0.10=0). Nil if all three inputs are nil.
+    // ≥5=primed, 3–4=mixed, ≤2=low-readiness. n=10 empirical basis — treat as signal, not gate.
+    var readinessScore: Int? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -326,6 +331,8 @@ private struct NDJSONFooter: Codable {
     let chiDrift: Float?
     // B132: mean aperiodic slope during warmup phase (first 300s). Nil if <5 valid warmup chi samples.
     let warmupAperiodicSlopeMean: Float?
+    // B135: composite readiness score 0–6. Nil if all three source inputs are nil.
+    let readinessScore: Int?
     // B117 F9: one-line formulas for every exported metric. Self-documenting telemetry.
     let metricDefinitions: [String: String]?
 }
@@ -747,6 +754,32 @@ final class SessionRecorder: ObservableObject {
             let logFAA = rec.warmupFAAMean ?? Float(0)
             Telemetry.recording.notice("warmupFAAMean=\(logFAA, privacy: .public) n=\(warmupFAASamples.count, privacy: .public)")
         }
+
+        // B135: readiness score — composite of the three empirically validated warmup predictors.
+        // Runs AFTER warmupFAAMean (B100) and warmupAperiodicSlopeMean (B132) are populated above.
+        // Based on n=10 sessions (Jun 1–10 2026). Thresholds provisional; revisit at n=20.
+        let faaPoints: Int = {
+            guard let f = rec.warmupFAAMean else { return 0 }
+            if f < -0.15 { return 2 }
+            if f <  0.00 { return 1 }
+            return 0
+        }()
+        let slopePoints: Int = {
+            guard let s = rec.warmupAperiodicSlopeMean else { return 0 }
+            if s >= -1.25 { return 2 }
+            if s >= -1.35 { return 1 }
+            return 0
+        }()
+        let calibPoints: Int = {
+            guard let c = rec.calibrationIndexMean else { return 0 }
+            if c < -0.30 { return 2 }
+            if c < -0.10 { return 1 }
+            return 0
+        }()
+        if rec.warmupFAAMean != nil || rec.warmupAperiodicSlopeMean != nil || rec.calibrationIndexMean != nil {
+            rec.readinessScore = faaPoints + slopePoints + calibPoints
+        }
+        Telemetry.recording.notice("readinessScore=\(rec.readinessScore.map(String.init) ?? "nil", privacy: .public) faa=\(faaPoints, privacy: .public) slope=\(slopePoints, privacy: .public) calibIM=\(calibPoints, privacy: .public)")
 
         // B107 session-level RMSSD mean (main phase).
         let mainRMSSD: [Double] = rec.samples.filter { $0.phase == "main" }.compactMap { $0.rmssd.map { Double($0) } }.filter { $0 > 0 }
@@ -1317,6 +1350,7 @@ final class SessionRecorder: ObservableObject {
             alphaThetaCrossoverFirstTime: rec.alphaThetaCrossoverFirstTime,
             chiDrift:                    rec.chiDrift,
             warmupAperiodicSlopeMean:    rec.warmupAperiodicSlopeMean,
+            readinessScore:              rec.readinessScore,
             metricDefinitions:           SessionRecorder.metricDefinitions
         )
         appendLine(footer)
@@ -1380,7 +1414,8 @@ final class SessionRecorder: ObservableObject {
         "alphaThetaMean": "Mean of (frontalTheta / frontalAlpha) ratio in linear band power, averaged over all calibrated windows. Values >1.0 = theta-dominant. Computed per channel then averaged: (af7Theta/af7Alpha + af8Theta/af8Alpha)/2. B126.",
         "alphaThetaCrossoverCount": "Count of 0.5s windows where frontal theta/alpha ratio > 1.0 (theta exceeds alpha in linear band power). Each window ≈ 2 EEG FFT frames. B126.",
         "alphaThetaCrossoverFirstTime": "Seconds from session start to first window where theta > alpha. nil if no crossover occurred. B126.",
-        "chiDrift": "Aperiodic slope drift: mean χ over last 120 main-phase samples minus mean χ over warmup-phase samples (chi = IRASA 1/f exponent, AperiodicSlope.swift). Positive = slope steepened (typical in deep absorption); >|0.3| triggers telemetry notice. Nil if <5 chi samples in either window. B129."
+        "chiDrift": "Aperiodic slope drift: mean χ over last 120 main-phase samples minus mean χ over warmup-phase samples (chi = IRASA 1/f exponent, AperiodicSlope.swift). Positive = slope steepened (typical in deep absorption); >|0.3| triggers telemetry notice. Nil if <5 chi samples in either window. B129.",
+        "readinessScore": "Composite warmup predictor 0–6: warmupFAAMean(<-0.15=2,<0=1,≥0=0) + warmupAperiodicSlopeMean(≥-1.25=2,≥-1.35=1,<-1.35=0) + calibrationIndexMean(<-0.30=2,<-0.10=1,≥-0.10=0). ≥5=primed, 3–4=mixed, ≤2=low-readiness. Nil if all three source fields nil. Empirical basis n=10 (Jun 2026); thresholds provisional. SOURCE=SessionRecorder.swift B135."
     ]
 
     private func closeNDJSONHandle() {
@@ -1691,6 +1726,11 @@ final class SessionRecorder: ObservableObject {
             rec.ecdfP90                  = f.ecdfP90
             rec.chiDrift                    = f.chiDrift
             rec.warmupAperiodicSlopeMean    = f.warmupAperiodicSlopeMean
+            rec.readinessScore              = f.readinessScore
+            // B126 fields — previously missing from crash recovery
+            rec.alphaThetaMean              = f.alphaThetaMean
+            rec.alphaThetaCrossoverCount    = f.alphaThetaCrossoverCount
+            rec.alphaThetaCrossoverFirstTime = f.alphaThetaCrossoverFirstTime
         }
         return rec
     }

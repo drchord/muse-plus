@@ -379,9 +379,13 @@ struct SessionDashboardView: View {
     // MARK: - Physiological Readiness Card
 
     private var physioCard: some View {
-        let calibIM = record.calibrationIndexMean
-        let rmssdSc = record.rmssdScore ?? 0
-        let delta   = record.rmssdDepthDelta
+        let calibIM   = record.calibrationIndexMean
+        let rmssdSc   = record.rmssdScore ?? 0
+        let delta     = record.rmssdDepthDelta
+        let calRmssd  = record.calibrationRmssd
+        let faa       = record.warmupFAAMean
+        let slope     = record.warmupAperiodicSlopeMean
+        let readiness = record.readinessScore
 
         let calibColor: Color = {
             guard let v = calibIM else { return .secondary }
@@ -390,18 +394,39 @@ struct SessionDashboardView: View {
             return .orange
         }()
 
-        let calibText: String = calibIM.map { String(format: "%.3f", $0) } ?? "—"
+        let readinessLabel: String = readiness.map {
+            switch $0 {
+            case 5...6: return "Primed (\($0)/6)"
+            case 3...4: return "Mixed (\($0)/6)"
+            default:    return "Low (\($0)/6)"
+            }
+        } ?? "—"
+        let readinessColor: Color = readiness.map {
+            switch $0 {
+            case 5...6: return .green
+            case 3...4: return .yellow
+            default:    return .orange
+            }
+        } ?? .secondary
 
         let sub = "Score \(record.physiologicalScore ?? 0)/100 · β\(record.betaZScore ?? 0) HRV\(rmssdSc) Q\(record.coherenceScore ?? 0)"
 
-        let explanation = "calibrationIndexMean: warmup EEG quality index. Below −0.30 = low-arousal baseline (required for deep entry). rmssdScore: piecewise HRV component (0–30) using absolute thresholds. rmssdDepthDelta: mean RMSSD at depth (ecdfDisplay ≥ 0.50) minus shallow (< 0.25) in ms — positive = parasympathetic activation at depth."
+        let explanation = "Readiness (0–6): warmupFAA + aperiodicSlope + calibIM — predicts deep entry based on n=10 sessions. calibrationIndexMean: warmup EEG index; <−0.30 = low-arousal baseline required for depth. Calibration RMSSD: HRV at session start; ≥85ms correlates with deep entry. Warmup FAA: negative = right-frontal dominant (Sugato's depth direction). Pre-session Slope: 1/f exponent during warmup; less negative = lower initial arousal = better. rmssdDepthDelta: HRV during depth minus shallow (ms)."
 
         let action: String? = {
+            if let rs = readiness, rs <= 2 {
+                var reasons: [String] = []
+                if let f = faa, f >= 0       { reasons.append("FAA positive (\(String(format: "%.2f", f))) — left-frontal arousal pattern") }
+                if let s = slope, s < -1.35  { reasons.append("pre-session slope steep (\(String(format: "%.2f", s))) — high initial noise floor") }
+                if let v = calibIM, v > -0.10 { reasons.append("calibration index near zero (\(String(format: "%.3f", v))) — aroused at session start") }
+                let reason = reasons.isEmpty ? "multiple warmup markers below threshold" : reasons.joined(separator: "; ")
+                return "Low readiness today (\(rs)/6): \(reason). 3 slow exhale breaths (4s in / 8s out) before tapping start shifts the baseline."
+            }
             if let v = calibIM, v > -0.10 {
-                return "Calibration index near zero — high baseline arousal at session start. Try 3 minutes of slow exhale breathing before tapping start: target a calm, low-alertness state during calibration."
+                return "Calibration index near zero — high baseline arousal at session start. Try 3 minutes of slow exhale breathing before tapping start."
             }
             if rmssdSc < 16 {
-                return "HRV score low (\(rmssdSc)/30). RMSSD below 50ms suggests residual sympathetic tone. Prioritise sleep and reduce caffeine in the 4 hours before the session."
+                return "HRV score low (\(rmssdSc)/30). RMSSD below 50ms suggests residual sympathetic tone. Prioritise sleep and reduce caffeine 4 hours before the session."
             }
             if let d = delta, d < -2.0 {
                 return "Depth–HRV coupling negative (\(String(format: "%.1f", d))ms) — HRV fell at depth attempts, suggesting autonomic exhaustion. Consider resting a day before the next session."
@@ -412,13 +437,34 @@ struct SessionDashboardView: View {
         return card(title: "Physiological Readiness", subtitle: sub,
                     explanation: explanation, actionable: action) {
             VStack(spacing: 10) {
+                if readiness != nil {
+                    HStack {
+                        Text("Readiness Score")
+                            .font(.subheadline)
+                        Spacer()
+                        Text(readinessLabel)
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(readinessColor)
+                    }
+                    Divider()
+                }
                 HStack {
                     Text("Calibration Index")
                         .font(.subheadline)
                     Spacer()
-                    Text(calibText)
+                    Text(calibIM.map { String(format: "%.3f", $0) } ?? "—")
                         .font(.subheadline.monospacedDigit())
                         .foregroundStyle(calibColor)
+                }
+                if let r = calRmssd {
+                    HStack {
+                        Text("Calibration RMSSD")
+                            .font(.subheadline)
+                        Spacer()
+                        Text(String(format: "%.0f ms", r))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(r >= 85 ? Color.green : r >= 65 ? Color.yellow : Color.orange)
+                    }
                 }
                 HStack {
                     Text("HRV Score")
@@ -427,6 +473,26 @@ struct SessionDashboardView: View {
                     Text("\(rmssdSc) / 30")
                         .font(.subheadline.monospacedDigit())
                         .foregroundStyle(rmssdSc >= 20 ? Color.green : rmssdSc >= 12 ? Color.yellow : Color.orange)
+                }
+                if let f = faa {
+                    HStack {
+                        Text("Warmup FAA")
+                            .font(.subheadline)
+                        Spacer()
+                        Text(String(format: "%+.3f", f))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(f < -0.15 ? Color.green : f < 0 ? Color.yellow : Color.orange)
+                    }
+                }
+                if let s = slope {
+                    HStack {
+                        Text("Pre-session Slope")
+                            .font(.subheadline)
+                        Spacer()
+                        Text(String(format: "%.3f", s))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(s >= -1.25 ? Color.green : s >= -1.35 ? Color.yellow : Color.orange)
+                    }
                 }
                 if let d = delta {
                     HStack {
