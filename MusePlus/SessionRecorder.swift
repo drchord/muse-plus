@@ -779,7 +779,8 @@ final class SessionRecorder: ObservableObject {
         if rec.warmupFAAMean != nil || rec.warmupAperiodicSlopeMean != nil || rec.calibrationIndexMean != nil {
             rec.readinessScore = faaPoints + slopePoints + calibPoints
         }
-        Telemetry.recording.notice("readinessScore=\(rec.readinessScore.map(String.init) ?? "nil", privacy: .public) faa=\(faaPoints, privacy: .public) slope=\(slopePoints, privacy: .public) calibIM=\(calibPoints, privacy: .public)")
+        let logRS = rec.readinessScore.map(String.init) ?? "nil"
+        Telemetry.recording.notice("readinessScore=\(logRS, privacy: .public) faa=\(faaPoints, privacy: .public) slope=\(slopePoints, privacy: .public) calibIM=\(calibPoints, privacy: .public)")
 
         // B107 session-level RMSSD mean (main phase).
         let mainRMSSD: [Double] = rec.samples.filter { $0.phase == "main" }.compactMap { $0.rmssd.map { Double($0) } }.filter { $0 > 0 }
