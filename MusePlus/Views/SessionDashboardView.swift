@@ -386,6 +386,7 @@ struct SessionDashboardView: View {
         let faa       = record.warmupFAAMean
         let slope     = record.warmupAperiodicSlopeMean
         let readiness = record.readinessScore
+        let lfhf      = record.lfhfMean
 
         let calibColor: Color = {
             guard let v = calibIM else { return .secondary }
@@ -411,7 +412,7 @@ struct SessionDashboardView: View {
 
         let sub = "Score \(record.physiologicalScore ?? 0)/100 · β\(record.betaZScore ?? 0) HRV\(rmssdSc) Q\(record.coherenceScore ?? 0)"
 
-        let explanation = "Readiness (0–6): warmupFAA + aperiodicSlope + calibIM — predicts deep entry based on n=10 sessions. calibrationIndexMean: warmup EEG index; <−0.30 = low-arousal baseline required for depth. Calibration RMSSD: HRV at session start; ≥85ms correlates with deep entry. Warmup FAA: negative = right-frontal dominant (Sugato's depth direction). Pre-session Slope: 1/f exponent during warmup; less negative = lower initial arousal = better. rmssdDepthDelta: HRV during depth minus shallow (ms)."
+        let explanation = "Readiness (0–6): warmupFAA + aperiodicSlope + calibIM — predicts deep entry based on n=10 sessions. calibrationIndexMean: warmup EEG index; <−0.30 = low-arousal baseline required for depth. Calibration RMSSD: HRV at session start; ≥85ms correlates with deep entry. Warmup FAA: negative = right-frontal dominant (Sugato's depth direction). Pre-session Slope: 1/f exponent during warmup; less negative = lower initial arousal = better. rmssdDepthDelta: HRV during depth minus shallow (ms). LF/HF: sympathovagal balance over main phase; <1.5 = strong parasympathetic (relaxed); target < 1.4."
 
         let action: String? = {
             if let rs = readiness, rs <= 2 {
@@ -421,6 +422,12 @@ struct SessionDashboardView: View {
                 if let v = calibIM, v > -0.10 { reasons.append("calibration index near zero (\(String(format: "%.3f", v))) — aroused at session start") }
                 let reason = reasons.isEmpty ? "multiple warmup markers below threshold" : reasons.joined(separator: "; ")
                 return "Low readiness today (\(rs)/6): \(reason). 3 slow exhale breaths (4s in / 8s out) before tapping start shifts the baseline."
+            }
+            if let rs = readiness, rs >= 3, rs <= 4 {
+                var limit = "check individual rows below for the limiting factor"
+                if let f = faa, f >= 0       { limit = "FAA positive (\(String(format: "+%.2f", f))) — try an extra minute of stillness before starting" }
+                else if let s = slope, s < -1.35 { limit = "pre-session slope steep (\(String(format: "%.2f", s))) — earlier sleep or no screens 30 min prior may help" }
+                return "Mixed readiness (\(rs)/6): one or two warmup indicators below threshold. \(limit)."
             }
             if let v = calibIM, v > -0.10 {
                 return "Calibration index near zero — high baseline arousal at session start. Try 3 minutes of slow exhale breathing before tapping start."
@@ -502,6 +509,16 @@ struct SessionDashboardView: View {
                         Text(String(format: "%+.1f ms", d))
                             .font(.subheadline.monospacedDigit())
                             .foregroundStyle(d > 0 ? Color.green : Color.orange)
+                    }
+                }
+                if let lf = lfhf {
+                    HStack {
+                        Text("LF/HF Ratio")
+                            .font(.subheadline)
+                        Spacer()
+                        Text(String(format: "%.3f", lf))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(lf < 1.40 ? Color.green : lf < 1.60 ? Color.yellow : Color.orange)
                     }
                 }
             }

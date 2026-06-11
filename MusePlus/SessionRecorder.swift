@@ -116,6 +116,9 @@ struct SessionRecord: Codable, Identifiable {
     var marks: [Mark]? = nil
     // Build version that wrote this record. Helps the ECDF rebootstrap exclude legacy data.
     var buildTag: String? = nil  // e.g. "B77+"
+    // B137: buildTag from the previous session. Not persisted (transient — for post-session
+    // narrative only). Nil on first-ever session or crash-recovered records.
+    var previousBuildTag: String? = nil
     // B80 resilience fields — optional, nil in pre-B80 sessions. Backward-compatible.
     var recoveredFromCrash: Bool? = nil          // synthesised from orphan NDJSON after crash
     var ndjsonStateLog:     [String]? = nil      // NDJSON state-transition summary (A: appState lines)
@@ -196,9 +199,13 @@ struct SessionRecord: Codable, Identifiable {
     var warmupAperiodicSlopeMean: Float? = nil
     // B135: composite readiness score 0–6 from the three top warmup predictors of deep-state entry.
     // warmupFAAMean(<-0.15=2,<0=1,≥0=0) + warmupAperiodicSlopeMean(≥-1.25=2,≥-1.35=1,<-1.35=0)
-    // + calibrationIndexMean(<-0.30=2,<-0.10=1,≥-0.10=0). Nil if all three inputs are nil.
-    // ≥5=primed, 3–4=mixed, ≤2=low-readiness. n=10 empirical basis — treat as signal, not gate.
+    // + calibrationIndexMean(<-0.30=2,<-0.10=1,≥-0.10=0). Nil unless ALL three inputs are present
+    // (missing input ≠ unfavorable input; partial scoring would misrepresent one available indicator
+    // as a low composite). ≥5=primed, 3–4=mixed, ≤2=low-readiness. n=10 basis — revisit at n=20.
     var readinessScore: Int? = nil
+    // B137: session-mean LF/HF ratio over main phase. Lower = more parasympathetic (relaxed).
+    // Typical meditation target < 1.5. Nil if fewer than 10 main-phase lfhfRatio samples available.
+    var lfhfMean: Double? = nil
 
     var durationMinutes: Double {
         guard let end = endDate else { return 0 }
@@ -331,8 +338,10 @@ private struct NDJSONFooter: Codable {
     let chiDrift: Float?
     // B132: mean aperiodic slope during warmup phase (first 300s). Nil if <5 valid warmup chi samples.
     let warmupAperiodicSlopeMean: Float?
-    // B135: composite readiness score 0–6. Nil if all three source inputs are nil.
+    // B135: composite readiness score 0–6. Nil unless all three source inputs are present.
     let readinessScore: Int?
+    // B137: main-phase mean LF/HF ratio. Nil if <10 valid main-phase samples.
+    let lfhfMean: Double?
     // B117 F9: one-line formulas for every exported metric. Self-documenting telemetry.
     let metricDefinitions: [String: String]?
 }
@@ -650,7 +659,13 @@ final class SessionRecorder: ObservableObject {
 
     // Extracted from endSession to keep queue.sync closure small enough for Swift type-checker.
     // Must only be called from within the recorder serial queue.
+    // ⚠️ RECURRING BUG (B132, B135, both caught by CI): accessing rec.<field> directly inside a
+    // Telemetry.recording.notice("...\(rec.field, privacy:...)") string interpolation inside this
+    // function causes "escaping autoclosure captures inout parameter" compile error.
+    // FIX: extract to a local `let` BEFORE the Telemetry call. Never pass rec.field directly.
     private func populateSessionBiomarkers(_ rec: inout SessionRecord, reason: String) {
+        // Capture before writing so the caveat fires correctly on build upgrades.
+        rec.previousBuildTag = UserDefaults.standard.string(forKey: "lastSessionBuildTag")
         rec.endDate = Date()
         if lastDeepState && !rec.episodes.isEmpty {
             let t = rec.endDate!.timeIntervalSince(rec.startDate)
@@ -748,6 +763,8 @@ final class SessionRecorder: ObservableObject {
         }
 
         // B100 warmup FAA mean.
+        // Note: faa==0 is filtered as artifact (SDK returns 0 when AF7/AF8 below quality threshold,
+        // not genuine bilateral symmetry). Revisit if SDK behaviour changes.
         let warmupFAASamples: [Float] = rec.samples.filter { $0.phase == "warmup" }.compactMap(\.faa).filter { $0 != 0 }
         if warmupFAASamples.count >= 30 {
             rec.warmupFAAMean = warmupFAASamples.reduce(0, +) / Float(warmupFAASamples.count)
@@ -776,7 +793,10 @@ final class SessionRecorder: ObservableObject {
             if c < -0.10 { return 1 }
             return 0
         }()
-        if rec.warmupFAAMean != nil || rec.warmupAperiodicSlopeMean != nil || rec.calibrationIndexMean != nil {
+        // Require ALL three inputs: missing input (nil) ≠ unfavorable input (0 pts).
+        // With ||, a session with only calibIM available scores 0+0+calibPoints, which reads as
+        // "Low" when really two components were unmeasured. Use && so missing = nil badge not 0/6.
+        if rec.warmupFAAMean != nil, rec.warmupAperiodicSlopeMean != nil, rec.calibrationIndexMean != nil {
             rec.readinessScore = faaPoints + slopePoints + calibPoints
         }
         let logRS = rec.readinessScore.map(String.init) ?? "nil"
@@ -786,6 +806,12 @@ final class SessionRecorder: ObservableObject {
         let mainRMSSD: [Double] = rec.samples.filter { $0.phase == "main" }.compactMap { $0.rmssd.map { Double($0) } }.filter { $0 > 0 }
         if !mainRMSSD.isEmpty {
             rec.rmssd = mainRMSSD.reduce(0, +) / Double(mainRMSSD.count)
+        }
+
+        // B137: session-mean LF/HF ratio (main phase). Requires ≥10 samples for stability.
+        let mainLFHF: [Double] = rec.samples.filter { $0.phase == "main" }.compactMap { $0.lfhfRatio.map { Double($0) } }.filter { $0 > 0 }
+        if mainLFHF.count >= 10 {
+            rec.lfhfMean = mainLFHF.reduce(0, +) / Double(mainLFHF.count)
         }
 
         let scoreComponents = Self.computePhysiologicalScore(rec: rec, frontalGoodFrac: frontalGoodFrac)
@@ -842,6 +868,9 @@ final class SessionRecorder: ObservableObject {
         }
 
         appendFooter(rec: rec, reason: reason)
+        if let tag = rec.buildTag {
+            UserDefaults.standard.set(tag, forKey: "lastSessionBuildTag")
+        }
         closeNDJSONHandle()
 
         DispatchQueue.main.async { [self] in
@@ -1352,6 +1381,7 @@ final class SessionRecorder: ObservableObject {
             chiDrift:                    rec.chiDrift,
             warmupAperiodicSlopeMean:    rec.warmupAperiodicSlopeMean,
             readinessScore:              rec.readinessScore,
+            lfhfMean:                    rec.lfhfMean,
             metricDefinitions:           SessionRecorder.metricDefinitions
         )
         appendLine(footer)
@@ -1728,6 +1758,7 @@ final class SessionRecorder: ObservableObject {
             rec.chiDrift                    = f.chiDrift
             rec.warmupAperiodicSlopeMean    = f.warmupAperiodicSlopeMean
             rec.readinessScore              = f.readinessScore
+            rec.lfhfMean                    = f.lfhfMean
             // B126 fields — previously missing from crash recovery
             rec.alphaThetaMean              = f.alphaThetaMean
             rec.alphaThetaCrossoverCount    = f.alphaThetaCrossoverCount

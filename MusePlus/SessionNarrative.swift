@@ -52,10 +52,10 @@ struct SessionNarrative {
         if attached == false {
             return "Your calibration was incomplete — your headband or your stillness may not have settled in time."
         }
-        // 0.12: conservative threshold below which within-calibration beta variance is
-        // classified as "quiet". Origin undocumented — needs empirical validation against
-        // session corpus before this branch is trusted.
-        if let std = r.calibrationBetaStd, std <= 0.12 {
+        // Threshold below which within-calibration beta variance is classified as "quiet".
+        // Provisional: no documented empirical basis. Treat as signal, not gate. Revisit at n=50.
+        let quietCalibBetaStdThreshold: Float = 0.12
+        if let std = r.calibrationBetaStd, std <= quietCalibBetaStdThreshold {
             return "Your calibration was strong today — your brain quieted well before meditation began."
         }
         return "Your calibration completed normally."
@@ -118,6 +118,11 @@ struct SessionNarrative {
     }
 
     private static func insightLine(_ r: SessionRecord) -> String {
+        // B137: build-change caveat — depth ECDF is calibration-relative and not cross-build
+        // comparable. Fires once on the first session after an app upgrade.
+        if let prev = r.previousBuildTag, let cur = r.buildTag, prev != cur {
+            return "Note: app updated \(prev) → \(cur). Depth scores use a personal ECDF baseline — direct comparison with prior sessions may not be valid until a few sessions recalibrate the baseline."
+        }
         // Priority: gate close-call > low readiness > calibration weak > artifact > steady state
         let deepF = r.deepFraction ?? 0
         if deepF == 0, let m = r.ecdfMax, m >= 0.80 {
@@ -132,11 +137,28 @@ struct SessionNarrative {
                 return "Insight: pre-session brain noise was elevated (slope \(String(format: "%.2f", s))). The brain was not in a low-arousal resting state at start. Earlier sleep and no screens 30 min before may shift this."
             }
         }
+        // B137: mixed readiness with zero depth — one or two warmup indicators misaligned.
+        // Check physioCard for which specific factor was limiting.
+        if deepF == 0, let rs = r.readinessScore, rs >= 3, rs <= 4 {
+            let limit: String
+            if let f = r.warmupFAAMean, f >= 0 {
+                limit = "FAA was positive (\(String(format: "+%.2f", f))) — the key factor to shift"
+            } else if let s = r.warmupAperiodicSlopeMean, s < -1.35 {
+                limit = "pre-session slope was steep (\(String(format: "%.2f", s))) — brain noise floor was high"
+            } else {
+                limit = "check physioCard for the limiting factor"
+            }
+            return "Insight: mixed readiness (\(rs)/6) — conditions were partially aligned. \(limit). One extra minute of slow exhale breathing before starting often shifts the balance."
+        }
         if r.calibrationBetaAttached == false {
             return "Insight: settle for one extra minute before tapping start so calibration can lock."
         }
         if let spikes = r.signalQualityMeanSpikes, spikes >= 20 {
             return "Insight: reposition the headband and check ear contact next session."
+        }
+        // B137: shallow session with elevated beta — name the limiter.
+        if deepF < 0.15, let beta = r.betaRelMean, beta > 0.24 {
+            return "Insight: beta was elevated (\(String(format: "%.3f", beta))) — active mental processing may have been the ceiling. Try a body scan or open-monitoring practice tomorrow to reduce directed attention."
         }
         if deepF > 0.30 {
             // B135: note high readiness when depth is confirmed

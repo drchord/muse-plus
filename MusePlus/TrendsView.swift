@@ -24,6 +24,8 @@ private struct TrendSession: Identifiable {
     let calibrationRmssd:          Double?
     let ecdfP90:                   Float?
     let readinessScore:            Int?
+    // B137
+    let lfhfMean:                  Double?
 }
 
 // Used by thresholdSection Chart — anonymous tuples don't support key-path id in Swift.
@@ -57,6 +59,8 @@ private struct TrendRecord: Codable {
     var calibrationRmssd:          Double? = nil
     var ecdfP90:                   Float?  = nil
     var readinessScore:            Int?    = nil
+    // B137
+    var lfhfMean:                  Double? = nil
 }
 
 struct TrendsView: View {
@@ -128,6 +132,9 @@ struct TrendsView: View {
                     }
                     if filteredSessions.contains(where: { $0.readinessScore != nil }) {
                         readinessScoreSection
+                    }
+                    if filteredSessions.contains(where: { $0.lfhfMean != nil }) {
+                        lfhfSection
                     }
                     statsSection
                 }
@@ -458,6 +465,29 @@ struct TrendsView: View {
         }
     }
 
+    private var lfhfSection: some View {
+        Section("LF/HF Ratio (Autonomic Balance)") {
+            Chart(filteredSessions.filter { $0.lfhfMean != nil }, id: \.id) { s in
+                LineMark(x: .value("Date", s.date), y: .value("LF/HF", s.lfhfMean!))
+                    .foregroundStyle(Color.teal)
+                PointMark(x: .value("Date", s.date), y: .value("LF/HF", s.lfhfMean!))
+                    .foregroundStyle(s.lfhfMean! < 1.40 ? Color.green
+                                   : s.lfhfMean! < 1.60 ? Color.yellow : Color.orange)
+                    .symbolSize(40)
+            }
+            .chartYScale(domain: 0.8...2.8)
+            .chartYAxis {
+                AxisMarks(values: [1.0, 1.4, 1.6, 2.0, 2.5]) { v in
+                    AxisGridLine()
+                    AxisValueLabel()
+                }
+            }
+            .frame(height: 140)
+            Text("Main-phase mean LF/HF. <1.4 (green) = strong parasympathetic; 1.4–1.6 (yellow) = moderate; >1.6 (orange) = elevated sympathetic. Target: stay below 1.4 during deep sessions. Added B137.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - Data loading
 
     private func loadSessions() async {
@@ -504,7 +534,8 @@ struct TrendsView: View {
                 warmupAperiodicSlopeMean: rec.warmupAperiodicSlopeMean,
                 calibrationRmssd:         rec.calibrationRmssd,
                 ecdfP90:                  rec.ecdfP90,
-                readinessScore:           rec.readinessScore
+                readinessScore:           rec.readinessScore,
+                lfhfMean:                 rec.lfhfMean
             ))
         }
 
