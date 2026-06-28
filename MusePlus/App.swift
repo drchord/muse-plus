@@ -850,14 +850,17 @@ final class Probe: ObservableObject {
                         DispatchQueue.main.async { [weak self] in
                             guard let self else { return }
                             ChimeEngine.shared.playApproachZone()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                ChimeEngine.shared.speak("Approaching.")
+                            }
                             self.recordEvent(kind: "approach-zone",
                                              detail: String(format: "ecdf=%.2f", self.gate.smoothedDisplay))
                             // B117 C5
                             SessionRecorder.shared.recordCoach(
                                 trigger: "approach-zone",
                                 diagnosis: "near-gate",
-                                intervention: "approach-bowl",
-                                speechText: nil,
+                                intervention: "approach-bowl+speech",
+                                speechText: "Approaching.",
                                 snapshot: self.coachSnapshot()
                             )
                         }
@@ -926,7 +929,7 @@ final class Probe: ObservableObject {
                         }
                         // Spoken cue after nudge chime and its 3.8s unduck fully complete (5.5s buffer).
                         DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) { [weak self] in
-                            let text = "Return gently. Soften your gaze. Let it find you."
+                            let text = "Leaving."
                             ChimeEngine.shared.speak(text)
                             // B117 C5
                             if let self {
@@ -1333,34 +1336,13 @@ final class Probe: ObservableObject {
         )
     }
 
-    // B129: state-contingent stall coaching. Selects message based on live EEG/HR state.
+    // B138: rewritten. No state commentary, no approaching/leaving language.
     private func stallMessage(atMinute minute: Int, snapshot: CoachStateSnapshot) -> String {
-        let ecdf    = snapshot.ecdfDisplay ?? 0
-        let alpha   = snapshot.alpha       ?? 0
-        let theta   = snapshot.theta       ?? 0
-        let thresh  = gate.enterThresholdEcdf
-        let near    = ecdf >= 0.75 * thresh
-        let thetaUp = theta > alpha
-
         switch minute {
-        case 6:
-            if near    { return "You're very close — release the watching and let the depth come to you." }
-            if thetaUp { return "Your brain is already moving in the right direction. Soften the effort and stay." }
-            return "Soften your focus. Stop trying to meditate."
-        case 10:
-            if let hr = snapshot.heartRateBPM, hr > 75 {
-                return "Your heart is still active. Follow your breath — in for five seconds, out for five."
-            }
-            if alpha > theta * 1.5 {
-                return "Alpha is leading. Slow the breath to let theta rise — in for five seconds, out for five."
-            }
-            return "Follow your breath. Breathe in slowly for five seconds, then out for five."
-        case 15:
-            if near    { return "You've been at the edge for fifteen minutes. Stop measuring — just breathe and rest." }
-            if thetaUp { return "Your brain is reaching for depth but can't hold it. Let go of the effort — rest." }
-            return "Let go of trying. You are already here. Just rest."
-        default:
-            return "Stay with your practice."
+        case 6:  return "Settle back. Trust the breath."
+        case 10: return "Slow the breath. In for five, out for five."
+        case 15: return "Nothing to do. Just rest."
+        default: return "Stay with the breath."
         }
     }
 
