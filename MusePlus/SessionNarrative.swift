@@ -150,6 +150,14 @@ struct SessionNarrative {
             }
             return "Insight: mixed readiness (\(rs)/6) — conditions were partially aligned. \(limit). One extra minute of slow exhale breathing before starting often shifts the balance."
         }
+        // B138: oscillation-blocked session — calibIM and readiness were ready but A/T crossover
+        // prevented sustained gate lock-in. n=1 trigger in dataset (Jun 25 2026); provisional.
+        if deepF == 0,
+           let rs = r.readinessScore, rs >= 4,
+           let cal = r.calibrationIndexMean, cal < -0.30,
+           let xo = r.alphaThetaCrossoverCount, xo > 100 {
+            return "Insight: conditions were structurally ready (calibIM \(String(format: "%.2f", cal)), readiness \(rs)/6) but the alpha-theta signal oscillated \(xo) times — the brain couldn't lock into either state long enough to sustain the gate. No action needed; this resolves on its own."
+        }
         if r.calibrationBetaAttached == false {
             return "Insight: settle for one extra minute before tapping start so calibration can lock."
         }

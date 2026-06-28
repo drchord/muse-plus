@@ -239,6 +239,7 @@ final class Probe: ObservableObject {
     // B99: warmup FAA readiness + induction-stall alert state
     @Published var warmupFAAReadiness: WarmupFAAReadiness? = nil
     @Published var showInductionStall: Bool = false
+    @Published var showContactWarning: Bool = false
     // B129: pre-session battery warning
     @Published var batteryWarning: BatteryWarning? = nil
     private var batteryCheckedThisSession = false
@@ -997,6 +998,18 @@ final class Probe: ObservableObject {
                 self.inductionStallTimer900?.cancel()
                 self.approachWindowCount   = 0
                 self.lastApproachChimeDate = .distantPast
+                // B138: warn if TP9+TP10 had excessive contact changes during warmup.
+                // Threshold 50 is provisional — tune after 2-3 trigger sessions.
+                let tp9  = self.sessionDiagCounters.contactStateChanges["TP9",  default: 0]
+                let tp10 = self.sessionDiagCounters.contactStateChanges["TP10", default: 0]
+                if tp9 + tp10 > 50 {
+                    self.recordEvent(kind: "contact-warning",
+                                     detail: "warmup-tp9=\(tp9)-tp10=\(tp10)")
+                    withAnimation { self.showContactWarning = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                        withAnimation { self?.showContactWarning = false }
+                    }
+                }
                 let stallWork = DispatchWorkItem { [weak self] in
                     // Runs on main (via DispatchQueue.main.asyncAfter below) — no inner dispatch needed.
                     guard let self,
@@ -2241,6 +2254,13 @@ private struct MeditationView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .overlay(alignment: .top) {
+            if probe.showContactWarning {
+                ContactWarningBannerView()
+                    .padding(.top, 100)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
         // B129: pre-session battery warning alert
         .alert(
             probe.batteryWarning?.title ?? "",
@@ -2279,6 +2299,22 @@ private struct WarmupFAABannerView: View {
         }
         .font(.subheadline.weight(.medium))
         .foregroundStyle(readiness.color)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+    }
+}
+
+// MARK: - Contact Warning Banner
+
+private struct ContactWarningBannerView: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "ear.trianglebadge.exclamationmark")
+            Text("Ear sensors losing contact — reseat the headband")
+        }
+        .font(.subheadline.weight(.medium))
+        .foregroundStyle(.orange)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())

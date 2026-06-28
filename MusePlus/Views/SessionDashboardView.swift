@@ -397,22 +397,24 @@ struct SessionDashboardView: View {
 
         let readinessLabel: String = readiness.map {
             switch $0 {
-            case 5...6: return "Primed (\($0)/6)"
+            case 6:    return "Primed (6/6)"
+            case 5:    return "Approaching (5/6)"
             case 3...4: return "Mixed (\($0)/6)"
-            default:    return "Low (\($0)/6)"
+            default:   return "Low (\($0)/6)"
             }
         } ?? "—"
         let readinessColor: Color = readiness.map {
             switch $0 {
-            case 5...6: return .green
+            case 6:    return .green
+            case 5:    return Color(red: 0.4, green: 0.8, blue: 0.6)
             case 3...4: return .yellow
-            default:    return .orange
+            default:   return .orange
             }
         } ?? .secondary
 
         let sub = "Score \(record.physiologicalScore ?? 0)/100 · β\(record.betaZScore ?? 0) HRV\(rmssdSc) Q\(record.coherenceScore ?? 0)"
 
-        let explanation = "Readiness (0–6): warmupFAA + aperiodicSlope + calibIM — predicts deep entry based on n=10 sessions. calibrationIndexMean: warmup EEG index; <−0.30 = low-arousal baseline required for depth. Calibration RMSSD: HRV at session start; ≥85ms correlates with deep entry. Warmup FAA: negative = right-frontal dominant (Sugato's depth direction). Pre-session Slope: 1/f exponent during warmup; less negative = lower initial arousal = better. rmssdDepthDelta: HRV during depth minus shallow (ms). LF/HF: sympathovagal balance over main phase; <1.5 = strong parasympathetic (relaxed); target < 1.4."
+        let explanation = "Readiness (0–6): warmupFAA + aperiodicSlope + calibIM — predicts deep entry based on n=22 sessions (Jun 2026). Primed=6 only (2/3 on depth); Approaching=5 (3/5 on depth — necessary but not sufficient). calibrationIndexMean: warmup EEG index; <−0.30 = low-arousal baseline required for depth. Calibration RMSSD: HRV at session start; ≥85ms correlates with deep entry. Warmup FAA: negative = right-frontal dominant (Sugato's depth direction). Pre-session Slope: 1/f exponent during warmup; less negative = lower initial arousal = better. rmssdDepthDelta: HRV during depth minus shallow (ms). LF/HF: sympathovagal balance over main phase; <1.5 = strong parasympathetic (relaxed); target < 1.4."
 
         let action: String? = {
             if let rs = readiness, rs <= 2 {
@@ -422,6 +424,9 @@ struct SessionDashboardView: View {
                 if let v = calibIM, v > -0.10 { reasons.append("calibration index near zero (\(String(format: "%.3f", v))) — aroused at session start") }
                 let reason = reasons.isEmpty ? "multiple warmup markers below threshold" : reasons.joined(separator: "; ")
                 return "Low readiness today (\(rs)/6): \(reason). 3 slow exhale breaths (4s in / 8s out) before tapping start shifts the baseline."
+            }
+            if let rs = readiness, rs == 5 {
+                return "Approaching readiness (5/6): one warmup indicator is misaligned. Check the rows below — fix the weakest link next session."
             }
             if let rs = readiness, rs >= 3, rs <= 4 {
                 var limit = "check individual rows below for the limiting factor"
